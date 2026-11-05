@@ -161,20 +161,32 @@ describe('migration sequence contiguity', () => {
 });
 
 describe('core migrations', () => {
-  it('1: a fresh database gets every core migration: 60 tables, two expand migrations', async () => {
+  it('1: a fresh database gets every core migration: 75 tables, four expand migrations, the login handoff migration, the npm build outcome migration, the registry policy migration and the notifications migration', async () => {
     const sources = await loadCore();
     const ids = sources.map((source) => source.id);
 
     const result = await migrate(opened.executor, sources, { holder: 'core-migrations-test' });
 
-    expect(ids).toEqual(['core:0001_init', 'core:0002_audit']);
+    expect(ids).toEqual([
+      'core:0001_init',
+      'core:0002_npm_publish',
+      'core:0003_npm_identity',
+      'core:0004_source_revision',
+      'core:0005_package_settings_revision',
+      'core:0006_npm_login_handoff',
+      'core:0007_npm_vcs_build_outcomes',
+      'core:0008_registry_policy',
+      'core:0009_npm_notifications',
+      'core:0010_source_discovery_rules',
+      'core:0011_audit',
+    ]);
     const migrationFiles = readdirSync(migrationsUrl)
       .filter((name) => name.endsWith('.sql'))
       .sort();
     expect(migrationFiles.length).toBeGreaterThan(0);
     expect(ids.at(-1)).toBe(`core:${migrationFiles.at(-1)?.slice(0, -'.sql'.length)}`);
     expect(result.applied).toEqual(ids);
-    expect(await countTables()).toBe(60);
+    expect(await countTables()).toBe(75);
     expect(await tableNames()).toEqual(
       expect.arrayContaining(['local_login', 'identity_provider_binding']),
     );
@@ -329,7 +341,10 @@ describe('core migrations', () => {
             'package_ecosystem_matches_source_update', 'source_ecosystem_locked_with_packages',
             'audit_ledger_append_only_update', 'audit_ledger_append_only_delete', 'audit_ledger_insert_visible', 'audit_ledger_capacity_insert',
             'audit_sink_body_version_monotonic', 'audit_sink_body_version_bump',
-            'organization_audit_chain')`),
+            'organization_audit_chain',
+
+        'token_trusted_publisher_insert', 'token_trusted_publisher_update',
+        'trusted_publisher_token_org_update')`),
       ).toEqual([]);
     });
 

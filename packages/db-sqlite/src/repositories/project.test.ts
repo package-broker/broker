@@ -51,6 +51,7 @@ const S_IDLE = uid('S7');
 
 function roleIds(prefix: string): Record<DefaultRoleKey, string> {
   return {
+    organization_publisher: uid(`${prefix}RP`),
     organization_admin: uid(`${prefix}RA`),
     organization_auditor: uid(`${prefix}RU`),
     project_owner: uid(`${prefix}RO`),

@@ -65,6 +65,8 @@ const AUTH_JOBS = [
   'core:import-verify:v1',
   'core:import-apply:v1',
   'core:import-rollback:v1',
+  'core:oidc-replay-expire:v1',
+  'core:npm-login-expire:v2',
   'core:pat-offboarding:v1',
   'core:pat-offboarding-sweep:v1',
 ];
@@ -918,7 +920,14 @@ describe('Node package-sync wiring', () => {
       [
         ...AUDIT,
         ...AUTH_JOBS,
+        'core:discovery-rules:v1',
+        'core:discovery-rule:v1',
+        'core:publish-approval-expire:v1',
+        'core:publish-scan:v1',
+        'core:publish-scan-sweep:v1',
         SYNC,
+        'core:npm-vcs-build:v1',
+        'core:package-access-expire:v1',
         'core:source-sync:v1',
         'core:source-poll:v1',
         'core:vulnerability-sync:v1',
@@ -929,7 +938,17 @@ describe('Node package-sync wiring', () => {
   it('omits package-sync without registry options', async () => {
     const kernel = await boot(remote('npm', 1).transport, false);
     expect(kernel.registration.jobs.map((job) => job.qualifiedName).sort()).toEqual(
-      [...AUDIT, ...AUTH_JOBS, 'core:vulnerability-sync:v1'].sort(),
+      [
+        ...AUDIT,
+        ...AUTH_JOBS,
+        'core:discovery-rules:v1',
+        'core:discovery-rule:v1',
+        'core:publish-approval-expire:v1',
+        'core:publish-scan:v1',
+        'core:publish-scan-sweep:v1',
+        'core:package-access-expire:v1',
+        'core:vulnerability-sync:v1',
+      ].sort(),
     );
     const bare = createNodeServer([auditTrail()]);
     try {

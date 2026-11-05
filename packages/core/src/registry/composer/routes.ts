@@ -11,6 +11,12 @@ import type { DistService } from '../dist-service.js';
 import { parseComposerDistPath } from './dist-url.js';
 import { deferOf } from '../defer.js';
 import { renderComposerP2, renderPackagesJson } from './render.js';
+import type { ProjectActor } from '../../authz/project-actor.js';
+import { createPolicyPackageAccess } from '../../catalogue/policy-access.js';
+import type { ReadKind } from '../../plugin.js';
+import { governNotFound, policyErrorResponse } from '../policy/http.js';
+import type { PolicyServing } from '../policy/serving.js';
+import type { RegistryReadSession } from '../policy/session.js';
 
 export interface ComposerRouteDeps {
   readonly access: PackageAccess;
@@ -19,6 +25,13 @@ export interface ComposerRouteDeps {
   readonly clock: RepresentationClock;
   readonly publicUrl: string;
   readonly cache?: ScopedCache;
+  /** Present only when `registry.policy.enabled`; absent keeps every response unchanged. */
+  readonly policy?: PolicyServing;
+}
+
+interface Governed {
+  readonly session: RegistryReadSession;
+  readonly access: PackageAccess;
 }
 
 const FILE = /^([^~]+?)(~dev)?\.json$/;
@@ -52,6 +65,8 @@ async function quietOnAbort(
     return await work();
   } catch (error) {
     if (ctx.request.signal.aborted) return unavailable(ctx.requestId, retryAfterSeconds);
+    const refused = policyErrorResponse(error, ctx.requestId);
+    if (refused !== null) return refused;
     throw error;
   }
 }
@@ -72,6 +87,12 @@ function p2File(file: string | undefined): { name: string; dev: boolean } | null
 }
 
 export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinition[] {
+  function govern(ctx: RequestContext, actor: ProjectActor, kind: ReadKind): Governed | null {
+    if (deps.policy === undefined) return null;
+    const session = deps.policy.open(ctx, actor, 'composer', kind);
+    return { session, access: createPolicyPackageAccess(deps.access, session) };
+  }
+
   const packagesJson: RouteDefinition = {
     method: 'GET',
     path: '/:project/packages.json',
@@ -85,16 +106,19 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       if (actor === null) return notFound(ctx.requestId);
       return quietOnAbort(
         ctx,
-        async () =>
-          document(
+        async () => {
+          const governed = govern(ctx, actor, 'listing');
+          return document(
             await renderPackagesJson({
               requestId: ctx.requestId,
               actor,
-              access: deps.access,
+              access: governed?.access ?? deps.access,
               projectSlug: ctx.params['project'] ?? '',
+              ...(governed === null ? {} : { policy: { session: governed.session } }),
             }),
             ctx.requestId,
-          ),
+          );
+        },
         BUSY_RETRY_AFTER_SECONDS,
       );
     },
@@ -122,6 +146,8 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       return quietOnAbort(
         ctx,
         async () => {
+          const governed = govern(ctx, actor, 'metadata');
+          await governed?.session.request(key);
           const filled = await deps.fill.ensure(actor, {
             ecosystem: 'composer',
             key,
@@ -143,7 +169,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
             await renderComposerP2({
               requestId: ctx.requestId,
               actor,
-              access: deps.access,
+              access: governed?.access ?? deps.access,
               projectSlug: ctx.params['project'] ?? '',
               name: key,
               publicUrl: deps.publicUrl,
@@ -151,6 +177,7 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
               clock: deps.clock,
               dev: parsed.dev,
               ...(deps.cache === undefined ? {} : { cache: deps.cache }),
+              ...(governed === null ? {} : { policy: { session: governed.session } }),
             }),
             ctx.requestId,
             filled.kind === 'serve' && filled.stale,
@@ -186,33 +213,40 @@ export function composerRoutes(deps: ComposerRouteDeps): readonly RouteDefinitio
       ) {
         return notFound(ctx.requestId);
       }
+      const serveArchive = async (governed: Governed | null): Promise<Response> => {
+        await governed?.session.request(resolved.pkg.key);
+        const result = await deps.dist.serve(
+          actor,
+          {
+            ecosystem: 'composer',
+            key: resolved.pkg.key,
+            versionId: ref.versionId,
+            revision: ref.revision,
+          },
+          {
+            signal: ctx.request.signal,
+            ...(ctx.ports.platform === undefined
+              ? {}
+              : { observability: ctx.ports.platform.observability }),
+            ...(governed === null ? {} : { policy: governed }),
+          },
+        );
+        if (result.kind === 'busy') return unavailable(ctx.requestId, result.retryAfterSeconds);
+        if (result.kind === 'refused') return apiError('bad_gateway', ctx.requestId);
+        if (result.kind === 'not_found') return notFound(ctx.requestId);
+        if (result.kind === 'gone') return apiError('gone', ctx.requestId);
+        if (distExtension(result.headers) !== ref.type) {
+          void result.body.cancel().catch(() => undefined);
+          return notFound(ctx.requestId);
+        }
+        return new Response(result.body, { status: 200, headers: result.headers });
+      };
       return quietOnAbort(
         ctx,
         async () => {
-          const result = await deps.dist.serve(
-            actor,
-            {
-              ecosystem: 'composer',
-              key: resolved.pkg.key,
-              versionId: ref.versionId,
-              revision: ref.revision,
-            },
-            {
-              signal: ctx.request.signal,
-              ...(ctx.ports.platform === undefined
-                ? {}
-                : { observability: ctx.ports.platform.observability }),
-            },
-          );
-          if (result.kind === 'busy') return unavailable(ctx.requestId, result.retryAfterSeconds);
-          if (result.kind === 'refused') return apiError('bad_gateway', ctx.requestId);
-          if (result.kind === 'not_found') return notFound(ctx.requestId);
-          if (result.kind === 'gone') return apiError('gone', ctx.requestId);
-          if (distExtension(result.headers) !== ref.type) {
-            void result.body.cancel().catch(() => undefined);
-            return notFound(ctx.requestId);
-          }
-          return new Response(result.body, { status: 200, headers: result.headers });
+          const governed = govern(ctx, actor, 'dist');
+          const response = await serveArchive(governed);
+          return governed === null ? response : governNotFound(response);
         },
         BUSY_RETRY_AFTER_SECONDS,
       );

@@ -34,9 +34,11 @@ describe('hash routes', () => {
     for (const route of [...PAGE_ROUTES, 'login', 'setup']) expect(ROUTES).toContain(route);
   });
 
-  it('maps every page route to a component', () => {
+  it('loads every page route component on demand', async () => {
     for (const route of PAGE_ROUTES) {
-      expect(typeof PAGES[route as keyof typeof PAGES]).toBe('function');
+      const pending = PAGES[route as keyof typeof PAGES]();
+      expect(pending).toBeInstanceOf(Promise);
+      expect(typeof (await pending)).toBe('function');
       expect(resolveRoute(`#/${route}`, true).route).toBe(route);
     }
   });
@@ -125,7 +127,9 @@ describe('shell markup', () => {
       'Import',
     ]);
     expect(nav.match(/<li>/g)).toHaveLength(7);
-    for (const route of PAGE_ROUTES) expect(nav).toContain(`href="#/${route}?project=acme"`);
+    expect(nav).not.toContain('Notifications');
+    for (const route of PAGE_ROUTES.filter((route) => route !== 'notifications'))
+      expect(nav).toContain(`href="#/${route}?project=acme"`);
     expect(html.indexOf('</nav>')).toBeLessThan(html.indexOf('<select'));
     expect(html.indexOf('<select')).toBeLessThan(html.indexOf('>Account</button>'));
   });
@@ -336,6 +340,9 @@ describe('anonymous entry', () => {
         createElement(App, { client: { request } as unknown as AuthClient }),
       );
       expect(html).toContain(hash === '#/setup' ? 'First-run setup' : 'Sign in');
+      expect(html).toContain('Loading sign-in options');
+      expect(html).not.toContain('name="token"');
+      expect(html).not.toContain('name="password"');
       expect(html).not.toContain('Loading…');
       expect(request).not.toHaveBeenCalled();
     },

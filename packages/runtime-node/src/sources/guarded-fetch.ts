@@ -14,6 +14,8 @@ import {
 } from './dns-guard.js';
 
 export interface GuardedFetchOptions extends DnsGuardOptions {
+  /** Bounds DNS, TCP and TLS establishment, independently of the caller total deadline. */
+  readonly connectTimeoutMs?: number;
   readonly tls?: { readonly ca?: string | Buffer };
 }
 
@@ -144,13 +146,13 @@ export function createGuardedFetch(
   policy: OutboundPolicy,
   options: GuardedFetchOptions = {},
 ): FetchLike {
-  const { tls, ...guardOptions } = options;
+  const { tls, connectTimeoutMs, ...guardOptions } = options;
   const guard = createDnsGuard(policy, guardOptions);
   return async (input, init) => {
     const normalized = await normalizeRequest(input, init);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
     if (normalized.url.protocol !== 'https:') throw fetchFailed(new DnsGuardError('scheme'));
-    return sendGuardedRequest(normalized, signal, guard, tls);
+    return sendGuardedRequest(normalized, signal, guard, tls, connectTimeoutMs);
   };
 }
 
@@ -158,13 +160,13 @@ export function createAuditGuardedFetch(
   policy: OutboundPolicy,
   options: GuardedFetchOptions & { readonly allowPrivate?: boolean } = {},
 ): FetchLike {
-  const { tls, ...guardOptions } = options;
+  const { tls, connectTimeoutMs, ...guardOptions } = options;
   const guard = createAuditDnsGuard(policy, guardOptions);
   return async (input, init) => {
     const normalized = await normalizeRequest(input, init);
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
     validateAuditScheme(normalized.url, options.allowPrivate ?? false);
-    return sendGuardedRequest(normalized, signal, guard, tls);
+    return sendGuardedRequest(normalized, signal, guard, tls, connectTimeoutMs);
   };
 }
 
@@ -178,6 +180,7 @@ async function sendGuardedRequest(
   signal: AbortSignal | null | undefined,
   guard: DnsGuard,
   tls: GuardedFetchOptions['tls'],
+  connectTimeoutMs: number | undefined,
 ): Promise<Response> {
   if (signal?.aborted) throw signal.reason;
   const secure = url.protocol === 'https:';
@@ -226,6 +229,17 @@ async function sendGuardedRequest(
       ...(secure ? { servername: literal ? '' : servername } : {}),
       ...(secure && tls?.ca !== undefined ? { ca: tls.ca } : {}),
     });
+    const connectTimer =
+      connectTimeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            req.destroy(new TransportError('CONNECT_TIMEOUT'));
+          }, connectTimeoutMs);
+    const clearConnectTimer = () => clearTimeout(connectTimer);
+    req.once('socket', (socket) =>
+      socket.once(secure ? 'secureConnect' : 'connect', clearConnectTimer),
+    );
+    req.once('close', clearConnectTimer);
     let incoming: IncomingMessage | undefined;
 
     const abortReason = (): Error =>

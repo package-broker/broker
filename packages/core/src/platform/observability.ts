@@ -33,6 +33,8 @@ export interface SafeLogRecord {
   readonly method?: string;
   readonly status?: number;
   readonly duration_ms?: number;
+  readonly publish_tarball_bytes?: number;
+  readonly blob_max_bytes?: number;
   readonly project_id?: string | null;
   readonly token_id?: string | null;
   readonly user_id?: string | null;
@@ -67,6 +69,7 @@ export interface SafeLogRecord {
   readonly redirects?: number;
   readonly cross_origin?: boolean;
   readonly outcome?: string;
+  readonly stage?: 'list' | 'discard';
   readonly requested_names?: number;
   readonly forwarded_names?: number;
   readonly advisories?: number;
@@ -89,6 +92,8 @@ export const LOG_FIELDS = [
   'method',
   'status',
   'duration_ms',
+  'publish_tarball_bytes',
+  'blob_max_bytes',
   'project_id',
   'token_id',
   'user_id',
@@ -116,6 +121,7 @@ export const LOG_FIELDS = [
   'redirects',
   'cross_origin',
   'outcome',
+  'stage',
   'requested_names',
   'forwarded_names',
   'advisories',
@@ -351,6 +357,7 @@ const LABEL_KEYS = new Set([
   'runtime',
   'signal',
   'outcome',
+  'stage',
   'kind',
   'adapter',
   'provider',
@@ -389,6 +396,8 @@ const packageKey: FieldCheck = (v) =>
 const FIELD_CHECKS: Readonly<
   Record<Exclude<LogField, 'level' | 'event' | 'error_name'>, FieldCheck>
 > = {
+  publish_tarball_bytes: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
+  blob_max_bytes: (v) => isInt(v, 1, Number.MAX_SAFE_INTEGER),
   timestamp: matches(TIMESTAMP),
   service: (v) => v === 'package-broker',
   deployment_id: matches(DEPLOYMENT_ID),
@@ -434,6 +443,7 @@ const FIELD_CHECKS: Readonly<
   redirects: (v) => isInt(v, 0, 5),
   cross_origin: (v) => typeof v === 'boolean',
   outcome: matches(CODE),
+  stage: (v) => v === 'list' || v === 'discard',
   requested_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   forwarded_names: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
   advisories: (v) => isInt(v, 0, Number.MAX_SAFE_INTEGER),
@@ -542,6 +552,8 @@ export function metricLabelValueAllowed(
   switch (key) {
     case 'code':
       return AUDIT_CODES.has(value);
+    case 'stage':
+      return value === 'list' || value === 'discard';
     case 'detail':
       return Object.hasOwn(FINISH_FAILURE_DETAIL_LABELS, value);
     case 'method':

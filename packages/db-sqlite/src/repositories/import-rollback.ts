@@ -14,6 +14,7 @@ import type {
   ImportRollbackOutcome,
   ImportRollbackStore,
 } from '@package-broker/core/import/rollback';
+import { IMPORT_PUBLISHED_AT_BASES } from '@package-broker/core/catalogue/version-rules';
 import { IMPORT_RUN_JOB } from '@package-broker/core/import/run-service';
 import type { OrgContext, SqlExecutor, SqlValue, Statement } from '@package-broker/core/db/port';
 import { assertGuard, compile, db, type Guard, type ProtectedHolderProvider } from '../kysely.js';
@@ -40,7 +41,7 @@ interface RollbackEntity {
 }
 
 const LOOKUP_CHUNK = 40;
-const BASES: ReadonlySet<unknown> = new Set(['source_release', 'packagist_added', 'import_time']);
+const BASES: ReadonlySet<unknown> = new Set(IMPORT_PUBLISHED_AT_BASES);
 const RUN_STATES = "('failed', 'applied', 'verifying', 'verified')";
 const SOURCE_DOMAIN = [
   'name',
@@ -105,6 +106,14 @@ export const ROLLBACK_ENTITIES: Readonly<Record<string, RollbackEntity>> = {
       ['token', 'project_id'],
       ['token_project', 'project_id'],
       ['job', 'project_id'],
+      ['publish_approval', 'route_project_id'],
+      ['package_access_request', 'project_id'],
+      ['npm_login_session', 'project_id'],
+      ['registry_policy_rule', 'project_id'],
+      ['notification_endpoint', 'project_id'],
+      ['notification_event', 'project_id'],
+      ['notification_delivery', 'project_id'],
+      ['notification_attempt', 'project_id'],
     ],
   },
   role: {
@@ -131,6 +140,7 @@ export const ROLLBACK_ENTITIES: Readonly<Record<string, RollbackEntity>> = {
       ['project_package_pattern', 'source_id'],
       ['webhook_delivery', 'source_id'],
       ['ingest_session', 'source_id'],
+      ['publish_approval', 'source_id'],
     ],
   },
   registered_name: {

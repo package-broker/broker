@@ -16,6 +16,7 @@ import { createBlobLifecycle } from '@package-broker/core/platform/blob-lifecycl
 import { noopObservability } from '@package-broker/core/platform/observability';
 import {
   describeBlobContract,
+  describeBlobStagingContract,
   describeBlobLifecycleContract,
   requireBlobLifecycleFixtureHooks,
   type BlobLifecycleFixture,
@@ -79,16 +80,23 @@ async function s3Fixture(): Promise<BlobLifecycleFixture> {
     return fake.fetch(request);
   };
 
-  const byteStore = createS3ByteStore({
-    endpoint: S3_FAKE_ENDPOINT,
-    region: REGION,
-    bucket: BUCKET,
-    ...S3_FAKE_DEFAULT_CREDENTIALS,
-    pathStyle: true,
-    fetch: fakeFetch,
-  });
+  const byteStore = {
+    ...createS3ByteStore({
+      endpoint: S3_FAKE_ENDPOINT,
+      region: REGION,
+      bucket: BUCKET,
+      ...S3_FAKE_DEFAULT_CREDENTIALS,
+      pathStyle: true,
+      fetch: fakeFetch,
+    }),
+  };
 
   const guarded: ByteStore = {
+    putStaged: (...args) => byteStore.putStaged(...args),
+    openStaged: (...args) => byteStore.openStaged(...args),
+    promote: (...args) => byteStore.promote(...args),
+    discardStaged: (...args) => byteStore.discardStaged(...args),
+    listStaged: (...args) => byteStore.listStaged(...args),
     putVerified: (key, body, input) => byteStore.putVerified(key, body, input),
     async get(key, range) {
       if (state.failRead) {
@@ -170,6 +178,7 @@ async function s3Fixture(): Promise<BlobLifecycleFixture> {
       observability: noopObservability,
     }),
     inspect: (ctx, key) => repository.inspect(ctx, key),
+    byteStore,
     store: createBlobStore(guarded, metadata, {
       admission: createBlobUploadAdmission(),
       idleTimeoutMs: 2_000,
@@ -422,3 +431,5 @@ describe('s3 contract wiring', () => {
     expect(typeof fixture.failNextPublish).toBe('function');
   });
 });
+
+describeBlobStagingContract('s3Fixture', s3Fixture);

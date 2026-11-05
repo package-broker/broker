@@ -47,7 +47,7 @@ If you are changing something in the first column, read its role in the second f
 - Load code at run time. Plugins are composed at build time.
 - Log or return secrets, tokens, cookies or credential-bearing URLs.
 - Log or return e-mail addresses of accounts and identities the broker holds.
-  Exception: the organization users and grants admin list routes may return account e-mails only to callers holding organization admin authority.
+  Exception: the organization users admin list may return account e-mails only to callers holding organization admin authority, and grant lists may return the e-mail or group value a grant names to human sessions holding grants-read authority for that scope.
 - Edit generated build manifests or `dist/`.
 - Edit tests to make them pass.
 - Commit without the `Signed-off-by:` trailer (`git commit -s`).
@@ -76,4 +76,5 @@ Focused run for one package: `pnpm vitest run --project <package>`, for example 
 
 - Pull request titles follow Conventional Commits with the package directory as scope, for example `fix(runtime-node): change health route`.
 - Pull requests are squash-merged.
+- Never stack pull requests: target `main`, never another pull request's branch. Ship a feature as atomic pull requests behind a feature flag that is off by default, or as one pull request with commits that together form the complete feature.
 - Write comments only where the code cannot say it.

@@ -2,7 +2,9 @@ import {
   D1_STATEMENTS_PER_BATCH,
   D1_STATEMENTS_PER_INVOCATION,
 } from '@package-broker/core/db/port';
-import { sql } from 'kysely';
+import { sql, type RawBuilder } from 'kysely';
+import { compareNpmVersions } from '@package-broker/core/catalogue/versions';
+import { publishVersion } from './catalogue-publish.js';
 import {
   CATALOGUE_SYNC_VERSIONS_PER_CALL,
   type CatalogueWriter,
@@ -25,6 +27,7 @@ import {
   db,
   newOpId,
   runOrgFenced,
+  protectedHolder,
   type Guard,
   type ProtectedHolderProvider,
 } from '../kysely.js';
@@ -49,6 +52,17 @@ import { actorHolds } from './actor-authority.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
 import { blobLeaseNotLive } from './blob-lease-guard.js';
+import {
+  npmDisplayName,
+  notificationCaptureStatements,
+  sourceOverflowStatements,
+} from './notification-capture.js';
+import {
+  CAPTURE_STATEMENTS,
+  MAX_BATCH_STATEMENTS as CAPTURE_BATCH_LIMIT,
+  MAX_OPERATION_EVENTS,
+  assertCaptureBudget,
+} from '@package-broker/core/db/notifications';
 
 const MAX_STATEMENTS = D1_STATEMENTS_PER_INVOCATION;
 const MAX_BATCH_STATEMENTS = D1_STATEMENTS_PER_BATCH;
@@ -96,7 +110,11 @@ function batchExecutor(executor: SqlExecutor): SqlExecutor {
 }
 
 /** Resolve the upsert winner inside each statement, including a concurrent creator's row. */
-function bindPackage(statement: Statement, placeholder: string, lookup: Statement): Statement {
+export function bindPackage(
+  statement: Statement,
+  placeholder: string,
+  lookup: Statement,
+): Statement {
   let index = 0;
   const params: Statement['params'][number][] = [];
   const text = statement.sql.replace(/\?/g, () => {
@@ -129,13 +147,16 @@ function packageLookup(
 
 export function createCatalogueWriter(
   executor: SqlExecutor,
-  options: FinalizeGuardOptions = {},
+  options: FinalizeGuardOptions & { readonly notifications?: boolean } = {},
 ): CatalogueWriter {
   const bounded = batchExecutor(executor);
   const reconcile = createCatalogueReconciler(bounded, { ...options, countUnseen: true });
   return {
     ...reconcile,
+    publishVersion: (ctx, guard, input) =>
+      publishVersion(bounded, ctx, guard, input, options.notifications === true),
     statementBudget: {
+      publishVersion: 40,
       syncPackage: D1_STATEMENTS_PER_INVOCATION,
       attachDist: 4,
       openListing: 3,
@@ -413,9 +434,109 @@ export function subsetOutcome(outcome: SubsetOutcome): VisibilityWriteResult {
   }
 }
 
+/**
+ * An organization-admin tombstone has no initiating project, so its `unpublished` event (and the
+ * tag moves it causes) goes to each active project the hosted source is attached to. The fan-out is
+ * split into operations of at most MAX_OPERATION_EVENTS events; a fan-out beyond the project read
+ * limit or the statement budget is recorded as one overflow attributed to the source.
+ */
+async function tombstoneCapture(
+  executor: SqlExecutor,
+  ctx: OrgContext,
+  input: {
+    readonly packageId: string;
+    readonly versionId: string;
+    readonly opId: string;
+    readonly next: string | null;
+    readonly occurredAt: string;
+    readonly budget: number;
+  },
+): Promise<readonly Statement[]> {
+  const raw = (query: RawBuilder<unknown>): Statement =>
+    compile({ compile: () => query.compile(db) });
+  const [target] = await executor.all<{ name: string; source_id: string; version: string }>(
+    raw(sql`select tomb_package.name, tomb_package.source_id, tomb_version.version
+      from version as tomb_version join package as tomb_package on tomb_package.id = tomb_version.package_id
+        and tomb_package.org_id = ${ctx.orgId}
+      where tomb_version.org_id = ${ctx.orgId} and tomb_version.id = ${input.versionId}
+        and tomb_package.id = ${input.packageId} and tomb_package.ecosystem = 'npm'`),
+  );
+  if (target === undefined) return [];
+  const projects = await executor.all<{ project_id: string; total: number }>(
+    raw(sql`select tomb_ps.project_id, count(*) over () as total from project_source as tomb_ps
+      join project as tomb_project on tomb_project.id = tomb_ps.project_id and tomb_project.org_id = ${ctx.orgId}
+      where tomb_ps.org_id = ${ctx.orgId} and tomb_ps.source_id = ${target.source_id}
+        and tomb_project.status = 'active'
+      order by tomb_ps.project_id limit ${MAX_OPERATION_EVENTS + 1}`),
+  );
+  const tags = await executor.all<{ tag: string }>(
+    raw(sql`select tomb_tag.tag from dist_tag as tomb_tag where tomb_tag.org_id = ${ctx.orgId}
+      and tomb_tag.package_id = ${input.packageId} and tomb_tag.version_id = ${input.versionId}
+      order by tomb_tag.tag`),
+  );
+  const when = sql<boolean>`exists (select 1 from version where org_id = ${ctx.orgId} and id = ${input.versionId}
+      and last_op_id = ${input.opId} and status = 'tombstoned')`;
+  const total = (projects[0]?.total ?? 0) * (1 + tags.length);
+  if (total === 0) return [];
+  const operations = Math.ceil(total / MAX_OPERATION_EVENTS);
+  if (projects.length > MAX_OPERATION_EVENTS || operations * CAPTURE_STATEMENTS > input.budget)
+    return sourceOverflowStatements(
+      ctx,
+      {
+        operationId: input.opId,
+        occurredAt: input.occurredAt,
+        sourceId: target.source_id,
+        packageKey: target.name,
+        eventTypes: ['npm.package.unpublished', 'npm.package.dist_tag_changed'],
+        eventCount: total,
+      },
+      when,
+    );
+  const common = {
+    sourceId: target.source_id,
+    packageKey: target.name,
+    packageName: npmDisplayName(target.name),
+  };
+  const events = projects.flatMap(({ project_id: projectId }) => [
+    {
+      ...common,
+      projectId,
+      type: 'npm.package.unpublished' as const,
+      version: target.version,
+      data: { removalScope: 'version' as const, removalKind: 'tombstone' as const },
+    },
+    ...tags.map(({ tag }) => ({
+      ...common,
+      projectId,
+      type: 'npm.package.dist_tag_changed' as const,
+      version: input.next,
+      data: {
+        tag,
+        previousVersion: target.version,
+        version: input.next,
+        cause: 'unpublish' as const,
+      },
+    })),
+  ]);
+  return Array.from({ length: operations }, (_, index) =>
+    notificationCaptureStatements(
+      ctx,
+      {
+        operationId: index === 0 ? input.opId : newOpId(),
+        occurredAt: input.occurredAt,
+        events: events.slice(index * MAX_OPERATION_EVENTS, (index + 1) * MAX_OPERATION_EVENTS),
+      },
+      when,
+    ),
+  ).flat();
+}
+
 export function createVisibilityStore(
   executor: SqlExecutor,
-  options: { readonly providerAnchors: readonly ProtectedHolderProvider[] },
+  options: {
+    readonly providerAnchors: readonly ProtectedHolderProvider[];
+    readonly notifications?: boolean;
+  },
 ): VisibilityStore {
   const bounded = batchExecutor(executor);
   const subset = createVisibilitySubsetRepository(bounded);
@@ -448,6 +569,8 @@ export function createVisibilityStore(
         and target_package.org_id = ${ctx.orgId}
       where target_version.id = ${versionId} and target_version.org_id = ${ctx.orgId}
         and target_package.id = ${packageId} and ${ownership})`;
+    const publishGateClear = sql<boolean>`not exists (
+      select 1 from publish_approval where org_id = ${ctx.orgId} and version_id = ${versionId} and (approval_state = 'pending' or scan_state in ('queued', 'running', 'failed')))`;
     const statusMatches = sql<boolean>`exists (select 1 from version
       where id = ${versionId} and org_id = ${ctx.orgId} and status = ${expectedStatus})
       and ${versionTransition(expectedStatus, to, reason) ? sql`1` : sql`0`}`;
@@ -469,19 +592,118 @@ export function createVisibilityStore(
       select 1 from version as release_version where release_version.id = ${versionId}
         and release_version.org_id = ${ctx.orgId} and ${leaseCondition})`;
     const plan = versionStatusStatements(ctx, { versionId, to, reason });
+    const raw = (query: RawBuilder<unknown>): Statement =>
+      compile({ compile: () => query.compile(db) });
+    const npmChanges: Statement[] = [];
+    let tombstoneEvents:
+      | { readonly next: string | null; readonly packageId: string; readonly versionId: string }
+      | undefined;
+    const npmAuthorityChecks: Guard[] = [];
+    let npmRevisionCheck: Guard | undefined;
+    if (to === 'tombstoned') {
+      const hosted = sql<boolean>`exists (select 1 from package np join source ns on ns.id=np.source_id and ns.org_id=${ctx.orgId}
+        where np.org_id=${ctx.orgId} and np.id=${packageId} and np.ecosystem='npm' and ns.type='hosted')`;
+      const freshAdmin = actorHolds(ctx, fence, {
+        permission: 'org:packages:manage',
+        projectId: null,
+        providerAnchors: options.providerAnchors,
+        sessionCondition: (alias) =>
+          sql<boolean>`unixepoch(${sql.ref(alias + '.reauth_at')},'subsec') between unixepoch('now','subsec')-600 and unixepoch('now','subsec')`,
+      });
+      const admin = db
+        .selectFrom('user_account as npm_admin')
+        .select('npm_admin.id')
+        .where('npm_admin.org_id', '=', ctx.orgId)
+        .where('npm_admin.id', '=', fence.userId)
+        .where((eb) =>
+          protectedHolder(ctx, eb.ref('npm_admin.id'), {
+            kind: 'fresh',
+            providers: options.providerAnchors,
+          }),
+        );
+      npmAuthorityChecks.push(
+        sql<boolean>`(not (${hosted}) or ${manage.kind === 'organization' && typeof input.tombstoneReason === 'string' && input.tombstoneReason.trim().length > 0 && input.tombstoneReason.length <= 1000 ? sql`1` : sql`0`})`,
+        sql<boolean>`(not (${hosted}) or ${freshAdmin})`,
+        sql<boolean>`(not (${hosted}) or exists ${admin})`,
+      );
+      npmRevisionCheck = sql<boolean>`(not (${hosted}) or exists (select 1 from version nv where nv.org_id=${ctx.orgId} and nv.id=${versionId} and nv.revision=${input.expectedRevision ?? -1}))`;
+      for (const condition of [...npmAuthorityChecks, npmRevisionCheck])
+        npmChanges.push(...assertCheck(condition));
+      if (input.tombstoneReason !== undefined) {
+        const [packageRow] = await bounded.all<{ rev: number }>(
+          raw(sql`select rev from package where org_id=${ctx.orgId} and id=${packageId}`),
+        );
+        const rows = await bounded.all<{ id: string; version: string }>(
+          raw(sql`select v.id,v.version from version v
+          where v.org_id=${ctx.orgId} and v.package_id=${packageId} and v.status='active'`),
+        );
+        const next = rows
+          .filter((v) => v.id !== versionId)
+          .sort((a, b) => compareNpmVersions(b.version, a.version))[0];
+        const packageRev = packageRow?.rev;
+        if (packageRev !== undefined)
+          npmChanges.push(
+            ...assertCheck(
+              sql<boolean>`exists (select 1 from package where org_id=${ctx.orgId} and id=${packageId} and rev=${packageRev})`,
+            ),
+          );
+        npmChanges.push(
+          raw(sql`insert into dist_tag_history (id,org_id,package_id,tag,version_id,previous_version_id,action,actor_type,actor_id,op_id)
+          select ${plan.opId} || '-' || tag,org_id,package_id,tag,${next?.id ?? null},version_id,${next ? 'set' : 'remove'},'user',${fence.userId},${plan.opId}
+          from dist_tag where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`),
+        );
+        if (options.notifications === true)
+          tombstoneEvents = { next: next?.version ?? null, packageId, versionId };
+        npmChanges.push(
+          next
+            ? raw(
+                sql`update dist_tag set version_id=${next.id} where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`,
+              )
+            : raw(
+                sql`delete from dist_tag where org_id=${ctx.orgId} and package_id=${packageId} and version_id=${versionId}`,
+              ),
+        );
+      }
+    }
+
+    const fenceGuard = assertGuard(
+      sql<boolean>`(${present} and ${publishGateClear} and ${statusMatches} and ${blobReady})`,
+      ctx,
+    );
+    const mutations = [
+      ...assertCheck(authority),
+      ...npmChanges,
+      ...plan.statements,
+      ...(to === 'tombstoned' && input.tombstoneReason !== undefined
+        ? [
+            raw(sql`update version set tombstone_reason=${input.tombstoneReason},purge_after=strftime('%Y-%m-%dT%H:%M:%fZ','now','+' || (select max(o.retention_removed_upstream_days,coalesce(s.retention_days_override,0)) from organization o join source s on s.org_id=o.id join package p on p.source_id=s.id and p.org_id=${ctx.orgId} where o.id=${ctx.orgId} and p.id=${packageId}) || ' days')
+          where org_id=${ctx.orgId} and id=${versionId} and last_op_id=${plan.opId}`),
+          ]
+        : []),
+    ];
+    const closing = [
+      auditPendingStatement(ctx, input.audit),
+      ...(input.idempotency === undefined
+        ? []
+        : [idempotencyInsertStatement(ctx, input.idempotency)]),
+    ];
+    const base = fenceGuard.length + mutations.length + closing.length;
+    const capture =
+      tombstoneEvents === undefined
+        ? []
+        : await tombstoneCapture(bounded, ctx, {
+            ...tombstoneEvents,
+            opId: plan.opId,
+            occurredAt: input.audit.occurredAt,
+            budget: CAPTURE_BATCH_LIMIT - base,
+          });
+    if (capture.length > 0) assertCaptureBudget(base, capture.length);
     const outcome = await runOrgFenced(
       bounded,
       ctx,
       fence,
-      assertGuard(sql<boolean>`(${present} and ${statusMatches} and ${blobReady})`, ctx),
-      [
-        ...assertCheck(authority),
-        ...plan.statements,
-        auditPendingStatement(ctx, input.audit),
-        ...(input.idempotency === undefined
-          ? []
-          : [idempotencyInsertStatement(ctx, input.idempotency)]),
-      ],
+      fenceGuard,
+      [...mutations, ...capture, ...closing],
       {},
     );
     if (outcome.ok) return { ok: true, opId: plan.opId };
@@ -494,8 +716,13 @@ export function createVisibilityStore(
     };
     try {
       if (!(await holds(present))) return { ok: false, reason: 'not_found' };
+      if (!(await holds(publishGateClear))) return { ok: false, reason: 'publish_gate' };
       if (!(await holds(statusMatches))) return { ok: false, reason: 'conflict' };
       if (!(await holds(authority))) return { ok: false, reason: 'authority' };
+      for (const condition of npmAuthorityChecks)
+        if (!(await holds(condition))) return { ok: false, reason: 'authority' };
+      if (npmRevisionCheck !== undefined && !(await holds(npmRevisionCheck)))
+        return { ok: false, reason: 'conflict' };
       if (!(await holds(blobReady))) return { ok: false, reason: 'conflict' };
       if (
         input.idempotency !== undefined &&

@@ -424,6 +424,8 @@ describe('resolveVersions statement', () => {
         npmIntegrity: null,
         deprecatedMessage: 'old',
         metadataJson: '{"a":1}',
+        publishedAtBasis: 'import_time',
+        createdAt: expect.any(String) as unknown as string,
       },
     ]);
   });

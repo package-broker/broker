@@ -6,7 +6,7 @@ import { fixedClock } from '../ids.js';
 import type { IngestSessionHandle } from '../ingest/session.js';
 import type { SourceSyncDeps } from '../ingest/source-sync-job.js';
 import type { Codecs } from '../platform/codec.js';
-import type { JobContext, Jobs } from '../platform/jobs.js';
+import type { JobContext, CoreJobs as Jobs } from '../platform/jobs.js';
 import type { Observability } from '../platform/observability.js';
 import type { PlatformPorts, PluginPorts, RequestContext } from '../plugin.js';
 import { isRegisteredCoreJob } from '../runtime/core-jobs.js';
@@ -34,6 +34,8 @@ const session: IngestSessionHandle = {
 
 function setup() {
   const source: SourceRecord = {
+    revision: 1,
+    requirePublishApproval: false,
     id: 'src',
     projectId: null,
     name: 'source',
@@ -61,6 +63,10 @@ function setup() {
     removalAccepted: false,
   };
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     enqueue: vi.fn<Jobs['enqueue']>().mockResolvedValue({ id: 'job', created: true }),
     get: vi.fn<Jobs['get']>(),
   };
@@ -109,6 +115,7 @@ function setup() {
   };
   const sourceSync: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: vi.fn<SourceSyncDeps['sources']['get']>().mockResolvedValue(source),
       pollState: vi.fn<SourceSyncDeps['sources']['pollState']>().mockResolvedValue('written'),
     },

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AuditEvent } from '../audit/actions.js';
 import { orgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
-import { JobError, type JobContext, type Jobs } from '../platform/jobs.js';
+import { JobError, type JobContext, type CoreJobs as Jobs } from '../platform/jobs.js';
 import {
   createPatOffboardingJob,
   enqueuePatOffboarding,

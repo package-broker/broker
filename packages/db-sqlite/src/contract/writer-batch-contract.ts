@@ -1,3 +1,9 @@
+import { createNpmVcsEagerWriter } from '@package-broker/core/ingest/npm-vcs-enqueue';
+import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { createJobRepository } from '../repositories/job.js';
+import { createNpmVcsBuildReader } from '../repositories/npm-vcs-build.js';
+import { createSourceRepository } from '../repositories/source.js';
 import { describe, expect, it } from 'vitest';
 import { delegatedMutationFence } from '@package-broker/core/authz/fence';
 import { PERMISSIONS } from '@package-broker/core/authz/permissions';
@@ -575,6 +581,110 @@ export function describeWriterBatchContract(open: () => Promise<Fixture>): void 
       },
     );
 
+    it('counts eager build enqueue and apply continuations within whole invocation budgets', async () => {
+      const fixture = await open();
+      try {
+        await seedCatalogue(fixture);
+        const { ctx, executor } = fixture;
+        await executor.all(
+          stmt("UPDATE source SET type='vcs' WHERE org_id=? AND id='source'", ctx.orgId),
+        );
+        const counter = counting(executor);
+        const sessions = createIngestSessions(counter.executor);
+        const acquired = await sessions.acquire(
+          ctx,
+          { scope: 'package', sourceId: source.id, packageKey: source.key },
+          'worker',
+          600,
+        );
+        if (acquired === 'held') throw new Error('session held');
+        let session = acquired;
+        const versions = Array.from({ length: 180 }, (_, i) => ({
+          ...version,
+          version: `1.0.${i}`,
+          versionNormalized: `1.0.${i}`,
+          distType: 'tgz' as const,
+          sourceRef: 'a'.repeat(40),
+          metadata: normalizeVersionMetadata('npm', { name: 'widget', version: `1.0.${i}` }),
+        }));
+        const jobs = createRepositoryJobs({
+          store: createJobRepository(counter.executor),
+          clock: fixedClock('2026-10-30T00:00:00.000Z'),
+          ids: { ulid },
+          jobs: [
+            {
+              qualifiedName: 'core:npm-vcs-build:v1',
+              definition:
+                npmVcsBuildJob as import('@package-broker/core/platform/jobs').JobDefinition,
+            },
+          ],
+        })('core', { projectId: null, tokenId: null });
+        const existing = createExistingVersionsReader(counter.executor);
+        const apply = {
+          writer: createNpmVcsEagerWriter(createCatalogueWriter(counter.executor), {
+            sources: createSourceRepository(counter.executor),
+            existing,
+            target: createNpmVcsBuildReader(counter.executor),
+            jobs,
+            packingPolicy: 'npm-pack-v1',
+            clock: fixedClock('2026-10-30T00:00:00.000Z'),
+          }),
+          sessions,
+          existing,
+          finalizer: createIngestFinalizer(counter.executor),
+        };
+        let complete = false;
+        let invocations = 0;
+        for (; invocations < 30; invocations++) {
+          counter.take();
+          const outcome = await applyChunk(ctx, apply, {
+            session,
+            guard: createIngestSessionWriteGuard(ctx, session),
+            source: { ...source, type: 'vcs' },
+            packageDescription: null,
+            toVersion: (candidate) => versions.find((v) => v.version === candidate.version)!,
+            validatorTtlSeconds: 300,
+            description: createPackageDescription({
+              name: source.key,
+              snapshot: snapshotRef('"eager"'),
+              validators: {},
+              documentsComplete: true,
+              members: (async function* () {
+                for (const [ordinal, v] of versions.entries())
+                  yield {
+                    ordinal,
+                    version: v.version,
+                    form: 'npm-full',
+                    raw: v.metadata.json,
+                  } as const;
+              })(),
+            }),
+          });
+          const actual = counter.take();
+          expect(actual).toBeLessThanOrEqual(outcome.planned);
+          expect(actual + 50).toBeLessThanOrEqual(500);
+          session = outcome.session;
+          if (outcome.done) {
+            expect(outcome.status).toBe('complete');
+            complete = true;
+            break;
+          }
+          expect(outcome.status).toBe('progress');
+        }
+        expect(invocations).toBeGreaterThan(1);
+        expect(complete).toBe(true);
+        expect(
+          await executor.all(
+            stmt(
+              "SELECT count(*) n FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+              ctx.orgId,
+            ),
+          ),
+        ).toEqual([{ n: 180 }]);
+      } finally {
+        await fixture.close();
+      }
+    });
     it('retains all 150 ingest tag slices and removes obsolete tags', async () => {
       const fixture = await open();
       try {

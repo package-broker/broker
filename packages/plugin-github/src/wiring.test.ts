@@ -163,8 +163,20 @@ describe('GitHub plugin wiring', () => {
           return Response.json({
             total_count: 120,
             repositories: [
-              { owner: { login: 'acme' }, name: 'lib', archived: false, default_branch: 'main' },
-              { owner: { login: 'acme' }, name: 'old', archived: true, default_branch: 'main' },
+              {
+                owner: { login: 'acme' },
+                name: 'lib',
+                archived: false,
+                fork: false,
+                default_branch: 'main',
+              },
+              {
+                owner: { login: 'acme' },
+                name: 'old',
+                archived: true,
+                fork: false,
+                default_branch: 'main',
+              },
             ],
           });
         }
@@ -561,7 +573,13 @@ describe('GitHub plugin wiring', () => {
       validatorsPublished: 0,
     }));
     const writer = {
-      statementBudget: { openListing: 1, markListing: 1, finalizeListing: 1, quarantine: 1 },
+      statementBudget: {
+        publishVersion: 40,
+        openListing: 1,
+        markListing: 1,
+        finalizeListing: 1,
+        quarantine: 1,
+      },
       syncPackageCost: ({ versions }: { versions: number }) => 10 + versions * 300,
       syncPayloadLimit: 1024 * 1024,
       syncPayloadBytes: () => 1,
@@ -1069,3 +1087,23 @@ async function releaseFixture(defaultManifest: 'missing' | 'renamed' = 'missing'
     close: () => files.mockRestore(),
   };
 }
+
+it('lists a discovered npm GitHub App source using its configured npm name', async () => {
+  const provider = github().sourceProviders({
+    runtime: 'docker',
+    tokensFor: async (_org, _input, create) =>
+      create({ appId: '1', privateKeyPem: 'unused' }, '42'),
+  })[0]!;
+  const fetch = vi.fn();
+  const npmSource = {
+    ...source,
+    ecosystem: 'npm',
+    config: { ...source.config, packageName: '@acme/library' },
+  } as ProviderSource;
+  expect(await provider.listPackages!(invocation(fetch), npmSource, null)).toMatchObject({
+    names: ['@acme/library'],
+    last: true,
+  });
+  expect(provider.ecosystems).toContain('npm');
+  expect(fetch).not.toHaveBeenCalled();
+});

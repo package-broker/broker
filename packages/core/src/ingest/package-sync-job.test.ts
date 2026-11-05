@@ -804,3 +804,33 @@ it('annotates and rethrows an unexpected generation failure unchanged', async ()
   expect(error).toBe(failure);
   expect(jobSourceError(error)).toBe('internal');
 });
+
+it('reports the first candidate skip of both progress and completion chunks', async () => {
+  const f = setup();
+  const reportSkipped = vi.fn();
+  const job = createPackageSyncJob({ ...f.deps, reportSkipped });
+  f.setDescribe({ kind: 'found', description: description() });
+  vi.mocked(applyChunk)
+    .mockResolvedValueOnce(
+      outcome({
+        status: 'progress',
+        skipped: [
+          { version: '1.0.0', reason: 'invalid_manifest' },
+          { version: '2.0.0', reason: 'name_mismatch' },
+        ],
+      }),
+    )
+    .mockResolvedValueOnce(
+      outcome({
+        status: 'complete',
+        done: true,
+        skipped: [{ version: '3.0.0', reason: 'version_mismatch' }],
+      }),
+    );
+  await job.handler(job.validate({ sourceId: 'A', key: 'name' }), f.context);
+  await job.handler(job.validate({ sourceId: 'A', key: 'name' }), f.context);
+  expect(reportSkipped.mock.calls).toEqual([
+    [f.context, 'A', 'invalid_manifest'],
+    [f.context, 'A', 'version_mismatch'],
+  ]);
+});

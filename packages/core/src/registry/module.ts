@@ -1,8 +1,28 @@
-import type { SourcePackageProbe } from '../ingest/source-package.js';
+import type { NpmTokenAdapters } from '../authz/token-read.js';
+import { createNpmVcsEagerWriter } from '../ingest/npm-vcs-enqueue.js';
+import { createOidcExchangeRoute, type OidcExchangeDependencies } from './npm/oidc/exchange.js';
+import { createOidcVerifier } from './npm/oidc/verify.js';
+import {
+  createUnpublishService,
+  createDistTagService,
+  createPublishService,
+  type PublishDependencies,
+} from './npm/publish-service.js';
+export { createPublishService } from './npm/publish-service.js';
+import {
+  createNpmVcsBuildJob,
+  NPM_VCS_BUILD_JOB_TYPE,
+  npmVcsBuildEnqueueInput,
+  type NpmVcsBuildPayload,
+  type NpmVcsBuildTarget,
+} from '../ingest/npm-vcs-build-job.js';
+import { registerCoreJob } from '../runtime/core-jobs.js';
+import { probeNpmClaim } from '../sources/claim-admission.js';
+import type { ClaimProbeTarget, SourcePackageProbe } from '../ingest/source-package.js';
 import { isUpstreamRefusal } from '../ingest/fill-shared.js';
 import { createComposerRepositoryProvider } from '../ingest/composer/composer-repository.js';
 import { isSelected } from '../ingest/composer/v1-index.js';
-import { displayName } from '../catalogue/names.js';
+import { FORBIDDEN_NAME_CHARACTERS, MAX_NPM_NAME_LENGTH, displayName } from '../catalogue/names.js';
 import { createPackageAccess } from '../catalogue/package-access.js';
 import type {
   CatalogueReader,
@@ -47,7 +67,8 @@ import type { Codecs } from '../platform/codec.js';
 import { createScopedCache, type EpochReader } from '../platform/cache.js';
 import { PlatformUnavailableError } from '../platform/errors.js';
 import type { JobGuard } from '../platform/job-repository.js';
-import type { JobDefinition } from '../platform/jobs.js';
+import type { JobDefinition, CoreJobs } from '../platform/jobs.js';
+import type { CoreBlobStore } from '../platform/blob.js';
 import type { PlatformPorts, Platform, RequestContext, RouteDefinition } from '../plugin.js';
 import { sourceCredentialRequired } from '../sources/credential-origins.js';
 import { parseSourceConfig } from '../sources/config.js';
@@ -82,6 +103,11 @@ import { npmRoutes } from './npm/routes.js';
 import { forwardNpmAudit } from './npm/audit.js';
 import type { RegistryConfig } from './registry-config.js';
 import { createScopedAdmittingAccess } from './scoped-access.js';
+import type { RegistryPolicyReader } from '../db/registry-policy.js';
+import type { RegisteredReadHook } from './policy/hooks.js';
+import type { PolicyReadAuditSink } from './policy/read-audit.js';
+import { createPolicyServing, type PolicyServing } from './policy/serving.js';
+import { KernelConfigError } from '../kernel/registry.js';
 
 export class SourceMissingError extends Error {
   override readonly name = 'SourceMissingError';
@@ -105,9 +131,86 @@ export interface SourceCredential {
   readonly probe: CredentialEchoProbe;
 }
 
+export function createNpmHandleOf(
+  users: {
+    get(ctx: OrgContext, id: string): Promise<{ readonly displayName: string | null } | null>;
+  },
+  services: { get(ctx: OrgContext, id: string): Promise<{ readonly name: string | null } | null> },
+): (ctx: RequestContext) => Promise<string | null> {
+  return async (ctx) => {
+    if (ctx.org === null || ctx.principal === null) return null;
+    const { kind, id } = ctx.principal;
+    let name: string | null;
+    if (kind === 'user') {
+      const user = await users.get(ctx.org, id);
+      if (user === null) return null;
+      name = user.displayName;
+    } else if (kind === 'service') {
+      const service = await services.get(ctx.org, id);
+      if (service === null) return null;
+      name = service.name;
+    } else {
+      return null;
+    }
+    return name !== null &&
+      name !== '' &&
+      name.length <= MAX_NPM_NAME_LENGTH &&
+      !/[@\s]/u.test(name) &&
+      !FORBIDDEN_NAME_CHARACTERS.test(name)
+      ? name
+      : `${kind}-${id.toLowerCase()}`;
+  };
+}
+
+/** What registry policy serving reads; required when `registry.policy.enabled` is true. */
+export interface RegistryPolicyDeps {
+  readonly reader: RegistryPolicyReader;
+  readonly audit: PolicyReadAuditSink;
+  /** The compiled `registry.read` hooks, read per request because plugins register later. */
+  readonly hooks: () => readonly RegisteredReadHook[];
+  readonly ids: { ulid(): string };
+}
+
+/**
+ * The policy serving port for the enabled flag, or undefined so every serving path keeps its
+ * legacy behavior; an enabled flag without its dependencies is a configuration error.
+ */
+export function registryPolicyServing(
+  registry: RegistryConfig,
+  deps: RegistryPolicyDeps | undefined,
+  clock: Clock,
+  observability: Pick<Observability, 'counter'> | undefined,
+): PolicyServing | undefined {
+  if (!registry.policy.enabled) return undefined;
+  if (deps === undefined) {
+    throw new KernelConfigError(['registry.policy.enabled: registry policy is not wired']);
+  }
+  const serving = () =>
+    createPolicyServing({
+      policy: deps.reader,
+      hooks: deps.hooks(),
+      hookBudgetMs: registry.policy.hookBudgetMs,
+      clock,
+      audit: deps.audit,
+      ids: deps.ids,
+      ...(observability === undefined ? {} : { observability }),
+    });
+  return Object.freeze({
+    open: (...args: Parameters<PolicyServing['open']>) => serving().open(...args),
+    organization: (...args: Parameters<PolicyServing['organization']>) =>
+      serving().organization(...args),
+  });
+}
+
 export interface RegistryModuleDeps {
+  readonly npmTokens?: NpmTokenAdapters;
+  readonly policy?: RegistryPolicyDeps;
+  readonly npmOidc?: Omit<OidcExchangeDependencies, 'verify' | 'clock'>;
+  readonly npmPublish?: PublishDependencies;
   readonly runtime: Platform;
-  readonly ports: Partial<PlatformPorts>;
+  readonly ports: Partial<
+    Omit<PlatformPorts, 'blob' | 'jobs'> & { blob: CoreBlobStore; jobs: CoreJobs }
+  >;
   readonly clock: Clock;
   readonly codecs: Codecs;
   readonly publicUrl: string;
@@ -125,7 +228,7 @@ export interface RegistryModuleDeps {
     readonly sources: Pick<SourceRepository, 'hasAttachedProxy'>;
   };
   readonly defer?: (thunk: () => Promise<void>) => void;
-  readonly handleOf?: (ctx: RequestContext) => string | null;
+  readonly handleOf?: (ctx: RequestContext) => Promise<string | null>;
   readonly catalogue: {
     readonly reader: CatalogueReader;
     readonly scopedAdmission: ScopedAdmission;
@@ -162,6 +265,32 @@ export interface RegistryModuleDeps {
       job: JobGuard,
     ) => CatalogueWriteGuard;
   };
+  readonly npmVcsBuild?: {
+    readonly outcomes: {
+      terminal(
+        ctx: OrgContext,
+        payload: Pick<NpmVcsBuildPayload, 'sourceId' | 'packageId' | 'versionId' | 'packingPolicy'>,
+      ): Promise<boolean>;
+      start(ctx: OrgContext, lease: JobGuard, payload: NpmVcsBuildPayload): Promise<void>;
+      finish(
+        ctx: OrgContext,
+        lease: JobGuard,
+        payload: NpmVcsBuildPayload,
+        code: import('../sources/source-error-codes.js').NpmPackSkipCode,
+      ): Promise<void>;
+      writeGuard(
+        ctx: OrgContext,
+        lease: JobGuard,
+        payload: NpmVcsBuildPayload,
+      ): CatalogueWriteGuard;
+    };
+    readonly pending: (ctx: OrgContext, versionId: string) => Promise<boolean>;
+    readonly target: (
+      ctx: OrgContext,
+      input: Pick<NpmVcsBuildPayload, 'packageId' | 'versionId' | 'sourceId' | 'packingPolicy'>,
+    ) => Promise<NpmVcsBuildTarget | null>;
+    readonly writeGuard: (ctx: OrgContext, job: JobGuard) => CatalogueWriteGuard;
+  };
   readonly dist: {
     readonly leases: FetchLeases;
     readonly leaseKey: (parts: readonly string[]) => Promise<string>;
@@ -173,10 +302,18 @@ export interface RegistryModuleDeps {
 }
 
 export interface RegistryModule extends Partial<RegistryJobs> {
+  readonly lookupTrustedPublisherRepository: (
+    ctx: OrgContext,
+    sourceId: string,
+    repository: string,
+    signal: AbortSignal,
+  ) => Promise<import('../sources/provider.js').RepositoryIdentity | null>;
   readonly probePackage: SourcePackageProbe;
   readonly ecosystemRoutes: readonly RouteDefinition[];
   readonly visibilityPort: PackageVisibilityPort;
   readonly packageSyncJob?: JobDefinition;
+  /** Present only when registry policy is enabled; API views filter through the same port. */
+  readonly policy?: PolicyServing;
 }
 
 const NO_PROBE: CredentialEchoProbe = { secrets: [], queryParams: [] };
@@ -202,6 +339,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   const { catalogue, ingest, registry, sync, npmAudit } = deps;
 
   const packageAccess = createPackageAccess(catalogue.reader);
+  const policy = registryPolicyServing(registry, deps.policy, deps.clock, observability);
   const visibilityPort = createScopedAdmittingAccess(packageAccess, catalogue.scopedAdmission);
   const scopedCache = createScopedCache(cache, catalogue.epoch, {
     deploymentId: deps.deploymentId,
@@ -407,7 +545,13 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
               candidate.upstreamTime === undefined
                 ? {}
                 : { [candidate.version]: candidate.upstreamTime },
-              { probe, importedAt },
+              {
+                probe,
+                importedAt,
+                ...(record.type === 'vcs' && candidate.form === 'npm-vcs'
+                  ? { kind: 'vcs' as const }
+                  : {}),
+              },
             );
       return result.ok ? result.input : null;
     };
@@ -466,8 +610,49 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
         writer: deps.dist.writer,
         blobReplacer: deps.dist.blobReplacer,
         maxBytes: registry.caps.archiveBytes,
+        ...(record.type !== 'vcs' || record.ecosystem !== 'npm'
+          ? {}
+          : {
+              enqueueNpmVcsBuild: async () => {
+                await enqueueNpmVcsBuild(ctx, target);
+              },
+            }),
       },
     };
+  }
+
+  async function enqueueNpmVcsBuild(
+    ctx: OrgContext,
+    target: Pick<DistTarget, 'sourceId' | 'packageId' | 'versionId'>,
+  ): Promise<boolean | 'terminal'> {
+    if (deps.npmVcsBuild === undefined || jobs === undefined) throw new PlatformUnavailableError();
+    const payload = {
+      sourceId: target.sourceId,
+      packageId: target.packageId,
+      versionId: target.versionId,
+      version: '',
+    };
+    const row = await deps.npmVcsBuild.target(ctx, { ...payload, packingPolicy });
+    if (row === null) {
+      if (await deps.npmVcsBuild.outcomes.terminal(ctx, { ...payload, packingPolicy }))
+        return 'terminal';
+      return deps.npmVcsBuild.pending(ctx, target.versionId);
+    }
+    if (await deps.npmVcsBuild.pending(ctx, target.versionId)) return true;
+    const identity = {
+      ...payload,
+      version: row.version,
+      sourceRef: row.sourceRef,
+      packingPolicy,
+      retryGeneration: row.retryGeneration,
+    };
+    await jobs.enqueue(
+      ctx,
+      NPM_VCS_BUILD_JOB_TYPE,
+      identity,
+      npmVcsBuildEnqueueInput(identity, deps.clock.now().getTime()),
+    );
+    return true;
   }
 
   async function enqueueSync(ctx: OrgContext, payload: PackageSyncPayload): Promise<void> {
@@ -493,12 +678,142 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     return { type: record.type };
   };
 
+  const repositoryInputCeiling = Math.min(
+    registry.caps.archiveBytes,
+    blob.maxStagingBytes ?? 64 * 1024 * 1024,
+  );
+  const packedOutputCeiling = Math.min(
+    registry.caps.publishTarballBytes,
+    blob.maxStagingBytes ?? 64 * 1024 * 1024,
+  );
+  const packingPolicy = `npm-pack-v1:${packedOutputCeiling}:${repositoryInputCeiling}`;
+  const buildJob =
+    deps.npmVcsBuild === undefined || jobs === undefined
+      ? undefined
+      : createNpmVcsBuildJob({
+          async exhausted(job, payload, lease) {
+            const row = await deps.npmVcsBuild!.target(job.org, { ...payload, packingPolicy });
+            if (
+              row === null ||
+              row.version !== payload.version ||
+              (payload.sourceRef !== undefined && payload.sourceRef !== row.sourceRef) ||
+              (payload.packingPolicy !== undefined && payload.packingPolicy !== packingPolicy) ||
+              (payload.retryGeneration !== undefined &&
+                payload.retryGeneration !== row.retryGeneration)
+            )
+              return;
+            await deps.npmVcsBuild!.outcomes.finish(
+              job.org,
+              lease,
+              {
+                ...payload,
+                sourceRef: row.sourceRef,
+                packingPolicy,
+                retryGeneration: row.retryGeneration,
+              },
+              'internal',
+            );
+            await deps.registryJobs!.sourceSync.sources.reportCandidateSkipped!(job.org, lease, {
+              id: payload.sourceId,
+              error: 'internal',
+            });
+          },
+          async plan(job, payload, lease) {
+            const row = await deps.npmVcsBuild!.target(job.org, { ...payload, packingPolicy });
+            if (
+              row === null ||
+              row.version !== payload.version ||
+              (payload.sourceRef !== undefined && payload.sourceRef !== row.sourceRef) ||
+              (payload.packingPolicy !== undefined && payload.packingPolicy !== packingPolicy) ||
+              (payload.retryGeneration !== undefined &&
+                payload.retryGeneration !== row.retryGeneration)
+            )
+              return null;
+            const identity = {
+              ...payload,
+              sourceRef: row.sourceRef,
+              packingPolicy,
+              retryGeneration: row.retryGeneration,
+            };
+            await deps.npmVcsBuild!.outcomes.start(job.org, lease, identity);
+            const record = await catalogue.sources.get(job.org, payload.sourceId);
+            if (
+              record === null ||
+              record.type !== 'vcs' ||
+              record.ecosystem !== 'npm' ||
+              record.status !== 'active'
+            )
+              return null;
+            const bound = await bind(job.org, record);
+            if (bound === null || typeof bound === 'string') return null;
+            return {
+              guard: deps.npmVcsBuild!.outcomes.writeGuard(job.org, lease, identity),
+              deps: {
+                provider: bound.provider,
+                providerContext: providerContext(job.org, bound, job.signal),
+                source: bound.source,
+                store: blob,
+                writer: deps.dist.writer,
+                blobReplacer: deps.dist.blobReplacer,
+                repositoryArchiveBytes: repositoryInputCeiling,
+                maxBytes: packedOutputCeiling,
+                reportSkipped: async (code) => {
+                  await deps.npmVcsBuild!.outcomes.finish(job.org, lease, identity, code);
+                  await deps.registryJobs!.sourceSync.sources.reportCandidateSkipped!(
+                    job.org,
+                    lease,
+                    { id: payload.sourceId, error: code },
+                  );
+                },
+              },
+              target: {
+                versionId: payload.versionId,
+                revision: row.revision,
+                packageName: row.packageName,
+                version: row.version,
+                previousBlob: null,
+                fetch: {
+                  distType: 'tgz',
+                  sourceRef: row.sourceRef,
+                  upstreamDistUrl: null,
+                  npmIntegrity: null,
+                  npmShasum: null,
+                  composerShasum: null,
+                },
+              },
+            };
+          },
+        });
+  const npmApply: ApplyDeps = {
+    ...ingest.apply,
+    writer: createNpmVcsEagerWriter(ingest.apply.writer, {
+      sources: catalogue.sources,
+      existing: ingest.apply.existing,
+      target: deps.npmVcsBuild?.target,
+      jobs,
+      packingPolicy,
+      clock: deps.clock,
+    }),
+  };
   const packageSyncJob =
     sync === undefined || jobs === undefined
       ? undefined
       : createPackageSyncJob({
           sessions: ingest.sessions,
-          apply: ingest.apply,
+          reportSkipped: async (job, sourceId, code) => {
+            const sourceSync = deps.registryJobs?.sourceSync;
+            if (
+              sourceSync?.sources.reportCandidateSkipped !== undefined &&
+              (code === 'name_mismatch' ||
+                code === 'version_mismatch' ||
+                code === 'invalid_manifest')
+            )
+              await sourceSync.sources.reportCandidateSkipped(job.org, sourceSync.jobGuard(job), {
+                id: sourceId,
+                error: code,
+              });
+          },
+          apply: npmApply,
           jobs,
           upstreamState: sync.upstreamState,
           executor: sync.executor,
@@ -522,7 +837,7 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     cache: scopedCache,
     visibility: visibilityPort,
     upstreamState: catalogue.upstreamState,
-    apply: ingest.apply,
+    apply: npmApply,
     sourceMetadata,
     writeGuard: ingest.writeGuard,
     planFill,
@@ -530,6 +845,11 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   });
 
   const dist = createDistService({
+    enqueueNpmVcsBuild: async (ctx, target) => {
+      const record = await catalogue.sources.get(ctx, target.sourceId);
+      if (record?.type !== 'vcs' || record.ecosystem !== 'npm') return false;
+      return enqueueNpmVcsBuild(ctx, target);
+    },
     access: packageAccess,
     store: blob,
     leases: deps.dist.leases,
@@ -549,6 +869,18 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   }
 
   const ecosystemRoutes: readonly RouteDefinition[] = Object.freeze([
+    ...(deps.npmOidc === undefined
+      ? []
+      : [
+          createOidcExchangeRoute({
+            ...deps.npmOidc,
+            clock: deps.clock,
+            verify: createOidcVerifier({
+              publicUrl: deps.publicUrl,
+              policyFetch: deps.policyFetch(registry.userAgent.default),
+            }),
+          }),
+        ]),
     ...composerRoutes({
       access: packageAccess,
       fill: onDemand,
@@ -556,13 +888,44 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
       clock: catalogue.representationClock,
       publicUrl: deps.publicUrl,
       cache: scopedCache,
+      ...(policy === undefined ? {} : { policy }),
     }),
     ...npmRoutes({
+      ...(deps.npmTokens === undefined ? {} : { tokens: deps.npmTokens }),
       access: packageAccess,
+      ...(deps.npmPublish === undefined
+        ? {}
+        : {
+            unpublish: createUnpublishService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+            distTagWrite: createDistTagService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+            publish: createPublishService({
+              ...deps.npmPublish,
+              blob: blob as import('../platform/blob.js').CoreBlobStore,
+              codecs: deps.codecs,
+              registry,
+              clock: deps.clock,
+              publicUrl: deps.publicUrl,
+            }),
+          }),
       dist,
       onDemand,
       reresolve,
-      handleOf: deps.handleOf ?? (() => null),
+      ...(policy === undefined ? {} : { policy }),
+      handleOf: deps.handleOf ?? (async () => null),
       ...(deps.defer === undefined ? {} : { defer: deps.defer }),
       publicUrl: deps.publicUrl,
       codecs: deps.codecs,
@@ -600,9 +963,56 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
   ]);
 
   return Object.freeze({
+    ...(policy === undefined ? {} : { policy }),
     ecosystemRoutes,
-    async probePackage(ctx: OrgContext, sourceId: string, key: string, signal: AbortSignal) {
+    async lookupTrustedPublisherRepository(
+      ctx: OrgContext,
+      sourceId: string,
+      repository: string,
+      signal: AbortSignal,
+    ) {
+      const record = await catalogue.sources.get(ctx, sourceId);
+      if (record === null || record.projectId !== null || record.type !== 'vcs') return null;
+      const bound = await bind(ctx, record);
+      if (
+        bound === null ||
+        typeof bound === 'string' ||
+        bound.provider.lookupRepository === undefined
+      )
+        return null;
+      return bound.provider.lookupRepository(
+        providerContext(ctx, bound, signal),
+        bound.source,
+        repository,
+      );
+    },
+    async probePackage(
+      ctx: OrgContext,
+      sourceId: ClaimProbeTarget,
+      key: string,
+      signal: AbortSignal,
+      mode?: 'claim',
+    ) {
       try {
+        if (mode === 'claim') {
+          const source =
+            typeof sourceId === 'string' ? await catalogue.sources.get(ctx, sourceId) : null;
+          if (typeof sourceId === 'string' && source === null) return 'unavailable';
+          if (source !== null && (source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm'))
+            return 'unavailable';
+          const answer = await probeNpmClaim(
+            deps.policyFetch(
+              typeof sourceId === 'string'
+                ? userAgentOf(source!)
+                : (sourceId.userAgent ?? registry.userAgent.default),
+              typeof sourceId === 'string' ? { sourceId } : {},
+            ),
+            key,
+            signal,
+          );
+          return answer === null ? 'not_found' : answer === 'name_public' ? 'found' : 'unavailable';
+        }
+        if (typeof sourceId !== 'string') return 'unavailable';
         const plan = await planPackage(ctx, sourceId, key);
         if (plan === 'unsupported_package') return plan;
         if (plan === null) return 'unavailable';
@@ -618,6 +1028,23 @@ export function createRegistryModule(deps: RegistryModuleDeps): RegistryModule {
     ...(packageSyncJob === undefined ? {} : { packageSyncJob }),
     ...(jobs === undefined || deps.registryJobs === undefined
       ? {}
-      : createRegistryJobs(deps.registryJobs, jobs)),
+      : (() => {
+          const registered = createRegistryJobs(deps.registryJobs, jobs);
+          return {
+            ...registered,
+            coreJobs: [
+              ...registered.coreJobs,
+              ...(buildJob === undefined
+                ? []
+                : [
+                    registerCoreJob({
+                      ...buildJob,
+                      handler: (input, context) =>
+                        buildJob.handler(buildJob.validate(input), context),
+                    }),
+                  ]),
+            ],
+          };
+        })()),
   });
 }

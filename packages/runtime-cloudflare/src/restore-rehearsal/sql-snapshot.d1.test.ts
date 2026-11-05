@@ -15,9 +15,9 @@ const nodeSnapshot = (await import(
 )) as { exportDatabase: typeof exportDatabase; restoreDatabase: typeof restoreDatabase };
 
 describe.each([
-  { runtime: 'cloudflare', exporter: exportDatabase, restore: restoreDatabase },
-  { runtime: 'node', exporter: nodeSnapshot.exportDatabase, restore: nodeSnapshot.restoreDatabase },
-])('$runtime large-TEXT export into Miniflare D1', ({ runtime, exporter, restore }) => {
+  { runtime: 'cloudflare', exporter: exportDatabase },
+  { runtime: 'node', exporter: nodeSnapshot.exportDatabase },
+])('$runtime large-TEXT export into Miniflare D1', ({ runtime, exporter }) => {
   it.each([60_000, 262_000])(
     'restores %i-byte descriptions byte-identically',
     async (size) => {
@@ -69,7 +69,7 @@ describe.each([
           expect(Buffer.byteLength(sql)).toBeLessThan(100_000);
           expect(params.length).toBeLessThanOrEqual(100);
         }
-        await restore(restored, JSON.parse(JSON.stringify(snapshot)));
+        await restoreDatabase(restored, JSON.parse(JSON.stringify(snapshot)));
         for (const org of ['org-a', 'org-b']) {
           const query = {
             sql: 'SELECT typeof(description) AS type, hex(description) AS description, hex(metadata_json) AS metadata FROM publisher_content WHERE org_id = ? ORDER BY rowid',

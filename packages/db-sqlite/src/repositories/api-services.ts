@@ -12,6 +12,34 @@ import { requestVerification } from '@package-broker/core/audit/verify';
 import type { Jobs } from '@package-broker/core/platform/jobs';
 import type { Clock } from '@package-broker/core/ids';
 import { orgContext } from '@package-broker/core/db/port';
+import { createDiscoveryConnections } from './discovery-connections.js';
+import { createOrganizationRepository } from './organization.js';
+import { createCatalogueReader } from './catalogue.js';
+import { createJobRepository } from './job.js';
+import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
+import { sql } from 'kysely';
+import { compile, db } from '../kysely.js';
+import { discoveryRuleAuthority } from './discovery-rule-authority.js';
+import { createDiscoveryRuleRepository } from './discovery-rules.js';
+import {
+  discoveryRuleJobs,
+  type DiscoveryRuleJobDeps,
+} from '@package-broker/core/runtime/discovery-rule-jobs';
+import { createConfiguredGithubDiscovery } from '@package-broker/core/sources/configured-discovery';
+import { UpstreamError, type PolicyFetch } from '@package-broker/core/sources/policy-fetch';
+import { createDiscoveryRepositoryReader } from './discovery.js';
+import { createTrustedPublisherStore, createTrustedPublisherLookup } from './trusted-publishers.js';
+import {
+  createNotificationCredentials,
+  createNotificationEndpointService,
+} from '@package-broker/core/runtime/notification-jobs';
+import { createNotificationReadRepository } from './notification-read.js';
+import { createNotificationWriteRepository } from './notification-write.js';
+import type { TrustedPublisherRouteDeps } from '@package-broker/core/api/routes/trusted-publishers';
+import { createPackageDetailRepository } from './package-detail.js';
+import { npmLoginRoutes } from '@package-broker/core/api/routes/npm-login';
+import { createPublishesRepository } from './publishes.js';
+import { createPackageAccessRequestRepository } from './package-access-requests.js';
 import { createSourcePackageStore } from './source-package-request.js';
 import type { SourcePackageProbe } from '@package-broker/core/ingest/source-package';
 import { createProjectGrantReader } from './project-grant-read.js';
@@ -25,6 +53,17 @@ import type { OutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createIdempotencyRepository } from './idempotency.js';
 import { createAuditApiExportStore } from './audit-api-export.js';
 import { createAuditJournalReader } from './audit-query.js';
+import type { PolicyServing } from '@package-broker/core/registry/policy/serving';
+import { createPolicyManageService } from '@package-broker/core/registry/policy/manage';
+import { createPolicyMemberService } from '@package-broker/core/registry/policy/manage-members';
+import { createPolicyInspectService } from '@package-broker/core/registry/policy/inspect';
+import { createPolicyVersionFactsReader } from './policy-version-facts.js';
+import { createRegistryPolicyCatalog } from './registry-policy-catalog.js';
+import { createRegistryPolicyStore } from './registry-policy-create.js';
+import { createRegistryPolicyMembers } from './registry-policy-members.js';
+import { createRegistryPolicyReader } from './registry-policy-read.js';
+import { createPolicyReadAuditSink } from './registry-policy-read-audit.js';
+import { createRegistryPolicyUpdater } from './registry-policy-update.js';
 import { createPackageAdminReader } from './package-admin-read.js';
 import { createProjectSourceReader } from './project-source-read.js';
 import { createRegisteredNameRepository } from './registered-name.js';
@@ -44,7 +83,7 @@ import { importWriteTokenFence } from '@package-broker/core/kernel/import-token-
 import { auditPendingStatement } from './audit-pending.js';
 import { createImportCredentialRepository } from './import-credential.js';
 import { createImportRunStore } from './import-run.js';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import { KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { Keyring } from '@package-broker/core/secrets/keyring';
 import { createCredentialRepository } from './credential.js';
@@ -61,6 +100,8 @@ export interface ApiRoutesOptions {
   readonly auditStatus?: ApiModuleDeps['auditStatus'];
   readonly auditHealth?: ApiModuleDeps['auditHealth'];
   readonly runtime: 'node' | 'cloudflare';
+  readonly onDiscoveryRules?: (deps: DiscoveryRuleJobDeps) => void;
+  readonly discoveryFetch?: PolicyFetch;
   readonly clientIp: (request: Request) => string | null;
   readonly executor: SqlExecutor;
   readonly keyring: Keyring;
@@ -74,9 +115,62 @@ export interface ApiRoutesOptions {
   readonly auditAlerts?: { raise(org: OrgContext, reason: 'withheld'): void };
   readonly blob: BlobStore | undefined;
   readonly sourcePackageProbe?: SourcePackageProbe;
+  readonly trustedPublisherLookup?: (
+    ctx: OrgContext,
+    sourceId: string,
+    repository: string,
+    signal: AbortSignal,
+  ) => ReturnType<TrustedPublisherRouteDeps['lookup']>;
   /** The VCS providers the runtime has registered and serves, read per request. */
   readonly vcsProviders?: () => readonly VcsProvider[];
   readonly refuseVcsProvider?: (provider: VcsProvider) => boolean;
+  readonly registryPolicy?: {
+    /** Set whenever the policy migration is applied: the management routes, enforced or not. */
+    readonly management?: true;
+    /** Present only when registry policy is enabled: the package views filter through it. */
+    readonly serving?: PolicyServing;
+  };
+  /** Approval releases capture notification work; only true while notifications are on. */
+  readonly notifications?: boolean;
+  /** Mount endpoint management whenever the notification schema is applied. */
+  readonly notificationRoutes?: boolean;
+  /** Origins a notification destination may never name; the broker's own public origins. */
+  readonly notificationSelfOrigins?: readonly string[];
+}
+
+function registryPolicyApi(
+  executor: SqlExecutor,
+  providerAnchors: AccessAssembly['anchors'],
+  common: {
+    ids: { ulid(): string };
+    clock: typeof systemClock;
+    clientIp: ApiRoutesOptions['clientIp'];
+  },
+  idempotency: ReturnType<typeof createIdempotencyRepository>,
+) {
+  const repositories = {
+    store: createRegistryPolicyStore(executor, providerAnchors),
+    updater: createRegistryPolicyUpdater(executor, providerAnchors),
+    members: createRegistryPolicyMembers(executor, providerAnchors),
+    catalog: createRegistryPolicyCatalog(executor),
+    ids: common.ids,
+    clock: common.clock,
+  };
+  const manage = createPolicyManageService(repositories);
+  return {
+    ...common,
+    manage,
+    members: createPolicyMemberService({ ...repositories, manage }),
+    inspect: createPolicyInspectService({
+      policy: createRegistryPolicyReader(executor),
+      facts: createPolicyVersionFactsReader(executor),
+      packages: createPackageAdminReader(executor),
+      audit: createPolicyReadAuditSink(executor),
+      ids: common.ids,
+      clock: common.clock,
+    }),
+    idempotency,
+  };
 }
 
 export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefinition[] {
@@ -107,6 +201,7 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     clock: systemClock,
   });
   const sourceService = createSourceService({
+    ...(input.sourcePackageProbe === undefined ? {} : { claimProbe: input.sourcePackageProbe }),
     sources,
     organizations,
     registeredNames,
@@ -118,11 +213,168 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
     ids: { ulid },
     log,
   });
+  const rules = createDiscoveryRuleRepository(executor, anchors);
+  function forInvocation(): DiscoveryRuleJobDeps {
+    let statements = 0;
+    const counted: SqlExecutor = {
+      driver: input.executor.driver,
+      all(statement) {
+        statements++;
+        return input.executor.all(statement);
+      },
+      batch(batch) {
+        statements += batch.length;
+        return input.executor.batch(batch);
+      },
+    };
+    const credentials = createCredentialRepository(counted);
+    const store = createCredentialStore({
+      repository: credentials,
+      cipher: createSecretCipher(input.keyring, 'credential-encryption'),
+      ...common,
+    });
+    const invocationSources = createSourceRepository(counted);
+    const claimProbe: SourcePackageProbe | undefined =
+      input.sourcePackageProbe === undefined
+        ? undefined
+        : async (ctx, target, key, signal, mode) => {
+            if (mode !== 'claim' || typeof target !== 'string') return 'unavailable';
+            const source = await invocationSources.get(ctx, target);
+            if (source === null || source.type !== 'npmjs_proxy' || source.ecosystem !== 'npm')
+              return 'unavailable';
+            // Resolve the source through the invocation executor before the public-name probe.
+            return input.sourcePackageProbe!(
+              ctx,
+              { type: 'new_npmjs_proxy', userAgent: source.userAgent },
+              key,
+              signal,
+              'claim',
+            );
+          };
+    const service = createSourceService({
+      ...(claimProbe === undefined ? {} : { claimProbe }),
+      sources: invocationSources,
+      organizations: createOrganizationRepository(counted),
+      registeredNames: createRegisteredNameRepository(counted),
+      credentials: store,
+      credentialRepository: credentials,
+      catalogue: createCatalogueReader(counted),
+      policy: input.policy,
+      providerAnchors: anchors,
+      ids: common.ids,
+      log,
+    });
+    const invocation: DiscoveryRuleJobDeps = {
+      ...common,
+      rules: createDiscoveryRuleRepository(counted, anchors),
+      discovery: createConfiguredGithubDiscovery({
+        credentials,
+        store,
+        sources: service,
+        existingRepository: createDiscoveryRepositoryReader(counted),
+        clock: systemClock,
+        scheduled: true,
+        statementCount: () => statements,
+        fetch:
+          input.discoveryFetch ??
+          (async () => {
+            throw new UpstreamError('refused');
+          }),
+        authority: async (ctx, fence) => {
+          const [row] = await counted.all<{ held: number }>(
+            compile(
+              db.selectNoFrom(sql<number>`(${discoveryRuleAuthority(ctx, fence)})`.as('held')),
+            ),
+          );
+          return row?.held === 1;
+        },
+      }),
+    };
+    return {
+      ...invocation,
+      jobs: createRepositoryJobs({
+        store: createJobRepository(counted),
+        jobs: discoveryRuleJobs(() => invocation),
+        ...common,
+      })('core', { projectId: null, tokenId: null }),
+    };
+  }
+  const discovery = createConfiguredGithubDiscovery({
+    credentials: credentialRepository,
+    store: credentialStore,
+    sources: sourceService,
+    existingRepository: createDiscoveryRepositoryReader(executor),
+    clock: systemClock,
+    fetch:
+      input.discoveryFetch ??
+      (async () => {
+        throw new UpstreamError('refused');
+      }),
+  });
+  input.onDiscoveryRules?.({ ...common, rules, discovery, forInvocation });
   if (blob === undefined) {
     log({ level: 'info', event: 'api.import_routes_omitted', reason: 'blob_store_not_configured' });
   }
   try {
-    return createApiModule({
+    const notificationReads = createNotificationReadRepository(executor);
+    const module = createApiModule({
+      sourceDiscovery: {
+        connections: createDiscoveryConnections(executor),
+        ...common,
+        savedRules: { ...common, rules, sessions: services.sessions, idempotency },
+        discovery,
+      },
+      ...(input.registryPolicy?.management === true
+        ? { registryPolicy: registryPolicyApi(executor, anchors, common, idempotency) }
+        : {}),
+      ...(input.registryPolicy?.serving === undefined
+        ? {}
+        : {
+            packageViewPolicy: {
+              serving: input.registryPolicy.serving,
+              facts: createPolicyVersionFactsReader(executor),
+            },
+          }),
+      npmLogin: access.npmLogin,
+      ...(input.notificationRoutes === true
+        ? {
+            notifications: {
+              ...common,
+              reads: notificationReads,
+              sessions: services.sessions,
+              service: createNotificationEndpointService({
+                reads: notificationReads,
+                writes: createNotificationWriteRepository(executor, anchors),
+                credentials: createNotificationCredentials({
+                  repository: credentialRepository,
+                  store: credentialStore,
+                }),
+                ids: { ulid },
+                clock: systemClock,
+                selfOrigins: input.notificationSelfOrigins ?? [],
+                transportAvailable: true,
+              }),
+            },
+          }
+        : {}),
+      trustedPublishers: {
+        ...common,
+        store: createTrustedPublisherStore(executor, anchors),
+        lookup: createTrustedPublisherLookup(
+          executor,
+          input.trustedPublisherLookup ?? (async () => null),
+        ),
+      },
+      publishes: {
+        ...common,
+        publishes: createPublishesRepository(executor, anchors, {
+          notifications: input.notifications === true,
+        }),
+      },
+      packageAccessRequests: {
+        ...common,
+        repository: createPackageAccessRequestRepository(executor, anchors),
+      },
       organization: {
         ...common,
         log: observability.log,
@@ -202,10 +454,22 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
       },
       sourceAttachments: {
         ...common,
+        proxyClaims: {
+          sources,
+          registeredNames,
+          ...(input.sourcePackageProbe === undefined
+            ? {}
+            : { claimProbe: input.sourcePackageProbe }),
+        },
         sources,
         visibility: packages.visibility,
         projectSources: createProjectSourceReader(executor),
         projects,
+      },
+      packageDetail: {
+        ...common,
+        repository: createPackageDetailRepository(executor, anchors),
+        idempotency,
       },
       packages: {
         ...createPackageAdminReader(executor),
@@ -298,7 +562,11 @@ export function createApiRoutes(input: ApiRoutesOptions): readonly RouteDefiniti
               tokenFence: importWriteTokenFence,
             },
           }),
-    }).routes;
+    });
+    return [
+      ...npmLoginRoutes(access.npmLogin).filter((route) => !route.path.startsWith('/_pb/')),
+      ...module.routes,
+    ];
   } catch (error) {
     if (error instanceof ApiModuleDependencyError) {
       throw new KernelConfigError([error.message]);
@@ -319,4 +587,25 @@ export function createAuditTrailServices(
     journal: createAuditJournalReader(executor, boundOrg, observability),
     requestVerification: () => requestVerification(jobs, boundOrg, clock.now()),
   });
+}
+
+export async function notificationRoutesAvailable(
+  executor: SqlExecutor,
+  enabled: boolean,
+  log: ApiRoutesOptions['log'],
+): Promise<boolean> {
+  let available: boolean;
+  try {
+    const rows = await executor.all<{ name: string }>({
+      sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('notification_endpoint', 'notification_event', 'notification_delivery', 'notification_attempt')",
+      params: [],
+    });
+    available = rows.length === 4;
+  } catch {
+    if (enabled) throw new KernelConfigError(['notifications: schema is unavailable']);
+    log({ level: 'warn', event: 'notifications.schema_probe_failed' });
+    return false;
+  }
+  if (enabled && !available) throw new KernelConfigError(['notifications: schema is unavailable']);
+  return available;
 }

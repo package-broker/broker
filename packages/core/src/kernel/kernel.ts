@@ -155,7 +155,7 @@ type KernelEnv = {
     readonly waitUntil: (promise: Promise<unknown>) => void;
   };
 };
-type RegisteredRoute = Registration['routes'][number];
+type RegisteredRoute = Registration['routes'][number] & Pick<RouteDefinition, 'corePackageName'>;
 
 const CORE_PLUGIN = 'core';
 /** authorizeRoute rejects an empty permission; the engine ignores this value on the authenticated and self boundaries. */
@@ -168,9 +168,9 @@ const HEALTH_ROUTES = ['/health/live', '/health/ready'] as const;
 const UNCONFIGURED_DEPLOYMENT = 'unconfigured';
 
 function errorFormat(route: string | undefined): ErrorFormat {
-  return route === '/:project/npm' || route?.startsWith('/:project/npm/') === true
-    ? 'npm'
-    : 'nested';
+  if (route === undefined) return 'nested';
+  const reserved = RESERVED_ROOTS.some((root) => route === root || route.startsWith(`${root}/`));
+  return !reserved && /^\/[^/]+\/npm(?:\/|$)/.test(route) ? 'npm' : 'nested';
 }
 
 function authOrSessionPath(path: string): boolean {
@@ -280,7 +280,17 @@ function validateCoreRoutes(
     if (typeof route.path !== 'string') {
       problems.push(`${label}: path must be a string`);
       placeable = false;
-    } else if (!route.path.startsWith(prefix)) {
+    } else if (
+      !route.path.startsWith(prefix) &&
+      !(
+        ecosystem &&
+        route.method === 'POST' &&
+        route.path === '/-/npm/v1/oidc/token/exchange/package/:name' &&
+        route.permission === null &&
+        route.boundary === 'none' &&
+        route.needsOrg === false
+      )
+    ) {
       problems.push(`${label}: path ${JSON.stringify(route.path)} must start with "${prefix}"`);
       placeable = false;
     } else if (route.path === prefix) {
@@ -306,6 +316,7 @@ function validateCoreRoutes(
     }
     problems.push(
       ...routeBoundaryProblems(route, label, {
+        allowOrganizationAlternative: true,
         ...(ecosystem ? { apiVersion: 3 } : { allowSelf: true, allowAuthenticated: true }),
         ...(packageResolver === undefined ? {} : { packageResolver }),
       }),
@@ -566,7 +577,19 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ? AUTHENTICATED_PLACEHOLDER
         : null);
     if (permission === null) {
-      const org = route.needsOrg === false ? null : await resolveOrg(c.req.raw);
+      let org = route.needsOrg === false ? null : await resolveOrg(c.req.raw);
+      // The public provider list can resolve capabilities only for an existing organization.
+      if (
+        route.needsOrg === false &&
+        route.plugin === CORE_PLUGIN &&
+        route.path === '/_pb/auth/providers'
+      ) {
+        try {
+          org = await resolveOrg(c.req.raw);
+        } catch {
+          org = null;
+        }
+      }
       return invoke(route, c, org, null, null, {
         principal: null,
         projectId: null,
@@ -638,8 +661,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...('bearerOnly' in route && route.bearerOnly === true
           ? { bearerOnly: true as const }
           : {}),
+        ...(route.boundary === 'project' && route.organizationAlternative !== undefined
+          ? { organizationAlternative: route.organizationAlternative }
+          : {}),
         ...(route.boundary === 'project' && route.allowArchived === true
           ? { allowArchived: true as const }
+          : {}),
+        ...(route.boundary === 'project' && route.projectSession === true
+          ? { projectSession: true as const }
           : {}),
       },
       params: Object.freeze({ ...c.req.param() }),
@@ -701,7 +730,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       if (binding === undefined || packageActor === null || options.packageResolver === undefined) {
         throw new TypeError('package resolution is not configured');
       }
-      const name = binding.name(authorizationRequest.params);
+      const lookup = route.plugin === CORE_PLUGIN ? route.corePackageName : undefined;
+      const name =
+        lookup === undefined
+          ? binding.name(authorizationRequest.params)
+          : await lookup(org, authorizationRequest.params);
       const absent = (): Response => {
         guard.reason(engineStatusReason(404));
         return routeNotFound(requestId, format);
@@ -796,7 +829,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   }
   const reservedNotFound = (c: Context<KernelEnv>): Response => {
     c.env.guard.reason('route.not_found');
-    return routeNotFound(c.env.requestId);
+    const path = new URL(c.req.url).pathname;
+    return routeNotFound(c.env.requestId, errorFormat(path));
   };
   for (const root of RESERVED_ROOTS) {
     app.all(root, reservedNotFound);

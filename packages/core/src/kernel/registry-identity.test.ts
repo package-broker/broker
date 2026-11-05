@@ -371,6 +371,77 @@ describe('static identity descriptors', () => {
     expect(collectRegistrations([definition]).identityFactory).toBe(definition.identityProviders);
   });
 
+  it('preserves unknown policy on legacy descriptors', () => {
+    const snapshot = collectRegistrations([withDescriptor(descriptor)]).identityDescriptor!;
+    expect(snapshot).toEqual(descriptor);
+    expect(Object.hasOwn(snapshot.compiled[0]!, 'policy')).toBe(false);
+  });
+
+  it.each([undefined, [] as string[], ['example.com']])(
+    'copies and freezes policy with authoritative domains %s',
+    (authoritative) => {
+      const policy = {
+        verifiedDomains: ['example.com'],
+        ...(authoritative === undefined ? {} : { emailAuthoritativeDomains: authoritative }),
+      };
+      const expected = JSON.parse(JSON.stringify(policy)) as unknown;
+      const snapshot = collectRegistrations([
+        withDescriptor({ ...descriptor, compiled: [{ ...entry, policy }] }),
+      ]).identityDescriptor!.compiled[0]!.policy!;
+      expect(snapshot).toEqual(expected);
+      expect(snapshot).not.toBe(policy);
+      expect(snapshot.verifiedDomains).not.toBe(policy.verifiedDomains);
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot.verifiedDomains)).toBe(true);
+      if (authoritative !== undefined) {
+        expect(snapshot.emailAuthoritativeDomains).not.toBe(authoritative);
+        expect(Object.isFrozen(snapshot.emailAuthoritativeDomains)).toBe(true);
+        authoritative.push('changed.example');
+      }
+      policy.verifiedDomains.push('changed.example');
+      expect(snapshot).toEqual(expected);
+    },
+  );
+
+  it('accepts the 100-domain limit for both lists', () => {
+    const domains = Array.from({ length: 100 }, (_, i) => `d${i}.example.com`);
+    const policy = { verifiedDomains: domains, emailAuthoritativeDomains: domains };
+    expect(
+      collectRegistrations([withDescriptor({ ...descriptor, compiled: [{ ...entry, policy }] })])
+        .identityDescriptor!.compiled[0]!.policy,
+    ).toEqual(policy);
+  });
+
+  it.each([
+    undefined,
+    null,
+    [],
+    {},
+    { verifiedDomains: [] },
+    { verifiedDomains: 'example.com' },
+    { verifiedDomains: [42] },
+    { verifiedDomains: ['*.example.com'] },
+    { verifiedDomains: ['EXAMPLE.com'] },
+    { verifiedDomains: ['user@example.com'] },
+    { verifiedDomains: [`${'a'.repeat(250)}.com`] },
+    { verifiedDomains: ['example.com', 'example.com'] },
+    { verifiedDomains: Array(1) },
+    { verifiedDomains: Array.from({ length: 101 }, (_, i) => `d${i}.example.com`) },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: undefined },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: null },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: 'example.com' },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: ['other.com'] },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: ['example.com', 'example.com'] },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: Array(1) },
+    { verifiedDomains: ['example.com'], emailAuthoritativeDomains: Array(101).fill('example.com') },
+    { verifiedDomains: ['example.com'], autoJoin: true },
+    { verifiedDomains: ['example.com'], secret: 'private' },
+  ])('rejects malformed supplied policy %# without exposing values', (policy) => {
+    expect(
+      problemsOf([withDescriptor({ ...descriptor, compiled: [{ ...entry, policy }] })]),
+    ).toEqual(['plugin "sso" identityDescriptor is malformed']);
+  });
+
   it.each([
     ['wrong flag type', { ...descriptor, runtimeProviders: 'true' }],
     ['missing flag', { compiled: [] }],
@@ -512,6 +583,98 @@ describe('identity descriptor snapshot boundary', () => {
       identityDescriptor: value as never,
     });
   }
+
+  it('reads policy fields and indices once without consulting array iterators', () => {
+    const reads: string[] = [];
+    const domains = ['example.com'];
+    Object.defineProperty(domains, Symbol.iterator, {
+      get() {
+        throw new Error('private');
+      },
+    });
+    Object.defineProperty(domains, '0', {
+      get() {
+        reads.push('index');
+        return reads.filter((key) => key === 'index').length === 1 ? 'example.com' : 'invalid';
+      },
+    });
+    const policy = Object.defineProperty({}, 'verifiedDomains', {
+      enumerable: true,
+      get() {
+        reads.push('domains');
+        return reads.filter((key) => key === 'domains').length === 1 ? domains : [];
+      },
+    });
+    const rawEntry = Object.defineProperty({ ...entry }, 'policy', {
+      enumerable: true,
+      get() {
+        reads.push('policy');
+        return reads.filter((key) => key === 'policy').length === 1 ? policy : null;
+      },
+    });
+    const snapshot = collectRegistrations([
+      definition({ ...descriptor, compiled: [rawEntry] }),
+    ]).identityDescriptor!;
+    expect(snapshot.compiled[0]!.policy).toEqual({ verifiedDomains: ['example.com'] });
+    expect(reads).toEqual(['policy', 'domains', 'index']);
+  });
+
+  it.each(['verifiedDomains', 'emailAuthoritativeDomains'] as const)(
+    'rejects oversized %s before reading any domain',
+    (key) => {
+      const reads: string[] = [];
+      const oversized = Array(101) as string[];
+      Object.defineProperty(oversized, '0', {
+        get() {
+          reads.push('index');
+          throw new Error('private');
+        },
+      });
+      const policy = { verifiedDomains: ['example.com'], [key]: oversized };
+      expect(problemsOf([definition({ ...descriptor, compiled: [{ ...entry, policy }] })])).toEqual(
+        malformed,
+      );
+      expect(reads).toEqual([]);
+    },
+  );
+
+  it.each(['verifiedDomains', 'emailAuthoritativeDomains'] as const)(
+    'rejects inherited, unreadable, sparse and malformed-length %s',
+    (key) => {
+      const valid = {
+        verifiedDomains: ['example.com'],
+        emailAuthoritativeDomains: ['example.com'],
+      };
+      const inherited = Object.assign(Object.create({ [key]: valid[key] }) as object, valid);
+      Reflect.deleteProperty(inherited, key);
+      const throwing = Object.defineProperty({ ...valid }, key, {
+        get() {
+          throw new Error('private credential');
+        },
+      });
+      const sparse = Array(1) as string[];
+      Object.setPrototypeOf(sparse, { 0: 'example.com' });
+      for (const policy of [
+        inherited,
+        throwing,
+        { ...valid, [key]: sparse },
+        ...[NaN, Infinity, -1, 1.5, 101].map((length) => ({
+          ...valid,
+          [key]: new Proxy(['example.com'], {
+            get(target, property, receiver) {
+              return property === 'length'
+                ? length
+                : (Reflect.get(target, property, receiver) as unknown);
+            },
+          }),
+        })),
+      ]) {
+        expect(
+          problemsOf([definition({ ...descriptor, compiled: [{ ...entry, policy }] })]),
+        ).toEqual(malformed);
+      }
+    },
+  );
 
   it('validates array indices even when an iterator hides malformed entries', () => {
     const compiled = Object.assign([{ bad: 1 }], { [Symbol.iterator]: function* () {} });

@@ -429,6 +429,18 @@ describe('import rollback store', () => {
     },
   );
 
+  it('keeps source publish policy outside the imported hash domain', async () => {
+    await apply();
+    await exec(
+      "UPDATE source SET require_publish_approval = 1 WHERE org_id = ? AND name = 'registry'",
+      ctx.orgId,
+    );
+    expect(await rollback()).toEqual({
+      status: 'rolled_back',
+      counts: { restored: 7, conflict: 0, expired: 0 },
+    });
+  });
+
   it('never restores a version edited between the read and the batch', async () => {
     await apply();
     beforeBatch = async () => {
@@ -1063,6 +1075,7 @@ describe('import rollback store', () => {
       'role_permission.role_id',
       'representation_clock.project_id',
       'source_sync_package.source_id',
+      'source_discovery_admission.source_id',
     ]);
     const tables = await rows<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",

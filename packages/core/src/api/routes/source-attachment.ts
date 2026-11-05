@@ -1,3 +1,7 @@
+import { accessContextOf } from '../../authz/access-context.js';
+import { buildOrganizationActor } from '../../authz/actor.js';
+import type { ProxyClaimDeps } from '../../sources/proxy-claims.js';
+import { checkProxyClaims } from '../../sources/proxy-claims.js';
 import type { VisibilityService } from '../../catalogue/visibility-service.js';
 import type { OrgContext } from '../../db/port.js';
 import type { SourceRepository } from '../../db/source.js';
@@ -11,6 +15,7 @@ import { SOURCE_ATTACHMENT_API_SPECS } from './source-attachment-schemas.js';
 
 export interface SourceAttachmentRouteDeps extends ApiRouteDeps {
   readonly sources: Pick<SourceRepository, 'get'>;
+  readonly proxyClaims?: ProxyClaimDeps;
   readonly visibility: Pick<VisibilityService, 'attachSource' | 'detachSource'>;
   readonly projectSources: {
     list(
@@ -34,18 +39,37 @@ export function sourceAttachmentRoutes(
     const source = await deps.sources.get(ctx.org, sourceId);
     if (source === null || (source.projectId !== null && source.projectId !== ctx.projectId))
       return null;
-    return ctx.projectId;
+    return { projectId: ctx.projectId, source };
   };
   const routes = [
     apiRoute(attach, async ({ ctx, params, body }) => {
-      const projectId = await target(ctx, params.source);
-      if (projectId === null) return { error: 'not_found' };
+      const resolved = await target(ctx, params.source);
+      if (resolved === null) return { error: 'not_found' };
+      const { projectId, source } = resolved;
+      const verifiedClaims: string[] = [];
+      if (source.type === 'npmjs_proxy') {
+        const actor = accessContextOf(ctx)?.actor;
+        if (deps.proxyClaims === undefined) return { serviceError: 'conflict' };
+        const conflictingClaims = await checkProxyClaims(
+          deps.proxyClaims,
+          ctx.org!,
+          params.source,
+          verifiedClaims,
+        );
+        if (conflictingClaims === null) return { serviceError: 'conflict' };
+        if (conflictingClaims.length > 0)
+          return actor != null &&
+            buildOrganizationActor('organization', actor)?.permissions.has('org:sources:write')
+            ? { error: 'conflict', conflictingClaims }
+            : { serviceError: 'conflict' };
+      }
       const c = projectSessionCallContext(ctx, deps);
       const result = await deps.visibility.attachSource(
         c.org,
         c.fence,
         {
           projectId,
+          ...(source.type === 'npmjs_proxy' ? { verifiedClaims } : {}),
           sourceId: params.source,
           ...(body.precedence === undefined ? {} : { precedence: body.precedence }),
         },
@@ -54,8 +78,9 @@ export function sourceAttachmentRoutes(
       return result.ok ? { status: 204 } : { serviceError: result.error };
     }),
     apiRoute(detach, async ({ ctx, params }) => {
-      const projectId = await target(ctx, params.source);
-      if (projectId === null) return { error: 'not_found' };
+      const resolved = await target(ctx, params.source);
+      if (resolved === null) return { error: 'not_found' };
+      const { projectId } = resolved;
       const attached = await deps.projectSources.list(ctx.org!, { projectId });
       if (!attached.some(({ sourceId }) => sourceId === params.source))
         return { error: 'not_found' };

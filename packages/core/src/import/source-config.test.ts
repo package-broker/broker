@@ -1,10 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { createOutboundPolicy } from '../sources/url-policy.js';
-import {
-  parseSourceConfig,
-  type SourceConfig,
-  type SourceType as RuntimeType,
-} from '../sources/config.js';
+import { parseSourceConfig, type SourceConfig } from '../sources/config.js';
 import {
   ECOSYSTEM_OF,
   SOURCE_CONFIG_SCHEMAS,
@@ -299,7 +295,7 @@ describe('source config schemas agree with parseSourceConfig', () => {
     it(`${c.valid ? 'accepts' : 'refuses'} ${c.label}`, () => {
       expect(isConfigOf(c.type, c.config)).toBe(c.valid);
       const runtime = parseSourceConfig(
-        c.type as RuntimeType,
+        c.type,
         ECOSYSTEM_OF[c.type],
         c.url,
         runtimeForm(c.config),
@@ -363,15 +359,15 @@ describe('import to runtime source config contract', () => {
 describe('ECOSYSTEM_OF mirror', () => {
   for (const type of SOURCE_TYPES) {
     const sample = cases.find((c) => c.type === type && c.valid);
-    it(`${type} matches parseSourceConfig for its ecosystem and refuses the other`, () => {
+    it(`${type} admits its import ecosystem and checks both runtime ecosystems`, () => {
       if (sample === undefined) throw new Error('no valid sample');
       const mirrored = ECOSYSTEM_OF[type];
       const opposite = mirrored === 'composer' ? 'npm' : 'composer';
+      expect(isConfigOf(type, sample.config, mirrored)).toBe(true);
+      expect(isConfigOf(type, sample.config, opposite)).toBe(false);
       const args = [sample.url, runtimeForm(sample.config), options] as const;
       expect(parseSourceConfig(type, mirrored, ...args).ok).toBe(true);
-      const refused = parseSourceConfig(type, opposite, ...args);
-      expect(refused.ok).toBe(false);
-      if (!refused.ok) expect(refused.problems.map((p) => p.field)).toContain('ecosystem');
+      expect(parseSourceConfig(type, opposite, ...args).ok).toBe(type === 'vcs');
     });
   }
 
@@ -397,4 +393,9 @@ describe('config shape', () => {
     expect(sorted.selection.patterns).toEqual(['a/*', 'z/*']);
     expect(sorted.mirrorsFallback).toBe(false);
   });
+});
+
+it('refuses npm VCS import configuration even with a canonical npm name', () => {
+  expect(isConfigOf('vcs', vcs({ packageName: '@scope/widget' }), 'npm')).toBe(false);
+  expect(isConfigOf('vcs', vcs({ packageName: 'vendor/widget' }), 'npm')).toBe(false);
 });

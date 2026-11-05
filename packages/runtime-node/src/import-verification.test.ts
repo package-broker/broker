@@ -9,7 +9,7 @@ import {
   IMPORT_RUN_JOB,
   IMPORT_VERIFICATION_JOB,
 } from '@package-broker/core/import/run-service';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import type { PluginPorts } from '@package-broker/core/plugin';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
 import { createSecretCipher } from '@package-broker/core/secrets/cipher';
@@ -143,6 +143,18 @@ async function fixture() {
   const objects = new Map<string, Uint8Array>();
   const metadata = createBlobRepository(executor);
   const blobs: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     async put(org, sha, body, info) {
       objects.set(sha, new Uint8Array(await new Response(body).arrayBuffer()));
       const generation = await metadata.reserve(org, sha);

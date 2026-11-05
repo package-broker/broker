@@ -11,7 +11,7 @@ import { setContextPackageActor } from '../internal/package-actor.js';
 import { setResolvedPackage } from '../internal/package-context.js';
 import { setWaitUntil } from '../kernel/execution.js';
 import type { JobContext } from '../platform/jobs.js';
-import type { PlatformPorts, RequestContext } from '../plugin.js';
+import type { RequestContext } from '../plugin.js';
 import { createRegistryModule, type RegistryModule } from '../registry/module.js';
 import { resolveRegistryConfig } from '../registry/registry-config.js';
 import { createOutboundPolicy } from '../sources/url-policy.js';
@@ -378,8 +378,14 @@ function mount(fixture: {
       },
     },
     observability: { log: vi.fn() },
-    jobs: { enqueue: shared.jobs, get: vi.fn(async () => null) },
-  } as unknown as Partial<PlatformPorts>;
+    jobs: {
+      async enqueueStatements() {
+        throw new Error('not_implemented');
+      },
+      enqueue: shared.jobs,
+      get: vi.fn(async () => null),
+    },
+  } as unknown as Parameters<typeof createRegistryModule>[0]['ports'];
   const module = createRegistryModule({
     runtime: 'node',
     ports,

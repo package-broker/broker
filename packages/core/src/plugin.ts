@@ -135,6 +135,15 @@ export interface IdentityDescriptor {
     readonly id: string;
     readonly kind: 'oidc' | 'cloudflare-access';
     readonly anchor: string;
+    /**
+     * Absent means the compiled provider's domain policy is unknown.
+     * Lists contain at most 100 unique lowercase domains; verifiedDomains is nonempty,
+     * and emailAuthoritativeDomains, when supplied, is a subset of verifiedDomains.
+     */
+    readonly policy?: {
+      readonly verifiedDomains: readonly string[];
+      readonly emailAuthoritativeDomains?: readonly string[];
+    };
   }[];
 }
 
@@ -149,7 +158,7 @@ export interface PluginDefinition extends PluginApi {
   readonly binds?: readonly ('source' | 'identity' | 'audit-trail')[];
   /** Required when `binds` contains 'identity', rejected otherwise. */
   readonly identityProviders?: IdentityProviderFactory;
-  /** Static description of the identity providers this plugin builds; no secrets, no policy. */
+  /** Static description of the identity providers this plugin builds; no secrets. */
   readonly identityDescriptor?: IdentityDescriptor;
   /** Required when `binds` contains 'source', rejected otherwise. Needs apiVersion 3. */
   readonly sourceProviders?: SourceProviderFactory;
@@ -157,11 +166,35 @@ export interface PluginDefinition extends PluginApi {
   readonly auditTrail?: AuditTrailDefinition;
   /** Static sink declarations; ids must be unique. Needs apiVersion 4. */
   readonly auditSinks?: readonly AuditSinkDefinition[];
+  readonly publishPolicy?: PublishPolicyDefinition;
   readonly migrations?: { readonly dir: string };
   /** Synchronous and pure: declares routes, hooks and jobs. Runs in pb build and at kernel boot. */
   readonly register?: (registry: PluginRegistry) => void;
   /** Runs once per kernel after every plugin registered. Receives ports, never adapters. */
   readonly init?: (ports: PluginPorts) => void | Promise<void>;
+}
+
+export interface PublishInspection {
+  readonly signal: AbortSignal;
+  readonly name: string;
+  readonly version: string;
+  readonly manifest: Readonly<Record<string, unknown>>;
+  readonly integrity: string;
+  readonly sizeBytes: number;
+  openTarball(): Promise<ReadableStream<Uint8Array>>;
+}
+
+export interface PublishPolicyVerdict {
+  readonly verdict: 'allow' | 'deny';
+  readonly reason?: string;
+}
+
+export interface PublishPolicyDefinition {
+  readonly id: string;
+  /** Honour input.signal by stopping inspection and cancelling outstanding I/O when aborted.
+   * Workers start persisted scans on the next cron tick.
+   */
+  inspect(ctx: OrgContext, input: PublishInspection): Promise<PublishPolicyVerdict>;
 }
 
 export interface PluginRegistry {
@@ -285,8 +318,66 @@ export interface AuthMapGroupsInput {
 /** Narrow-only: `keep` must be a subset of the groups passed in; undefined keeps them all. */
 export type MapGroupsResult = { readonly keep: readonly string[] } | undefined;
 
+/** Normalized compatibility hints; spoofable, never the raw User-Agent or any other header. */
+export type ClientHints = Readonly<{
+  family: 'npm' | 'pnpm' | 'yarn' | 'composer' | 'unknown';
+  /** A validated stable numeric version, or null when the family is unknown. */
+  version: string | null;
+}>;
+
+export type ReadKind = 'metadata' | 'version' | 'tags' | 'dist' | 'search' | 'listing' | 'readme';
+
+/** One authorized candidate version with the immutable facts a read policy may use. */
+export type VersionFact = Readonly<{
+  packageId: string;
+  sourceId: string;
+  packageKey: string;
+  versionId: string;
+  version: string;
+  normalizedVersion: string;
+  revision: number;
+  publishedAt: string;
+  ageBasis: 'published' | 'imported' | 'first_seen';
+}>;
+
+export type ReadPolicyBase = Readonly<{
+  org: Readonly<{ orgId: string }>;
+  projectId: string;
+  principal: Readonly<{ kind: 'user' | 'service' | 'customer'; id: string }>;
+  ecosystem: PackageEcosystem;
+  client: ClientHints;
+  now: string;
+  /** Aborted when the request or the remaining hook budget ends; a later result is ignored. */
+  signal: AbortSignal;
+}>;
+
+export type ReadPolicyInput = ReadPolicyBase &
+  (
+    | Readonly<{ phase: 'request'; kind: ReadKind; packageKey: string | null }>
+    | Readonly<{ phase: 'versions'; versions: readonly VersionFact[] }>
+  );
+
+export type ReadPolicyReason = 'restricted' | 'client_unsupported';
+
+/**
+ * Deny-only: undefined abstains, `deny` refuses the whole request, `deniedVersions` (versions phase
+ * only) names candidates of this call. There is no allow value.
+ */
+export type ReadPolicyResult =
+  | undefined
+  | Readonly<{ deny: true; reason: ReadPolicyReason }>
+  | Readonly<{
+      deniedVersions: readonly Readonly<{
+        versionId: string;
+        revision: number;
+        reason: ReadPolicyReason;
+      }>[];
+    }>;
+
 export interface HookMap {
   'access.check': (input: AccessCheckInput) => AccessCheckResult | Promise<AccessCheckResult>;
+  /** Plugin API 4: restricts package reads after authorization; it can never widen access. */
+  'registry.read': (input: ReadPolicyInput) => ReadPolicyResult | Promise<ReadPolicyResult>;
   'auth.resolveIdentity': (
     input: AuthResolveIdentityInput,
   ) => AccessCheckResult | Promise<AccessCheckResult>;
@@ -298,3 +389,6 @@ export function definePlugin<const T extends PluginDefinition>(
 ): T {
   return definition;
 }
+
+export { npmVcsDescription, parseNpmVcsManifest } from './ingest/vcs/npm-adapter.js';
+export { npmVersionsFromRefs } from './registry/npm/version-rules.js';

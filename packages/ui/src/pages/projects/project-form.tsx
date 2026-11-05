@@ -30,7 +30,7 @@ const policies = [
     label: 'Include publish permission',
     summary: 'Publish permission included',
     description:
-      'Also allow the package publishing permission. Publishing is not available in this version.',
+      'Also allow the package publishing permission. Publish npm packages to an enabled hosted source that claims the package name.',
   },
   {
     value: 'full',
@@ -81,7 +81,7 @@ export function ProjectForm(props: {
       ref={form}
       noValidate
       aria-label={editing ? 'Project settings' : 'New project'}
-      className="my-6 grid min-w-0 gap-4"
+      className="my-6 grid min-w-0 max-w-5xl items-start gap-x-6 gap-y-4 lg:grid-cols-2"
       onSubmit={async (event) => {
         event.preventDefault();
         if (props.disabled || busy) return;
@@ -112,14 +112,14 @@ export function ProjectForm(props: {
         }
       }}
     >
-      <div className="grid gap-1">
+      <div className="grid min-w-0 gap-1">
         <Label htmlFor={`${id}-name`}>Project name</Label>
         <Input
           id={`${id}-name`}
           name="name"
           required
           className="h-11"
-          placeholder="e.g. FastWhiteCat"
+          placeholder="e.g. Acme Company"
           value={draft.name}
           onChange={(event) => setDraft(changeName(draft, event.target.value))}
           aria-describedby={`${id}-name-help ${id}-name-error`}
@@ -132,7 +132,7 @@ export function ProjectForm(props: {
           {errors.name}
         </p>
       </div>
-      <div className="grid gap-1">
+      <div className="grid min-w-0 gap-1">
         {editing ? (
           <>
             <p className="text-sm font-medium">Project slug</p>
@@ -146,7 +146,7 @@ export function ProjectForm(props: {
               name="slug"
               required
               className="h-11"
-              placeholder="e.g. fastwhitecat"
+              placeholder="e.g. acme-company"
               value={draft.slug}
               onChange={(event) => setDraft(changeSlug(draft, event.target.value))}
               aria-describedby={`${id}-slug-help ${id}-slug-rule ${id}-slug-error`}
@@ -178,24 +178,24 @@ export function ProjectForm(props: {
           </>
         ) : null}
       </div>
-      <div className="grid min-w-0 gap-2 rounded-md border border-neutral-300 bg-neutral-50 p-4">
+      <div className="grid min-w-0 gap-2 rounded-md border border-neutral-300 bg-neutral-50 p-4 lg:col-span-2">
         <p className="text-sm font-medium">Repository URLs</p>
         <dl className="grid min-w-0 gap-2 text-sm">
-          <div>
+          <div className="min-w-0">
             <dt>Composer</dt>
-            <dd className="break-all">
+            <dd className="overflow-x-auto whitespace-nowrap" tabIndex={0}>
               <code>{`${origin}/${previewSlug}`}</code>
             </dd>
           </div>
-          <div>
+          <div className="min-w-0">
             <dt>npm</dt>
-            <dd className="break-all">
+            <dd className="overflow-x-auto whitespace-nowrap" tabIndex={0}>
               <code>{`${origin}/${previewSlug}/npm/`}</code>
             </dd>
           </div>
         </dl>
       </div>
-      <details ref={policy} className="min-w-0 rounded-md border border-neutral-300">
+      <details ref={policy} className="min-w-0 rounded-md border border-neutral-300 lg:col-span-2">
         <summary className="min-h-11 cursor-pointer p-4 font-medium focus-visible:ring-2 focus-visible:ring-blue-600">
           Access policy
           <span className="block text-sm font-normal text-neutral-600">
@@ -254,25 +254,33 @@ export function ProjectForm(props: {
         </fieldset>
       </details>
       {props.project?.requirePublishApproval ? (
-        <p className="text-sm text-neutral-600">
+        <p className="text-sm text-neutral-600 lg:col-span-2">
           Publish approval is saved as required, but approval is not enforced in this version.
         </p>
       ) : null}
-      {changeNotice ? <p className="text-sm text-neutral-600">{changeNotice}</p> : null}
-      <Button type="submit" className="min-h-11 w-full" disabled={props.disabled || busy}>
-        {busy ? (
-          editing ? (
-            'Saving settings…'
+      {changeNotice ? (
+        <p className="text-sm text-neutral-600 lg:col-span-2">{changeNotice}</p>
+      ) : null}
+      <div className="lg:col-span-2">
+        <Button
+          type="submit"
+          className="min-h-11 w-full sm:w-auto lg:w-auto"
+          disabled={props.disabled || busy}
+        >
+          {busy ? (
+            editing ? (
+              'Saving settings…'
+            ) : (
+              'Creating project…'
+            )
+          ) : editing ? (
+            'Save settings'
           ) : (
-            'Creating project…'
-          )
-        ) : editing ? (
-          'Save settings'
-        ) : (
-          <>Create project</>
-        )}
-      </Button>
-      <p ref={status} role="status" tabIndex={-1}>
+            <>Create project</>
+          )}
+        </Button>
+      </div>
+      <p ref={status} role="status" tabIndex={-1} className="lg:col-span-2">
         {busy
           ? editing
             ? 'Saving settings…'

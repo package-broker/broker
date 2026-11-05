@@ -1,3 +1,4 @@
+export const FORBIDDEN_NAME_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
 export const MAX_NPM_NAME_LENGTH = 214;
 export const MAX_KEY_LENGTH = 428;
 
@@ -30,7 +31,7 @@ function composerKey(name: string): string {
 
 function npmKey(name: string, legacyCase: boolean): string {
   if (name.length < 1 || name.length > MAX_NPM_NAME_LENGTH) {
-    throw new PackageNameError('npm package name must be 1 to 214 characters');
+    throw new PackageNameError(`npm package name must be 1 to ${MAX_NPM_NAME_LENGTH} characters`);
   }
   const scoped = name.startsWith('@');
   const segments = (scoped ? name.slice(1) : name).split('/');

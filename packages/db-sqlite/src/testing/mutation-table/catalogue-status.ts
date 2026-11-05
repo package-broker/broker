@@ -111,6 +111,11 @@ export const entries: readonly MutationEntry[] = [
     ],
     waivers: [
       {
+        locate: /(?:pa\.)?org_id = \?(?= and (?:pa\.)?version_id = )/,
+        reason:
+          'The publish gate repeats the independently scoped version identity. Its composite organization/version FK prevents an approval in another organization from referring to the target; publish-gate behavioral contracts verify the refusal.',
+      },
+      {
         locate: /"(?:guard_\w+|s|actor|i|hp_session)"\."org_id" = /,
         reason:
           'delegated actorHolds and permissionRows authority predicates have their own registrations in actor-authority.ts and access.ts',

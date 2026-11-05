@@ -1,4 +1,5 @@
 import { auditTrail } from './audit-trail.test.support.js';
+import * as registryModule from '@package-broker/core/registry/module';
 import { createPolicyFetch } from '@package-broker/core/sources/policy-fetch';
 import { createOutboundPolicy } from '@package-broker/core/sources/url-policy';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
@@ -437,6 +438,50 @@ describe('startNode', () => {
     },
   );
 
+  it.each([
+    [undefined, false],
+    [{ enabled: false }, false],
+    [{ enabled: true }, true],
+  ] as const)('notifications %j register delivery jobs: %s', async (notifications, registered) => {
+    const directory = await realpath(await mkdtemp(join(process.cwd(), '.pb-notifications-')));
+    const { discoveredMigrations } =
+      await import('@package-broker/db-sqlite/testing/migrated-database');
+    let broker: Awaited<ReturnType<typeof startNode>> | undefined;
+    try {
+      broker = await startNode({
+        plugins: [],
+        migrations: await discoveredMigrations(),
+        ...(notifications === undefined ? {} : { notifications }),
+        env: {
+          PB_SQLITE_PATH: join(directory, 'broker.sqlite'),
+          PB_BLOB_ROOT: join(directory, 'blobs'),
+          PB_ORG_SLUG: 'acme',
+          PB_ORG_NAME: 'Acme',
+          PB_MASTER_KEY: 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+          PB_PUBLIC_URL: 'https://broker.test',
+          DEPLOYMENT_ID: 'notifications-test',
+        },
+        platformPorts: {
+          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
+          cache: { adapter: 'lru', maxBytes: 1024 },
+          jobs: { adapter: 'database', maxRunning: 1 },
+          observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
+        },
+        stdout: { write: () => true, on: () => undefined },
+        stderr: { write: () => true, on: () => undefined },
+      });
+      const kernel = await broker.ready();
+      expect(
+        kernel.registration.jobs.some(
+          (job) => job.qualifiedName === 'core:notification-deliver:v1',
+        ),
+      ).toBe(registered);
+    } finally {
+      await broker?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('MCP enabled initializes with a read token and dispatches the runtime tools', async () => {
     const key = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
     const path = databasePath();
@@ -717,7 +762,7 @@ describe('startNode', () => {
   describe('platform ports', () => {
     const MASTER = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
     const ports: PlatformPortConfig = {
-      blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1_048_576 },
+      blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
       cache: { adapter: 'lru', maxBytes: 1_048_576 },
       jobs: { adapter: 'database', maxRunning: 1 },
       observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
@@ -822,6 +867,40 @@ describe('startNode', () => {
       });
     }
 
+    it.each([1024, 50000000, 60000000])(
+      'resolves the Node publish cap for blob ceiling %s and warns only when clamped',
+      async (maxBytes) => {
+        const createModule = vi.spyOn(registryModule, 'createRegistryModule');
+        const err = capture();
+        try {
+          const broker = await start(
+            {},
+            { ...ports, blob: { ...ports.blob, maxBytes } },
+            { stderr: err.stream },
+          );
+          running.push(broker);
+          expect(createModule.mock.calls[0]?.[0].registry.caps.publishTarballBytes).toBe(
+            Math.min(maxBytes, 50000000),
+          );
+          expect(
+            err.lines().filter((line) => line['event'] === 'registry.publish_cap_clamped'),
+          ).toEqual(
+            maxBytes < 50000000
+              ? [
+                  expect.objectContaining({
+                    level: 'warn',
+                    publish_tarball_bytes: 50000000,
+                    blob_max_bytes: maxBytes,
+                  }),
+                ]
+              : [],
+          );
+        } finally {
+          createModule.mockRestore();
+        }
+      },
+    );
+
     it('7: builds blob, cache, jobs and observability and scopes them per plugin on both paths', async () => {
       const out = capture();
       const err = capture();
@@ -887,7 +966,7 @@ describe('startNode', () => {
         bucketEnv: 'PB_S3_BUCKET',
         accessKeyIdEnv: 'PB_S3_KEY',
         secretAccessKeyEnv: 'PB_S3_SECRET',
-        maxBytes: 1_048_576,
+        maxBytes: 50_000_000,
       } as const;
       const blank = (name: string): Record<string, string> => ({ [name]: '' });
       const cases: Array<[string, Record<string, string>, PlatformPortConfig, string]> = [
@@ -1519,6 +1598,7 @@ describe('blob purge timing', () => {
       const metadata = {
         softDelete: async () => false,
         claimPurge: async () => null,
+        inspect: async () => null,
         canStartRemove: async () => false,
         markDeleted: async () => false,
         cancelPurge: async () => false,
@@ -1608,7 +1688,7 @@ it.each([undefined, true, false])(
           DEPLOYMENT_ID: 'vulnerability-test',
         },
         platformPorts: {
-          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+          blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
           cache: { adapter: 'lru', maxBytes: 1024 },
           jobs: { adapter: 'database', maxRunning: 1 },
           observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },

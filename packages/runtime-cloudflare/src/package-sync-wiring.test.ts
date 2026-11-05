@@ -491,19 +491,28 @@ async function boot(ecosystem: 'npm' | 'composer' = 'npm') {
 }
 
 const BASE_JOBS = [
+  'core:discovery-rules:v1',
+  'core:discovery-rule:v1',
+  'core:publish-approval-expire:v1',
+  'core:publish-scan:v1',
+  'core:publish-scan-sweep:v1',
   'core:vulnerability-sync:v1',
   'core:source-sync:v1',
+  'core:npm-vcs-build:v1',
   'core:source-poll:v1',
   'core:retention-scan:v1',
   'core:blob-purge:v1',
   'core:audit-frontier:v1',
   'core:audit-health-observe:v1',
   'core:audit-maintain:v1',
+  'core:package-access-expire:v1',
   'core:audit-seal:v1',
   'core:audit-verify:v1',
   'core:import-verify:v1',
   'core:import-apply:v1',
   'core:import-rollback:v1',
+  'core:oidc-replay-expire:v1',
+  'core:npm-login-expire:v2',
   'core:pat-offboarding:v1',
   'core:pat-offboarding-sweep:v1',
 ];

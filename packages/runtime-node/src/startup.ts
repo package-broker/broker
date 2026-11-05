@@ -93,6 +93,7 @@ export interface StartOptions {
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
+  readonly notifications?: BrokerConfig['notifications'];
   readonly stdout?: StdioStream;
   readonly stderr?: StdioStream;
   readonly fetch?: typeof fetch;
@@ -265,12 +266,13 @@ function checkTokens(input: StartOptions['tokens']): void {
   }
 }
 
-function identityEnv(env: Env): Env {
-  return Object.freeze(
-    Object.fromEntries(
+function authEnv(env: Env): Env {
+  return Object.freeze({
+    ...Object.fromEntries(
       Object.entries(env).filter(([name]) => name.startsWith(IDENTITY_ENV_PREFIX)),
     ),
-  );
+    ...(env['PB_AUTH_LOCAL'] === undefined ? {} : { PB_AUTH_LOCAL: env['PB_AUTH_LOCAL'] }),
+  });
 }
 
 async function bootstrapOrganization(
@@ -291,6 +293,7 @@ export const AUTH_EVENTS = Object.freeze([
   'auth.hook.denied',
   'auth.hook.error',
   'auth.local.locked',
+  'auth.local.refused_disabled',
   'auth.local.setup.completed',
   'auth.local.setup.refused',
   'auth.login.refused',
@@ -309,6 +312,7 @@ export const NODE_RUNTIME_EVENTS: ReadonlySet<string> = new Set([
   'http.error',
   'shutdown.jobs_abandoned',
   'startup.failed',
+  'registry.publish_cap_clamped',
   'process.uncaught_exception',
   'process.unhandled_rejection',
 ]);
@@ -553,6 +557,8 @@ async function buildServices(
   ports: PlatformPortConfig,
   options: StartOptions,
   executor: SqlExecutor,
+  admissionWaitMs: number,
+  telemetry: Telemetry,
 ): Promise<PlatformServices> {
   blobPurgeTiming(BLOB_DELETE_TIMEOUT_MS, BLOB_PURGE_LEASE_SECONDS);
   const byteStore = await openByteStore(ports.blob, options.env, options.fetch);
@@ -560,10 +566,21 @@ async function buildServices(
   try {
     blob = createBlobStore(
       byteStore,
-      createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+      createBlobRepository(executor, {
+        purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS,
+        supersededObjects: {
+          remove: (key) => byteStore.remove(key),
+          counter: (outcome) =>
+            telemetry
+              .observe()
+              .counter('pb.blob.operations', { kind: 'superseded_remove', outcome }),
+        },
+      }),
       {
+        observability: telemetry.observe(),
         admission: createBlobUploadAdmission(),
         maxBytes: ports.blob.maxBytes,
+        admissionWaitMs,
       },
     );
   } catch (error) {
@@ -677,6 +694,14 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
   const trustedProxy = parseTrustedProxy(options.env['PB_TRUSTED_PROXY']);
   if (trustedProxy === null) throw new StartupConfigError('PB_TRUSTED_PROXY', TRUSTED_PROXY_RULE);
   if (trustedProxy.kind === 'legacy') options.log?.(TRUSTED_PROXY_DEPRECATION);
+  if (options.env['PB_TRUSTED_PROXY'] === undefined)
+    options.log?.({
+      level: 'info',
+      event: 'config.proxy_unset',
+      key: 'PB_TRUSTED_PROXY',
+      message:
+        'Set PB_TRUSTED_PROXY behind a reverse proxy so anonymous admission uses client addresses.',
+    });
 
   const log = options.log;
   const path = options.env['PB_SQLITE_PATH'] ?? DEFAULT_DATABASE_PATH;
@@ -740,13 +765,31 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
     if (options.registry !== undefined && ports === null) {
       throw new StartupConfigError('registry', 'requires platformPorts');
     }
-    const registry = registryConfig(options.registry, origin);
+    let registry = registryConfig(options.registry, origin);
     checkTokens(options.tokens);
     await selfTestPasswordHashing(keyring);
 
     if (ports !== null) {
       telemetry = createTelemetry(ports, options);
-      services = await buildServices(ports, options, opened.executor);
+      if (ports.blob.maxBytes < registry.caps.publishTarballBytes) {
+        telemetry.observe().log({
+          level: 'warn',
+          event: 'registry.publish_cap_clamped',
+          publish_tarball_bytes: registry.caps.publishTarballBytes,
+          blob_max_bytes: ports.blob.maxBytes,
+        });
+        registry = {
+          ...registry,
+          caps: { ...registry.caps, publishTarballBytes: ports.blob.maxBytes },
+        };
+      }
+      services = await buildServices(
+        ports,
+        options,
+        opened.executor,
+        registry.timers.waitBudgetMs,
+        telemetry,
+      );
     }
 
     if (options.env['PB_MIGRATE'] !== 'off') {
@@ -795,7 +838,8 @@ export async function startNode(options: StartOptions): Promise<NodeBroker> {
       ...(options.tokens === undefined ? {} : { tokens: options.tokens }),
       ...(options.vulnerability === undefined ? {} : { vulnerability: options.vulnerability }),
       ...(options.mcp === undefined ? {} : { mcp: options.mcp }),
-      auth: { keyring, publicOrigin: origin, env: identityEnv(options.env) },
+      ...(options.notifications === undefined ? {} : { notifications: options.notifications }),
+      auth: { keyring, publicOrigin: origin, env: authEnv(options.env) },
       ...(servingGate === undefined ? {} : { servingGate }),
       ...(telemetry !== undefined
         ? { log: sinkLog(telemetry.observe) }

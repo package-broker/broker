@@ -1,3 +1,4 @@
+import { ProductFooter } from './components/product-footer.js';
 import {
   createContext,
   useContext,
@@ -6,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
   type FormEvent,
+  type ReactNode,
 } from 'react';
 import type { ApiClient, ApiErrorCode, ApiRequestDescription, ApiResult } from './api.js';
 import type { paths } from './api-types.js';
@@ -17,6 +19,7 @@ import {
   type PendingDisplay,
 } from './pending.js';
 import { encodeQr, type QrMatrix } from './qr.js';
+import { APP_PATH } from './app-path.js';
 import { buildListFilterHash, type HashRoute } from './page-hash.js';
 import { Alert, AlertDescription } from './components/ui/alert.js';
 import { Button } from './components/ui/button.js';
@@ -91,8 +94,17 @@ export function isNavigableLocation(location: string): boolean {
 }
 
 export function safePageHash(hash: string): string {
+  const detail = /^#\/packages\/([0-7][0-9A-HJKMNP-TV-Z]{25})(\?[\s\S]*)?$/.exec(hash);
+  if (detail)
+    return safePageHash(`#/packages${detail[2] ?? ''}`).replace(
+      '#/packages',
+      `#/packages/${detail[1]}`,
+    );
+  if (/^#\/npm-login\/[A-Za-z0-9_-]{43}$/.test(hash)) return hash;
   const match =
-    /^#\/(projects|access|sources|packages|tokens|audit|import|login)(?:\?([\s\S]*))?$/.exec(hash);
+    /^#\/(projects|access|sources|packages|tokens|notifications|audit|import|login)(?:\?([\s\S]*))?$/.exec(
+      hash,
+    );
   if (match === null || match[0] !== hash) return '#/projects';
   const query = new URLSearchParams(match[2]);
   return buildListFilterHash((match[1] === 'login' ? 'projects' : match[1]) as HashRoute, {
@@ -145,9 +157,13 @@ export async function startSso(
   return 'navigated';
 }
 
+function localAuthDisabled(result: ApiResult<unknown>): boolean {
+  return !result.ok && result.status === 403 && result.code === 'local_auth_disabled';
+}
+
 export interface LoginState {
   readonly status: 'idle' | 'busy' | 'signed-in' | 'error';
-  readonly error: 'invalid' | 'unavailable' | null;
+  readonly error: 'invalid' | 'unavailable' | 'disabled' | null;
 }
 
 export interface LoginInput {
@@ -172,7 +188,14 @@ export function createLoginController(deps: { client: AuthClient; onSignedIn: ()
         deps.onSignedIn();
         return;
       }
-      store.set({ status: 'error', error: result.status === 0 ? 'unavailable' : 'invalid' });
+      store.set({
+        status: 'error',
+        error: localAuthDisabled(result)
+          ? 'disabled'
+          : result.status === 0
+            ? 'unavailable'
+            : 'invalid',
+      });
     },
   };
 }
@@ -185,6 +208,7 @@ export interface ReauthState {
 }
 
 export interface ReplayResult {
+  readonly cancelled?: boolean;
   readonly createdSourceId?: string;
   readonly path: string;
   readonly ok: boolean;
@@ -256,7 +280,12 @@ export function createReauthFlow(deps: {
     },
 
     decline(): void {
+      const { action } = store.get();
       store.set({ dialog: 'closed', action: null, outcome: null });
+      if (action?.path.startsWith('/_pb/sources/discovery/rules')) {
+        for (const listener of replayListeners)
+          listener({ path: action.path, ok: false, status: 0, cancelled: true });
+      }
     },
 
     async confirm(): Promise<void> {
@@ -301,11 +330,14 @@ export function createReauthFlow(deps: {
       for (const listener of replayListeners) listener(outcome);
     },
 
-    async submitLocal(input: { password: string; code: string }): Promise<'done' | 'refused'> {
+    async submitLocal(input: {
+      password: string;
+      code: string;
+    }): Promise<'done' | 'refused' | 'disabled'> {
       const result = await deps.client.request('post', '/_pb/auth/local/reauth', {
         body: { password: input.password, code: input.code },
       });
-      return result.ok ? 'done' : 'refused';
+      return result.ok ? 'done' : localAuthDisabled(result) ? 'disabled' : 'refused';
     },
   };
 }
@@ -333,7 +365,7 @@ export const SETUP_NOTICE_TEXT: Readonly<Record<SetupNotice, string>> = {
 };
 
 export interface SetupState {
-  readonly stage: 'token' | 'enroll' | 'done' | 'uncertain';
+  readonly stage: 'token' | 'enroll' | 'done' | 'uncertain' | 'disabled';
   readonly busy: boolean;
   readonly notice: SetupNotice | null;
   readonly enrollment: { readonly secret: string; readonly qr: QrMatrix | null } | null;
@@ -381,6 +413,11 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
       const result = await deps.client.request('post', '/_pb/auth/local/setup/start', {
         body: { token: candidate },
       });
+      if (localAuthDisabled(result)) {
+        token = null;
+        store.set({ busy: false, stage: 'disabled', notice: null, enrollment: null });
+        return;
+      }
       if (!result.ok) {
         store.set({ busy: false, notice: startNotice(result.status) });
         return;
@@ -427,6 +464,11 @@ export function createSetupController(deps: { client: AuthClient; onSignedIn?: (
         token = null;
         store.set({ busy: false, stage: 'done', enrollment: null });
         deps.onSignedIn?.();
+        return;
+      }
+      if (localAuthDisabled(result)) {
+        token = null;
+        store.set({ busy: false, stage: 'disabled', notice: null, enrollment: null });
         return;
       }
       if (result.status === 0 || result.status >= 500) {
@@ -536,15 +578,111 @@ function SsoButtons(props: {
   );
 }
 
+function AvailabilityMessage(props: {
+  status: 'loading' | 'ready' | 'error';
+  local: boolean;
+  providers: readonly AuthProvider[];
+}) {
+  if (props.status === 'loading') return <p role="status">Loading sign-in options…</p>;
+  if (props.status === 'error')
+    return <p role="alert">Sign-in options could not be loaded. Reload the page to try again.</p>;
+  if (!props.local && props.providers.length === 0)
+    return <p>Contact your administrator for help signing in.</p>;
+  return null;
+}
+
+const SSO_FAILURE_MESSAGES: Readonly<Record<string, string>> = {
+  state_invalid: 'The sign-in request expired or could not be verified. Start sign-in again.',
+  state_mismatch: 'The sign-in response did not match your request. Start sign-in again.',
+  no_session: 'Your session ended. Sign in again, then retry the action within 10 minutes.',
+  session_inactive: 'Your session ended. Sign in again, then retry the action within 10 minutes.',
+  no_auth_time:
+    'Your provider did not confirm a fresh sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  stale_auth_time:
+    'Your provider returned an older sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  not_supported:
+    'Your provider cannot confirm a fresh sign-in. Sign out and sign in again, then retry the action within 10 minutes.',
+  not_sso_session:
+    'Use the sign-in method associated with your current session to confirm this action.',
+  identity_mismatch: 'Sign in with the same account used for your current session.',
+  anchor_mismatch: 'Your sign-in provider configuration changed. Contact your administrator.',
+  provider_rebound: 'Your sign-in provider configuration changed. Contact your administrator.',
+  provider_error: 'The sign-in provider could not complete the request. Try signing in again.',
+  missing_credentials: 'The provider did not return a sign-in response. Start sign-in again.',
+  invalid_token: 'The provider response could not be verified. Start sign-in again.',
+  email_missing:
+    'Your provider did not supply the account details needed to sign in. Contact your administrator.',
+  email_unverified:
+    'Your provider has not verified your account address. Contact your administrator.',
+  domain_not_verified:
+    'Your account domain is not approved for this organization. Contact your administrator.',
+  not_invited: 'Your account has not been granted access. Contact your administrator.',
+  user_suspended: 'Your account is suspended. Contact your administrator.',
+  hook_denied: 'Organization policy refused this sign-in. Contact your administrator.',
+  policy: 'Organization policy refused confirmation. Contact your administrator.',
+  too_many_groups: 'Your provider returned more groups than allowed. Contact your administrator.',
+  already_linked: 'This provider account is already linked. Contact your administrator.',
+  link_requires_admin: 'An administrator needs to link your provider account.',
+  invalid_identity:
+    'Your provider returned account details that could not be verified. Contact your administrator.',
+  email_changed: 'Your provider account details changed. Contact your administrator.',
+  conflict: 'Your account changed during sign-in. Start sign-in again.',
+  not_updated: 'Confirmation could not be saved. Try again.',
+  direct_reauth:
+    'Your provider cannot complete confirmation. Sign out and sign in again, then retry within 10 minutes.',
+  reauth_refused: 'Confirmation was refused. Try again or contact your administrator.',
+  login_refused: 'Sign-in could not be completed. Try again or contact your administrator.',
+};
+
+export function ssoFailureMessage(reason: string | null): string {
+  return (
+    (reason !== null && Object.hasOwn(SSO_FAILURE_MESSAGES, reason)
+      ? SSO_FAILURE_MESSAGES[reason]
+      : undefined) ?? SSO_FAILURE_MESSAGES['login_refused']!
+  );
+}
+
+export function SigninFailedView(props: {
+  reason: string | null;
+  signedIn: boolean;
+  hash?: string;
+}) {
+  return (
+    <Card className="mx-auto mt-12 max-w-md">
+      <CardHeader>
+        <h1 id="page-heading" tabIndex={-1} className="font-semibold leading-none tracking-tight">
+          Sign-in failed
+        </h1>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <Alert variant="destructive">
+          <AlertDescription>{ssoFailureMessage(props.reason)}</AlertDescription>
+        </Alert>
+        <a
+          href={
+            props.signedIn
+              ? `#/reauth?return=${encodeURIComponent(reauthReturnHash(props.hash ?? '').slice(1))}`
+              : '#/login'
+          }
+        >
+          {props.signedIn ? 'Return to confirmation' : 'Return to sign in'}
+        </a>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function LoginView(props: {
   state: LoginState;
   providers: readonly AuthProvider[];
   local: boolean;
+  availability?: 'loading' | 'ready' | 'error';
   ssoError?: 'refused' | 'failed' | null;
   onSubmit: (input: LoginInput) => void;
   onSso: (provider: string) => void;
 }) {
   const busy = props.state.status === 'busy';
+  const local = props.local && props.state.error !== 'disabled';
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
@@ -554,7 +692,12 @@ export function LoginView(props: {
         <CardDescription>Package Broker</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {props.state.error === null ? null : (
+        <AvailabilityMessage
+          status={props.availability ?? 'ready'}
+          local={local}
+          providers={props.providers}
+        />
+        {props.state.error === null || props.state.error === 'disabled' ? null : (
           <Alert variant="destructive">
             <AlertDescription>
               {props.state.error === 'unavailable'
@@ -568,7 +711,7 @@ export function LoginView(props: {
             <AlertDescription>{SSO_TEXT[props.ssoError]}</AlertDescription>
           </Alert>
         ) : null}
-        {props.local ? (
+        {local && (props.availability ?? 'ready') === 'ready' ? (
           <form
             className="grid gap-4"
             onSubmit={(event) => {
@@ -614,11 +757,13 @@ export function LoginView(props: {
 export function ReauthView(props: {
   providers: readonly AuthProvider[];
   local: boolean;
+  availability?: 'loading' | 'ready' | 'error';
   error: boolean;
   busy: boolean;
   onSubmit: (input: { password: string; code: string }) => void;
   onSso: (provider: string) => void;
 }) {
+  const providers = props.providers.filter((provider) => provider.supportsReauth);
   return (
     <Card className="mx-auto mt-12 max-w-md">
       <CardHeader>
@@ -628,6 +773,11 @@ export function ReauthView(props: {
         <CardDescription>This action needs a fresh sign-in.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
+        <AvailabilityMessage
+          status={props.availability ?? 'ready'}
+          local={props.local}
+          providers={providers}
+        />
         {props.error ? (
           <Alert variant="destructive">
             <AlertDescription>
@@ -635,7 +785,7 @@ export function ReauthView(props: {
             </AlertDescription>
           </Alert>
         ) : null}
-        {props.local ? (
+        {props.local && (props.availability ?? 'ready') === 'ready' ? (
           <form
             className="grid gap-4"
             onSubmit={(event) => {
@@ -665,12 +815,25 @@ export function ReauthView(props: {
             </Button>
           </form>
         ) : null}
+        {props.providers.some((provider) => !provider.supportsReauth) ? (
+          <p role="status">
+            Your sign-in provider cannot confirm a fresh sign-in. Sign out and sign in again, then
+            retry this action within 10 minutes.
+            {props.local ? ' You can also use the local sign-in form to confirm.' : ''}
+          </p>
+        ) : null}
         <SsoButtons
-          providers={props.providers.filter((provider) => provider.supportsReauth)}
+          providers={providers}
           busy={props.busy}
           onSso={props.onSso}
           verb="Confirm with"
         />
+        {!props.local && (props.availability ?? 'ready') === 'ready' && providers.length > 0 ? (
+          <p>
+            Signed in with a password? Sign out and sign in with{' '}
+            {providers.map((provider) => provider.displayName).join(' or ')} to continue.
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -701,6 +864,12 @@ function restoredProjectSlug(action: PendingAction | null) {
 }
 
 export function pendingActionDescription(action: PendingAction | null) {
+  if (action?.display && 'label' in action.display)
+    return {
+      label: action.display.label,
+      effect: action.display.effect,
+      destructive: action.method === 'DELETE',
+    };
   if (restoredProjectSlug(action)) {
     return {
       label: 'Restore project',
@@ -770,7 +939,7 @@ export function ReauthConfirmContent(props: {
             <dd>{projectSlug}</dd>
           </>
         ) : null}
-        {display ? (
+        {display && 'packageName' in display ? (
           <>
             <dt>Package</dt>
             <dd>{display.packageName}</dd>
@@ -805,7 +974,7 @@ export function ReauthConfirmContent(props: {
         <dt>Effect</dt>
         <dd>{description.effect}</dd>
       </dl>
-      {request ? (
+      {request && !(display && 'label' in display) ? (
         <details>
           <summary className="cursor-pointer text-sm text-blue-700">Request details</summary>
           <div className="mt-2 flex min-w-0 items-start gap-2 rounded-md border border-neutral-200 bg-neutral-50 p-3">
@@ -943,22 +1112,44 @@ export function SetupView(props: {
 }
 
 export function useProviders(client: AuthClient) {
-  const [state, setState] = useState<{ providers: AuthProvider[]; local: boolean }>({
-    providers: [],
-    local: true,
-  });
+  const [state, setState] = useState<{
+    client: AuthClient;
+    providers: AuthProvider[];
+    local: boolean;
+    availability: 'loading' | 'ready' | 'error';
+  }>({ client, providers: [], local: false, availability: 'loading' });
   useEffect(() => {
     let live = true;
-    void client.request('get', '/_pb/auth/providers').then((result) => {
-      if (live && result.ok && result.data) {
-        setState({ providers: result.data.providers, local: result.data.local });
-      }
-    });
+    void client
+      .request('get', '/_pb/auth/providers')
+      .then((result) => {
+        if (!live) return;
+        if (
+          result.ok &&
+          result.data &&
+          typeof result.data.local === 'boolean' &&
+          Array.isArray(result.data.providers)
+        ) {
+          setState({
+            client,
+            providers: result.data.providers,
+            local: result.data.local,
+            availability: 'ready',
+          });
+        } else {
+          setState({ client, providers: [], local: false, availability: 'error' });
+        }
+      })
+      .catch(() => {
+        if (live) setState({ client, providers: [], local: false, availability: 'error' });
+      });
     return () => {
       live = false;
     };
   }, [client]);
-  return state;
+  return state.client === client
+    ? state
+    : { providers: [], local: false, availability: 'loading' as const };
 }
 
 const assignLocation = (location: string): void => {
@@ -972,13 +1163,14 @@ export function LoginScreen(props: { client: AuthClient; onSignedIn: () => void 
     [client, onSignedIn],
   );
   const state = useStore(controller);
-  const { providers, local } = useProviders(client);
+  const { providers, local, availability } = useProviders(client);
   const [ssoError, setSsoError] = useState<'refused' | 'failed' | null>(null);
   return (
     <LoginView
       state={state}
       providers={providers}
       local={local}
+      availability={availability}
       ssoError={ssoError}
       onSubmit={(input) => void controller.submit(input)}
       onSso={(provider) => {
@@ -993,6 +1185,36 @@ export function LoginScreen(props: { client: AuthClient; onSignedIn: () => void 
   );
 }
 
+export function SetupAvailabilityView(props: {
+  availability: 'loading' | 'ready' | 'error';
+  local: boolean;
+  providers: readonly AuthProvider[];
+}) {
+  return (
+    <div className="mx-auto mt-12 max-w-md grid gap-4">
+      <h1 id="page-heading" tabIndex={-1} className="font-semibold">
+        First-run setup
+      </h1>
+      {props.availability !== 'loading' ? (
+        <h2 className="font-semibold">
+          {props.availability === 'error'
+            ? 'Setup is unavailable'
+            : "Sign in with your organization's account"}
+        </h2>
+      ) : null}
+      <AvailabilityMessage
+        status={props.availability}
+        local={props.local}
+        providers={props.providers}
+      />
+      {props.availability === 'ready' ? (
+        <p>Password setup is unavailable. Sign in to continue.</p>
+      ) : null}
+      <a href={`${APP_PATH}#/login`}>Go to sign in</a>
+    </div>
+  );
+}
+
 export function SetupScreen(props: { client: AuthClient; onSignedIn: () => void }) {
   const { client, onSignedIn } = props;
   const controller = useMemo(
@@ -1000,6 +1222,11 @@ export function SetupScreen(props: { client: AuthClient; onSignedIn: () => void 
     [client, onSignedIn],
   );
   const state = useStore(controller);
+  const { providers, local, availability } = useProviders(client);
+  if (availability !== 'ready' || !local || state.stage === 'disabled')
+    return (
+      <SetupAvailabilityView availability={availability} local={false} providers={providers} />
+    );
   return (
     <SetupView
       state={state}
@@ -1015,13 +1242,15 @@ export function ReauthScreen(props: {
   onDone: () => void;
 }) {
   const { client, flow, onDone } = props;
-  const { providers, local } = useProviders(client);
+  const { providers, local, availability } = useProviders(client);
   const [error, setError] = useState(false);
+  const [disabled, setDisabled] = useState(false);
   const [busy, setBusy] = useState(false);
   return (
     <ReauthView
       providers={providers}
-      local={local}
+      local={local && !disabled}
+      availability={availability}
       error={error}
       busy={busy}
       onSubmit={(input) => {
@@ -1032,6 +1261,8 @@ export function ReauthScreen(props: {
           if (outcome === 'done') {
             flow.restore();
             onDone();
+          } else if (outcome === 'disabled') {
+            setDisabled(true);
           } else {
             setError(true);
           }
@@ -1078,5 +1309,14 @@ export function ReauthConfirm(props: { flow: ReturnType<typeof createReauthFlow>
       onConfirm={() => void props.flow.confirm()}
       onDecline={() => props.flow.decline()}
     />
+  );
+}
+
+export function AuthLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <main className="flex-1 px-4">{children}</main>
+      <ProductFooter />
+    </div>
   );
 }

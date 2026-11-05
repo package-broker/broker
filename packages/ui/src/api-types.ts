@@ -432,6 +432,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/me/npm-login/{selector}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Review an npm login request */
+    get: operations['getNpmLogin'];
+    put?: never;
+    /** Approve an npm login request */
+    post: operations['approveNpmLogin'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/me/permissions': {
     parameters: {
       query?: never;
@@ -502,6 +520,57 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/package-access-requests': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List package access requests */
+    get: operations['listPackageAccessRequests'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/package-access-requests/{id}/approve': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** approve a package access request */
+    post: operations['approvePackageAccessRequest'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/package-access-requests/{id}/reject': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** reject a package access request */
+    post: operations['rejectPackageAccessRequest'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/packages': {
     parameters: {
       query?: never;
@@ -517,6 +586,40 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  '/_pb/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read package details and access settings */
+    get: operations['getPackage'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/packages/{package}/access': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Change package access for new projects */
+    patch: operations['updatePackageAccess'];
     trace?: never;
   };
   '/_pb/packages/{package}/versions': {
@@ -585,6 +688,59 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  '/_pb/policies': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List registry policy rules */
+    get: operations['listPolicies'];
+    put?: never;
+    /** Add a registry policy rule */
+    post: operations['createPolicy'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/policies/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Inspect how registry policy decides the versions of a package */
+    get: operations['inspectPackagePolicy'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/policies/{policy}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a registry policy rule and its members */
+    get: operations['getPolicy'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Edit, replace the members of, disable or release a registry policy rule */
+    patch: operations['updatePolicy'];
     trace?: never;
   };
   '/_pb/projects': {
@@ -693,6 +849,128 @@ export interface paths {
     patch: operations['changeProjectGrant'];
     trace?: never;
   };
+  '/_pb/projects/{project}/notifications': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List notification endpoints of a project */
+    get: operations['listNotificationEndpoints'];
+    put?: never;
+    /** Add a disabled notification endpoint (recent reauthentication required) */
+    post: operations['createNotificationEndpoint'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/notifications/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a notification endpoint */
+    get: operations['getNotificationEndpoint'];
+    put?: never;
+    post?: never;
+    /** Remove a notification endpoint and cancel its waiting deliveries (recent reauthentication required) */
+    delete: operations['deleteNotificationEndpoint'];
+    options?: never;
+    head?: never;
+    /** Change a notification endpoint; replacing the destination settings needs recent reauthentication and disables it */
+    patch: operations['updateNotificationEndpoint'];
+    trace?: never;
+  };
+  '/_pb/projects/{project}/notifications/{id}/deliveries': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List recent deliveries of a notification endpoint */
+    get: operations['listNotificationDeliveries'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/notifications/{id}/deliveries/{delivery}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read one delivery with its attempt history */
+    get: operations['getNotificationDelivery'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/notifications/{id}/disable': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Disable a notification endpoint */
+    post: operations['disableNotificationEndpoint'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/notifications/{id}/enable': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Enable a notification endpoint for new events */
+    post: operations['enableNotificationEndpoint'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/package-access-requests': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request package access; the hosted source must be attached to the project first */
+    post: operations['requestPackageAccess'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/projects/{project}/packages': {
     parameters: {
       query?: never;
@@ -702,6 +980,40 @@ export interface paths {
     };
     /** List packages */
     get: operations['listProjectPackages'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read package details and access settings */
+    get: operations['getProjectPackage'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/packages/{package}/readme': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a visible package README */
+    get: operations['getProjectPackageReadme'];
     put?: never;
     post?: never;
     delete?: never;
@@ -787,6 +1099,76 @@ export interface paths {
     };
     /** Get caller project permissions */
     get: operations['getMyProjectPermissions'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/policies': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List registry policy rules */
+    get: operations['listProjectPolicies'];
+    put?: never;
+    /** Add a registry policy rule */
+    post: operations['createProjectPolicy'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/policies/packages/{package}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Inspect how registry policy decides the versions of a package */
+    get: operations['inspectProjectPackagePolicy'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/projects/{project}/policies/{policy}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a registry policy rule and its members */
+    get: operations['getProjectPolicy'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Edit, replace the members of, disable or release a registry policy rule */
+    patch: operations['updateProjectPolicy'];
+    trace?: never;
+  };
+  '/_pb/projects/{project}/requestable-packages': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List requestable packages; the hosted source must be attached to the project first */
+    get: operations['listRequestablePackages'];
     put?: never;
     post?: never;
     delete?: never;
@@ -1088,6 +1470,91 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/publishes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List held publishes */
+    get: operations['listPublishes'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/publishes/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Inspect a held publish */
+    get: operations['getPublish'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/publishes/{id}/approve': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Approve a publish */
+    post: operations['approvePublish'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/publishes/{id}/reject': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Reject a publish */
+    post: operations['rejectPublish'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/publishes/{id}/rescan': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Retry a failed publish scan */
+    post: operations['rescanPublish'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/roles': {
     parameters: {
       query?: never;
@@ -1245,6 +1712,128 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/sources/discovery/apply': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Import a bounded page of organization repositories */
+    post: operations['applySourceDiscovery'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/connections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List organization GitHub App connections already used by sources */
+    get: operations['listSourceDiscoveryConnections'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/plan': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Discover configured organization repositories */
+    post: operations['planSourceDiscovery'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List organization discovery rules */
+    get: operations['listDiscoveryRules'];
+    put?: never;
+    /** Add an organization discovery rule */
+    post: operations['createDiscoveryRule'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read a discovery rule and its last run results */
+    get: operations['getDiscoveryRule'];
+    put?: never;
+    post?: never;
+    /** Remove a rule while preserving discovered sources */
+    delete: operations['deleteDiscoveryRule'];
+    options?: never;
+    head?: never;
+    /** Change a discovery rule and invalidate its current run */
+    patch: operations['updateDiscoveryRule'];
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}/results': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read bounded last-run results and skip reasons */
+    get: operations['getDiscoveryRuleResults'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/sources/discovery/rules/{id}/run': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Request a scan on the next scheduler tick */
+    post: operations['runDiscoveryRule'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/sources/{source}': {
     parameters: {
       query?: never;
@@ -1345,7 +1934,8 @@ export interface paths {
     delete: operations['removeRegisteredName'];
     options?: never;
     head?: never;
-    patch?: never;
+    /** Replace a hosted npm claim */
+    patch: operations['updateRegisteredName'];
     trace?: never;
   };
   '/_pb/sources/{source}/pause': {
@@ -1452,6 +2042,42 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/_pb/trusted-publishers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List trusted publishers for this organization */
+    get: operations['listTrustedPublishers'];
+    put?: never;
+    /** Register a GitHub trusted publisher */
+    post: operations['createTrustedPublisher'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/_pb/trusted-publishers/{id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Edit a trusted publisher and invalidate pending exchanges */
+    put: operations['updateTrustedPublisher'];
+    post?: never;
+    /** Disable a trusted publisher and revoke its workload tokens */
+    delete: operations['disableTrustedPublisher'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/_pb/users': {
     parameters: {
       query?: never;
@@ -1515,6 +2141,319 @@ export interface components {
         problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
         requestId: string;
       };
+    };
+    NpmLoginApprovalBody: {
+      /** @enum {string} */
+      scope: 'read' | 'write';
+    };
+    NpmLoginConfirmResponse: {
+      /** @constant */
+      ok: true;
+    };
+    NpmLoginConfirmation: {
+      cliHostname: string | null;
+      createdAt: string;
+      expiresAt: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      };
+      sourceIp: string | null;
+    };
+    NpmLoginPending: Record<string, never>;
+    NpmLoginStart: {
+      doneUrl: string;
+      loginUrl: string;
+    };
+    /** @default {} */
+    NpmLoginStartBody: {
+      create?: boolean;
+      hostname?: string;
+    };
+    NpmLoginToken: {
+      token: string;
+    };
+    NpmPublishAccepted:
+      | {
+          id: string;
+          /** @constant */
+          ok: true;
+          rev: number;
+        }
+      | {
+          held: {
+            approval: boolean;
+            scan: boolean;
+          };
+          id: string;
+          /** @constant */
+          ok: true;
+          status: string;
+        };
+    NpmWorkloadToken: {
+      created: string;
+      expires: string;
+      token: string;
+      /** @constant */
+      token_type: 'oidc';
+    };
+    PackageAccessApproveBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason?: string;
+    };
+    PackageAccessRejectBody: {
+      /** @description At most 1000 UTF-8 bytes */
+      reason: string;
+    };
+    PackageAccessRequest: {
+      createdAt: string;
+      decidedAt: string | null;
+      decidedBy: {
+        name: string;
+      } | null;
+      decidedByUserId: string | null;
+      decisionReason: string | null;
+      expiresAt: string;
+      id: string;
+      packageId: string;
+      packageName: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      };
+      projectId: string;
+      reason: string | null;
+      requestedBy: {
+        name: string;
+        /** @constant */
+        type: 'user';
+      };
+      requestedByUserId: string;
+      revision: number;
+      /** @enum {string} */
+      state: 'pending' | 'approved' | 'rejected' | 'expired';
+      updatedAt: string;
+    };
+    PackageAccessRequestBody: {
+      packageId: string;
+      /** @description At most 1000 UTF-8 bytes */
+      reason?: string;
+    };
+    PackageAccessRequestList: {
+      items: {
+        createdAt: string;
+        decidedAt: string | null;
+        decidedBy: {
+          name: string;
+        } | null;
+        decidedByUserId: string | null;
+        decisionReason: string | null;
+        expiresAt: string;
+        id: string;
+        packageId: string;
+        packageName: string;
+        project: {
+          id: string;
+          name: string;
+          slug: string;
+        };
+        projectId: string;
+        reason: string | null;
+        requestedBy: {
+          name: string;
+          /** @constant */
+          type: 'user';
+        };
+        requestedByUserId: string;
+        revision: number;
+        /** @enum {string} */
+        state: 'pending' | 'approved' | 'rejected' | 'expired';
+        updatedAt: string;
+      }[];
+      next: string | null;
+    };
+    PackageAccessRequestListQuery: {
+      cursor?: string;
+      limit?: string;
+      /** @enum {string} */
+      state?: 'pending' | 'approved' | 'rejected' | 'expired';
+    };
+    PublishApproval: {
+      /** @enum {string} */
+      approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+      createdAt: string;
+      decidedAt: string | null;
+      decidedBy: {
+        name: string;
+      } | null;
+      decidedByUserId: string | null;
+      decisionReason: string | null;
+      distTags: {
+        [key: string]: string;
+      };
+      expiresAt: string;
+      holdApproval: boolean;
+      holdScan: boolean;
+      id: string;
+      packageId: string;
+      packageName: string;
+      project: {
+        id: string;
+        name: string;
+        slug: string;
+      } | null;
+      readmePending: boolean;
+      requestedBy: {
+        name: string;
+        /** @enum {string} */
+        type: 'user' | 'service';
+      };
+      requestedById: string;
+      /** @enum {string} */
+      requestedByType: 'user' | 'service';
+      requiredScanners: string[];
+      revision: number;
+      routeProjectId: string | null;
+      scanAttempts: number;
+      /** @enum {string} */
+      scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+      scanVerdicts: {
+        plugin: string;
+        reason?: string;
+        /** @enum {string} */
+        verdict: 'allow' | 'deny';
+      }[];
+      sourceId: string;
+      sourceName: string;
+      tokenId: string;
+      updatedAt: string;
+      version: string;
+      versionId: string;
+    };
+    PublishList: {
+      items: {
+        /** @enum {string} */
+        approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+        createdAt: string;
+        decidedAt: string | null;
+        decidedBy: {
+          name: string;
+        } | null;
+        decidedByUserId: string | null;
+        decisionReason: string | null;
+        distTags: {
+          [key: string]: string;
+        };
+        expiresAt: string;
+        holdApproval: boolean;
+        holdScan: boolean;
+        id: string;
+        packageId: string;
+        packageName: string;
+        project: {
+          id: string;
+          name: string;
+          slug: string;
+        } | null;
+        readmePending: boolean;
+        requestedBy: {
+          name: string;
+          /** @enum {string} */
+          type: 'user' | 'service';
+        };
+        requestedById: string;
+        /** @enum {string} */
+        requestedByType: 'user' | 'service';
+        requiredScanners: string[];
+        revision: number;
+        routeProjectId: string | null;
+        scanAttempts: number;
+        /** @enum {string} */
+        scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+        scanVerdicts: {
+          plugin: string;
+          reason?: string;
+          /** @enum {string} */
+          verdict: 'allow' | 'deny';
+        }[];
+        sourceId: string;
+        sourceName: string;
+        tokenId: string;
+        updatedAt: string;
+        version: string;
+        versionId: string;
+      }[];
+      next: string | null;
+    };
+    PublishListQuery: {
+      /** @enum {string} */
+      actionable?: 'true';
+      cursor?: string;
+      limit?: string;
+      /** @enum {string} */
+      state?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+    };
+    RequestablePackage: {
+      id: string;
+      name: string;
+      /** @constant */
+      newProjectAccessMode: 'request';
+    };
+    TrustedPublisher: {
+      createdAt: string;
+      createdByName: string;
+      createdByUserId: string;
+      disabledAt: string | null;
+      environment: string;
+      id: string;
+      lastUsedAt: string | null;
+      packageName: string;
+      refPattern: string | null;
+      repository: string;
+      repositoryId: string;
+      repositoryOwnerId: string;
+      revision: number;
+      servicePrincipalId: string;
+      servicePrincipalName: string;
+      workflow: string;
+    };
+    TrustedPublisherCreateBody: {
+      environment: string;
+      packageName: string;
+      refPattern?: string;
+      repository: string;
+      workflow: string;
+    };
+    TrustedPublisherList: {
+      items: {
+        createdAt: string;
+        createdByName: string;
+        createdByUserId: string;
+        disabledAt: string | null;
+        environment: string;
+        id: string;
+        lastUsedAt: string | null;
+        packageName: string;
+        refPattern: string | null;
+        repository: string;
+        repositoryId: string;
+        repositoryOwnerId: string;
+        revision: number;
+        servicePrincipalId: string;
+        servicePrincipalName: string;
+        workflow: string;
+      }[];
+      next: string | null;
+    };
+    TrustedPublisherListQuery: {
+      cursor?: string;
+      limit?: string;
+    };
+    VersionReadme: {
+      body: string;
+      filename: string;
     };
   };
   responses: never;
@@ -2036,7 +2975,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2045,7 +2984,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2106,7 +3045,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2115,7 +3054,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2177,7 +3116,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2186,7 +3125,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2251,7 +3190,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2260,7 +3199,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Local sign-in is disabled; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2314,7 +3253,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2323,7 +3262,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2399,7 +3338,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2465,7 +3404,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -2474,7 +3413,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Access denied; Reauthentication required */
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2544,18 +3483,40 @@ export interface operations {
               createdAt: string;
               id: string;
               revision: number;
+              role: {
+                id: string;
+                name: string;
+                permissions: string[];
+              } | null;
               roleId: string;
               subject:
                 | {
                     /** @constant */
                     type: 'email';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    /** @constant */
+                    type: 'email';
+                    /** @constant */
+                    visibility: 'redacted';
                   }
                 | {
                     provider: string;
                     /** @constant */
                     type: 'group';
-                    value?: string;
+                    value: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    provider: string;
+                    /** @constant */
+                    type: 'group';
+                    /** @constant */
+                    visibility: 'redacted';
                   };
             }[];
             next: string | null;
@@ -3604,6 +4565,142 @@ export interface operations {
       };
     };
   };
+  getNpmLogin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        selector: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            cliHostname: string | null;
+            createdAt: string;
+            expiresAt: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            };
+            sourceIp: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  approveNpmLogin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        selector: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          scope: 'read' | 'write';
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @constant */
+            ok: true;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   getMyPermissions: {
     parameters: {
       query?: never;
@@ -3987,16 +5084,12 @@ export interface operations {
       };
     };
   };
-  listPackages: {
+  listPackageAccessRequests: {
     parameters: {
       query?: {
-        after?: string;
-        ecosystem?: 'composer' | 'npm';
+        cursor?: string;
         limit?: string;
-        project?: string;
-        q?: string;
-        source?: string;
-        status?: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+        state?: 'pending' | 'approved' | 'rejected' | 'expired';
       };
       header?: never;
       path?: never;
@@ -4012,28 +5105,34 @@ export interface operations {
         content: {
           'application/json': {
             items: {
-              /** @enum {string} */
-              ecosystem: 'composer' | 'npm';
+              createdAt: string;
+              decidedAt: string | null;
+              decidedBy: {
+                name: string;
+              } | null;
+              decidedByUserId: string | null;
+              decisionReason: string | null;
+              expiresAt: string;
               id: string;
-              lastSyncedAt: string | null;
-              latestVersion: string | null;
-              name: string;
-              source: {
+              packageId: string;
+              packageName: string;
+              project: {
                 id: string;
                 name: string;
-                projectId: string | null;
-                /** @enum {string} */
-                type:
-                  | 'vcs'
-                  | 'composer_repository'
-                  | 'npm_registry'
-                  | 'packagist_proxy'
-                  | 'npmjs_proxy'
-                  | 'hosted';
+                slug: string;
               };
+              projectId: string;
+              reason: string | null;
+              requestedBy: {
+                name: string;
+                /** @constant */
+                type: 'user';
+              };
+              requestedByUserId: string;
+              revision: number;
               /** @enum {string} */
-              status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
-              versionCount: number;
+              state: 'pending' | 'approved' | 'rejected' | 'expired';
+              updatedAt: string;
             }[];
             next: string | null;
           };
@@ -4068,6 +5167,534 @@ export interface operations {
       };
     };
   };
+  approvePackageAccessRequest: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description At most 1000 UTF-8 bytes */
+          reason?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            expiresAt: string;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            };
+            projectId: string;
+            reason: string | null;
+            requestedBy: {
+              name: string;
+              /** @constant */
+              type: 'user';
+            };
+            requestedByUserId: string;
+            revision: number;
+            /** @enum {string} */
+            state: 'pending' | 'approved' | 'rejected' | 'expired';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  rejectPackageAccessRequest: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description At most 1000 UTF-8 bytes */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            expiresAt: string;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            };
+            projectId: string;
+            reason: string | null;
+            requestedBy: {
+              name: string;
+              /** @constant */
+              type: 'user';
+            };
+            requestedByUserId: string;
+            revision: number;
+            /** @enum {string} */
+            state: 'pending' | 'approved' | 'rejected' | 'expired';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listPackages: {
+    parameters: {
+      query?: {
+        after?: string;
+        ecosystem?: 'composer' | 'npm';
+        limit?: string;
+        project?: string;
+        q?: string;
+        source?: string;
+        status?: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              /** @enum {string} */
+              ecosystem: 'composer' | 'npm';
+              id: string;
+              lastSyncedAt: string | null;
+              latestVersion: string | null;
+              name: string;
+              /** @enum {string} */
+              newProjectAccessMode: 'none' | 'request';
+              revision: number;
+              source: {
+                id: string;
+                name: string;
+                projectId: string | null;
+                /** @enum {string} */
+                type:
+                  | 'vcs'
+                  | 'composer_repository'
+                  | 'npm_registry'
+                  | 'packagist_proxy'
+                  | 'npmjs_proxy'
+                  | 'hosted';
+              };
+              /** @enum {string} */
+              status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+              versionCount: number;
+              /** @description Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them. */
+              versionCountTruncated?: boolean;
+              visibleToNewProjects: boolean;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getPackage: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            ecosystem: 'composer' | 'npm';
+            id: string;
+            lastSyncedAt: string | null;
+            latestVersion: string | null;
+            name: string;
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            source: {
+              id: string;
+              name: string;
+              projectId: string | null;
+              /** @enum {string} */
+              type:
+                | 'vcs'
+                | 'composer_repository'
+                | 'npm_registry'
+                | 'packagist_proxy'
+                | 'npmjs_proxy'
+                | 'hosted';
+            };
+            /** @enum {string} */
+            status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+            versionCount: number;
+            /** @description Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them. */
+            versionCountTruncated?: boolean;
+            visibleToNewProjects: boolean;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updatePackageAccess: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          newProjectAccessMode: 'none' | 'request';
+          revision: number;
+          visibleToNewProjects: boolean;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            visibleToNewProjects: boolean;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listPackageVersions: {
     parameters: {
       query?: {
@@ -4090,8 +5717,19 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              approvedBy: {
+                decidedAt: string;
+                displayName: string;
+              } | null;
+              distTags: string[];
               id: string;
+              integrity: string | null;
               publishedAt: string;
+              publishedBy: {
+                displayName: string;
+                /** @enum {string} */
+                kind: 'user' | 'service' | 'system';
+              } | null;
               removedUpstreamAt: string | null;
               revision: number;
               /** @enum {string} */
@@ -4359,7 +5997,9 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': Record<string, never>;
+        'application/json': {
+          reason?: string;
+        };
       };
     };
     responses: {
@@ -4423,6 +6063,549 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listPolicies: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+        project?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+              clientMinVersion: string | null;
+              createdAt: string;
+              denyUnknown: boolean;
+              disabledAt: string | null;
+              disabledReason:
+                ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+              /** @enum {string} */
+              ecosystem: 'npm' | 'composer';
+              expiresAt: string | null;
+              id: string;
+              incidentId: string | null;
+              /** @enum {string} */
+              kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+              memberCount: number;
+              minAgeDays: number | null;
+              package: string | null;
+              projectId: string | null;
+              /** @enum {string} */
+              reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+              revision: number;
+              /** @enum {string} */
+              scope: 'organization' | 'project';
+              /** @enum {string} */
+              state: 'active' | 'disabled';
+              updatedAt: string;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          clientFamily?: 'npm' | 'pnpm' | 'yarn' | 'composer';
+          clientMinVersion?: string;
+          denyUnknown?: boolean;
+          /** @enum {string} */
+          ecosystem: 'npm' | 'composer';
+          expiresAt?: string | null;
+          incidentId?: string;
+          /** @enum {string} */
+          kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+          members?: string[];
+          minAgeDays?: number;
+          package?: string | null;
+          /** @enum {string} */
+          reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  inspectPackagePolicy: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            ecosystem: ('npm' | 'composer') | null;
+            next: string | null;
+            package: string | null;
+            packageId: string;
+            versions: {
+              ageBasis: ('published' | 'imported' | 'first_seen') | null;
+              effectiveAt: string | null;
+              id: string;
+              permitted: boolean;
+              reasons: (
+                | {
+                    /** @enum {string} */
+                    reason:
+                      | 'min_age'
+                      | 'blocked'
+                      | 'not_allowlisted'
+                      | 'quarantined'
+                      | 'client_floor'
+                      | 'restricted'
+                      | 'client_unsupported';
+                    ruleId: string;
+                    ruleRevision: number;
+                  }
+                | {
+                    /** @constant */
+                    reason: 'organization_rule';
+                  }
+              )[];
+              revision: number;
+              /** @enum {string} */
+              status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream' | 'yanked';
+              version: string;
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        policy: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            members: string[];
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updatePolicy: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        policy: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json':
+          | {
+              members: string[];
+              /** @enum {string} */
+              overrideReason?:
+                'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+            }
+          | {
+              /** @enum {string} */
+              reason: 'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+              /** @constant */
+              state: 'disabled';
+            }
+          | {
+              clientMinVersion?: string;
+              denyUnknown?: boolean;
+              expiresAt?: string | null;
+              incidentId?: string | null;
+              minAgeDays?: number;
+              /** @enum {string} */
+              overrideReason?:
+                'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+              /** @enum {string} */
+              reasonCode?: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };
@@ -4970,14 +7153,43 @@ export interface operations {
             items: {
               createdAt: string;
               id: string;
-              principal: {
-                displayName: string;
-                email?: string;
-                id: string;
-                /** @enum {string} */
-                kind: 'user' | 'email' | 'group';
-                provider?: string;
-              };
+              principal:
+                | {
+                    displayName: string;
+                    email: string;
+                    id: string;
+                    /** @enum {string} */
+                    kind: 'user' | 'email';
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    displayName: string;
+                    id: string;
+                    /** @enum {string} */
+                    kind: 'user' | 'email';
+                    /** @constant */
+                    visibility: 'redacted';
+                  }
+                | {
+                    displayName: string;
+                    groupValue: string;
+                    id: string;
+                    /** @constant */
+                    kind: 'group';
+                    provider: string;
+                    /** @constant */
+                    visibility: 'visible';
+                  }
+                | {
+                    displayName: string;
+                    id: string;
+                    /** @constant */
+                    kind: 'group';
+                    provider: string;
+                    /** @constant */
+                    visibility: 'redacted';
+                  };
               revision: number;
               role: {
                 id: string;
@@ -5328,6 +7540,1246 @@ export interface operations {
       };
     };
   };
+  listNotificationEndpoints: {
+    parameters: {
+      query?: {
+        cursor?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdAt: string;
+              /** @constant */
+              destinationConfigured: true;
+              disabledReason:
+                | (
+                    | 'manual'
+                    | 'configuration_changed'
+                    | 'failures'
+                    | 'credentials'
+                    | 'policy'
+                    | 'gone'
+                  )
+                | null;
+              events: (
+                | 'npm.package.published'
+                | 'npm.package.released'
+                | 'npm.package.unpublished'
+                | 'npm.package.deprecation_changed'
+                | 'npm.package.dist_tag_changed'
+              )[];
+              failureStreak: number;
+              headersConfigured: boolean;
+              id: string;
+              /** @enum {string} */
+              method: 'POST' | 'PUT';
+              name: string;
+              packagePattern: string;
+              revision: number;
+              /** @constant */
+              signingConfigured: true;
+              /** @enum {string} */
+              state: 'enabled' | 'disabled';
+              templateConfigured: boolean;
+              updatedAt: string;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          events: (
+            | 'npm.package.published'
+            | 'npm.package.released'
+            | 'npm.package.unpublished'
+            | 'npm.package.deprecation_changed'
+            | 'npm.package.dist_tag_changed'
+          )[];
+          /** @enum {string} */
+          method: 'POST' | 'PUT';
+          /** @description 1 to 80 printable characters. */
+          name: string;
+          /** @description Stored package key glob; `*` matches any run of characters, including `/`. */
+          packagePattern: string;
+          secret: {
+            headers?: {
+              name: string;
+              value: string;
+            }[];
+            /** @description Random 32-byte HMAC key, base64url without padding, shared with the receiver. */
+            signingKey: string;
+            /** @description json-v1 body template; omit or null for the canonical envelope. */
+            template?: string | null;
+            /** @description HTTPS destination on port 443. */
+            url: string;
+          };
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            /** @constant */
+            destinationConfigured: true;
+            disabledReason:
+              | (
+                  | 'manual'
+                  | 'configuration_changed'
+                  | 'failures'
+                  | 'credentials'
+                  | 'policy'
+                  | 'gone'
+                )
+              | null;
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            failureStreak: number;
+            headersConfigured: boolean;
+            id: string;
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            name: string;
+            packagePattern: string;
+            revision: number;
+            /** @constant */
+            signingConfigured: true;
+            /** @enum {string} */
+            state: 'enabled' | 'disabled';
+            templateConfigured: boolean;
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            /** @constant */
+            destinationConfigured: true;
+            disabledReason:
+              | (
+                  | 'manual'
+                  | 'configuration_changed'
+                  | 'failures'
+                  | 'credentials'
+                  | 'policy'
+                  | 'gone'
+                )
+              | null;
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            failureStreak: number;
+            headersConfigured: boolean;
+            id: string;
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            name: string;
+            packagePattern: string;
+            revision: number;
+            /** @constant */
+            signingConfigured: true;
+            /** @enum {string} */
+            state: 'enabled' | 'disabled';
+            templateConfigured: boolean;
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  deleteNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          options?: {
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            /** @description 1 to 80 printable characters. */
+            name: string;
+            /** @description Stored package key glob; `*` matches any run of characters, including `/`. */
+            packagePattern: string;
+          };
+          secret?: {
+            headers?: {
+              name: string;
+              value: string;
+            }[];
+            /** @description Random 32-byte HMAC key, base64url without padding, shared with the receiver. */
+            signingKey: string;
+            /** @description json-v1 body template; omit or null for the canonical envelope. */
+            template?: string | null;
+            /** @description HTTPS destination on port 443. */
+            url: string;
+          };
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            /** @constant */
+            destinationConfigured: true;
+            disabledReason:
+              | (
+                  | 'manual'
+                  | 'configuration_changed'
+                  | 'failures'
+                  | 'credentials'
+                  | 'policy'
+                  | 'gone'
+                )
+              | null;
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            failureStreak: number;
+            headersConfigured: boolean;
+            id: string;
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            name: string;
+            packagePattern: string;
+            revision: number;
+            /** @constant */
+            signingConfigured: true;
+            /** @enum {string} */
+            state: 'enabled' | 'disabled';
+            templateConfigured: boolean;
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listNotificationDeliveries: {
+    parameters: {
+      query?: {
+        cursor?: string;
+        limit?: string;
+        state?: 'pending' | 'sending' | 'delivered' | 'failed' | 'cancelled';
+      };
+      header?: never;
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              attempts: number;
+              createdAt: string;
+              eventId: string;
+              /** @enum {string} */
+              eventType:
+                | 'npm.package.published'
+                | 'npm.package.released'
+                | 'npm.package.unpublished'
+                | 'npm.package.deprecation_changed'
+                | 'npm.package.dist_tag_changed';
+              finishedAt: string | null;
+              id: string;
+              lastStatus: number | null;
+              nextAttemptAt: string | null;
+              outcomeCode:
+                | (
+                    | 'ok'
+                    | 'network'
+                    | 'timeout'
+                    | 'http_retry'
+                    | 'http_permanent'
+                    | 'redirect'
+                    | 'policy'
+                    | 'credentials'
+                    | 'template'
+                    | 'unknown'
+                    | 'expired'
+                    | 'attempt_limit'
+                    | 'disabled'
+                    | 'superseded'
+                    | 'project_inactive'
+                    | 'admission_lost'
+                    | 'deleted'
+                  )
+                | null;
+              /** @enum {string} */
+              state: 'pending' | 'sending' | 'delivered' | 'failed' | 'cancelled';
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getNotificationDelivery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        id: string;
+        delivery: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            attempts: number;
+            createdAt: string;
+            eventId: string;
+            /** @enum {string} */
+            eventType:
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed';
+            finishedAt: string | null;
+            history: {
+              attempt: number;
+              durationMs: number | null;
+              finishedAt: string | null;
+              /** @enum {string} */
+              outcome: 'started' | 'delivered' | 'retry' | 'failed' | 'unknown';
+              outcomeCode:
+                | (
+                    | 'ok'
+                    | 'network'
+                    | 'timeout'
+                    | 'http_retry'
+                    | 'http_permanent'
+                    | 'redirect'
+                    | 'policy'
+                    | 'credentials'
+                    | 'template'
+                    | 'unknown'
+                  )
+                | null;
+              startedAt: string;
+              status: number | null;
+            }[];
+            id: string;
+            lastStatus: number | null;
+            nextAttemptAt: string | null;
+            outcomeCode:
+              | (
+                  | 'ok'
+                  | 'network'
+                  | 'timeout'
+                  | 'http_retry'
+                  | 'http_permanent'
+                  | 'redirect'
+                  | 'policy'
+                  | 'credentials'
+                  | 'template'
+                  | 'unknown'
+                  | 'expired'
+                  | 'attempt_limit'
+                  | 'disabled'
+                  | 'superseded'
+                  | 'project_inactive'
+                  | 'admission_lost'
+                  | 'deleted'
+                )
+              | null;
+            /** @enum {string} */
+            state: 'pending' | 'sending' | 'delivered' | 'failed' | 'cancelled';
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  disableNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            /** @constant */
+            destinationConfigured: true;
+            disabledReason:
+              | (
+                  | 'manual'
+                  | 'configuration_changed'
+                  | 'failures'
+                  | 'credentials'
+                  | 'policy'
+                  | 'gone'
+                )
+              | null;
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            failureStreak: number;
+            headersConfigured: boolean;
+            id: string;
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            name: string;
+            packagePattern: string;
+            revision: number;
+            /** @constant */
+            signingConfigured: true;
+            /** @enum {string} */
+            state: 'enabled' | 'disabled';
+            templateConfigured: boolean;
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  enableNotificationEndpoint: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        project: string;
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            /** @constant */
+            destinationConfigured: true;
+            disabledReason:
+              | (
+                  | 'manual'
+                  | 'configuration_changed'
+                  | 'failures'
+                  | 'credentials'
+                  | 'policy'
+                  | 'gone'
+                )
+              | null;
+            events: (
+              | 'npm.package.published'
+              | 'npm.package.released'
+              | 'npm.package.unpublished'
+              | 'npm.package.deprecation_changed'
+              | 'npm.package.dist_tag_changed'
+            )[];
+            failureStreak: number;
+            headersConfigured: boolean;
+            id: string;
+            /** @enum {string} */
+            method: 'POST' | 'PUT';
+            name: string;
+            packagePattern: string;
+            revision: number;
+            /** @constant */
+            signingConfigured: true;
+            /** @enum {string} */
+            state: 'enabled' | 'disabled';
+            templateConfigured: boolean;
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  requestPackageAccess: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          packageId: string;
+          /** @description At most 1000 UTF-8 bytes */
+          reason?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            expiresAt: string;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            };
+            projectId: string;
+            reason: string | null;
+            requestedBy: {
+              name: string;
+              /** @constant */
+              type: 'user';
+            };
+            requestedByUserId: string;
+            revision: number;
+            /** @enum {string} */
+            state: 'pending' | 'approved' | 'rejected' | 'expired';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
   listProjectPackages: {
     parameters: {
       query?: {
@@ -5376,8 +8828,164 @@ export interface operations {
               /** @enum {string} */
               status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
               versionCount: number;
+              /** @description Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them. */
+              versionCountTruncated?: boolean;
             }[];
             next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getProjectPackage: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            ecosystem: 'composer' | 'npm';
+            id: string;
+            lastSyncedAt: string | null;
+            latestVersion: string | null;
+            name: string;
+            /** @enum {string} */
+            newProjectAccessMode: 'none' | 'request';
+            revision: number;
+            source: {
+              id: string;
+              name: string;
+              projectId: string | null;
+              /** @enum {string} */
+              type:
+                | 'vcs'
+                | 'composer_repository'
+                | 'npm_registry'
+                | 'packagist_proxy'
+                | 'npmjs_proxy'
+                | 'hosted';
+            };
+            /** @enum {string} */
+            status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream';
+            versionCount: number;
+            /** @description Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them. */
+            versionCountTruncated?: boolean;
+            visibleToNewProjects: boolean;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getProjectPackageReadme: {
+    parameters: {
+      query?: {
+        version?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            body: string;
+            contentType: string;
+            filename: string;
+            sizeBytes: number;
           };
         };
       };
@@ -5442,8 +9050,19 @@ export interface operations {
         content: {
           'application/json': {
             items: {
+              approvedBy: {
+                decidedAt: string;
+                displayName: string;
+              } | null;
+              distTags: string[];
               id: string;
+              integrity: string | null;
               publishedAt: string;
+              publishedBy: {
+                displayName: string;
+                /** @enum {string} */
+                kind: 'user' | 'service' | 'system';
+              } | null;
               removedUpstreamAt: string | null;
               revision: number;
               /** @enum {string} */
@@ -5714,7 +9333,9 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': Record<string, never>;
+        'application/json': {
+          reason?: string;
+        };
       };
     };
     responses: {
@@ -5806,6 +9427,642 @@ export interface operations {
         content: {
           'application/json': {
             project: string[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listProjectPolicies: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+              clientMinVersion: string | null;
+              createdAt: string;
+              denyUnknown: boolean;
+              disabledAt: string | null;
+              disabledReason:
+                ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+              /** @enum {string} */
+              ecosystem: 'npm' | 'composer';
+              expiresAt: string | null;
+              id: string;
+              incidentId: string | null;
+              /** @enum {string} */
+              kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+              memberCount: number;
+              minAgeDays: number | null;
+              package: string | null;
+              projectId: string | null;
+              /** @enum {string} */
+              reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+              revision: number;
+              /** @enum {string} */
+              scope: 'organization' | 'project';
+              /** @enum {string} */
+              state: 'active' | 'disabled';
+              updatedAt: string;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createProjectPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          clientFamily?: 'npm' | 'pnpm' | 'yarn' | 'composer';
+          clientMinVersion?: string;
+          denyUnknown?: boolean;
+          /** @enum {string} */
+          ecosystem: 'npm' | 'composer';
+          expiresAt?: string | null;
+          incidentId?: string;
+          /** @enum {string} */
+          kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+          members?: string[];
+          minAgeDays?: number;
+          package?: string | null;
+          /** @enum {string} */
+          reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  inspectProjectPackagePolicy: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+        package: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            ecosystem: ('npm' | 'composer') | null;
+            next: string | null;
+            package: string | null;
+            packageId: string;
+            versions: {
+              ageBasis: ('published' | 'imported' | 'first_seen') | null;
+              effectiveAt: string | null;
+              id: string;
+              permitted: boolean;
+              reasons: (
+                | {
+                    /** @enum {string} */
+                    reason:
+                      | 'min_age'
+                      | 'blocked'
+                      | 'not_allowlisted'
+                      | 'quarantined'
+                      | 'client_floor'
+                      | 'restricted'
+                      | 'client_unsupported';
+                    ruleId: string;
+                    ruleRevision: number;
+                  }
+                | {
+                    /** @constant */
+                    reason: 'organization_rule';
+                  }
+              )[];
+              revision: number;
+              /** @enum {string} */
+              status: 'active' | 'quarantined' | 'tombstoned' | 'removed_upstream' | 'yanked';
+              version: string;
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getProjectPolicy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        project: string;
+        policy: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            members: string[];
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateProjectPolicy: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        project: string;
+        policy: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json':
+          | {
+              members: string[];
+              /** @enum {string} */
+              overrideReason?:
+                'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+            }
+          | {
+              /** @enum {string} */
+              reason: 'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+              /** @constant */
+              state: 'disabled';
+            }
+          | {
+              clientMinVersion?: string;
+              denyUnknown?: boolean;
+              expiresAt?: string | null;
+              incidentId?: string | null;
+              minAgeDays?: number;
+              /** @enum {string} */
+              overrideReason?:
+                'false_positive' | 'emergency_compatibility' | 'superseded' | 'other';
+              /** @enum {string} */
+              reasonCode?: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            clientFamily: ('npm' | 'pnpm' | 'yarn' | 'composer') | null;
+            clientMinVersion: string | null;
+            createdAt: string;
+            denyUnknown: boolean;
+            disabledAt: string | null;
+            disabledReason:
+              ('false_positive' | 'emergency_compatibility' | 'superseded' | 'other') | null;
+            /** @enum {string} */
+            ecosystem: 'npm' | 'composer';
+            expiresAt: string | null;
+            id: string;
+            incidentId: string | null;
+            /** @enum {string} */
+            kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+            memberCount: number;
+            minAgeDays: number | null;
+            package: string | null;
+            projectId: string | null;
+            /** @enum {string} */
+            reasonCode: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+            revision: number;
+            /** @enum {string} */
+            scope: 'organization' | 'project';
+            /** @enum {string} */
+            state: 'active' | 'disabled';
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listRequestablePackages: {
+    parameters: {
+      query?: {
+        cursor?: string;
+        limit?: string;
+      };
+      header?: never;
+      path: {
+        project: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              id: string;
+              name: string;
+              /** @constant */
+              newProjectAccessMode: 'request';
+            }[];
+            next: string | null;
           };
         };
       };
@@ -6043,6 +10300,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -6388,7 +10648,9 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  requirePublishApproval?: boolean;
                   retentionDaysOverride?: number | null;
+                  revision: number;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -6408,7 +10670,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -6487,7 +10756,9 @@ export interface operations {
                   removalAcceptanceArmed: boolean;
                   /** @enum {string} */
                   removalPolicy: 'flag' | 'exclude';
+                  requirePublishApproval?: boolean;
                   retentionDaysOverride?: number | null;
+                  revision: number;
                   /** @enum {string} */
                   status: 'active' | 'degraded' | 'failing' | 'paused';
                   sync?: {
@@ -6507,7 +10778,14 @@ export interface operations {
                         | 'too_large'
                         | 'policy_denied'
                         | 'credential_unavailable'
-                        | 'internal';
+                        | 'internal'
+                        | 'name_mismatch'
+                        | 'version_mismatch'
+                        | 'invalid_manifest'
+                        | 'unsupported_files_pattern'
+                        | 'invalid_packlist'
+                        | 'invalid_tarball'
+                        | 'archive_changed';
                       count: number;
                     }[];
                     /** @description Terminal package failures. */
@@ -6631,6 +10909,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           /** @enum {string} */
           type:
@@ -6691,6 +10970,41 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
         };
       };
       /** @description Payload too large */
@@ -6834,7 +11148,9 @@ export interface operations {
   updateProjectSource: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        'If-Match': string;
+      };
       path: {
         project: string;
         source: string;
@@ -6877,6 +11193,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           url?: string | null;
           userAgent?: string | null;
@@ -6927,6 +11244,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
       /** @description Payload too large */
       413: {
         headers: {
@@ -6938,6 +11264,15 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };
@@ -7015,6 +11350,41 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
         };
       };
       /** @description Payload too large */
@@ -7286,7 +11656,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7322,7 +11692,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Service unavailable */
+      /** @description Service unavailable; Publish staging failed; Publishing is busy, try again later; Notification delivery is unavailable */
       503: {
         headers: {
           [name: string]: unknown;
@@ -7520,7 +11890,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7951,7 +12321,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -7989,6 +12359,680 @@ export interface operations {
       };
       /** @description Service unavailable */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listPublishes: {
+    parameters: {
+      query?: {
+        actionable?: 'true';
+        cursor?: string;
+        limit?: string;
+        state?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              /** @enum {string} */
+              approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+              createdAt: string;
+              decidedAt: string | null;
+              decidedBy: {
+                name: string;
+              } | null;
+              decidedByUserId: string | null;
+              decisionReason: string | null;
+              distTags: {
+                [key: string]: string;
+              };
+              expiresAt: string;
+              holdApproval: boolean;
+              holdScan: boolean;
+              id: string;
+              packageId: string;
+              packageName: string;
+              project: {
+                id: string;
+                name: string;
+                slug: string;
+              } | null;
+              readmePending: boolean;
+              requestedBy: {
+                name: string;
+                /** @enum {string} */
+                type: 'user' | 'service';
+              };
+              requestedById: string;
+              /** @enum {string} */
+              requestedByType: 'user' | 'service';
+              requiredScanners: string[];
+              revision: number;
+              routeProjectId: string | null;
+              scanAttempts: number;
+              /** @enum {string} */
+              scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+              scanVerdicts: {
+                plugin: string;
+                reason?: string;
+                /** @enum {string} */
+                verdict: 'allow' | 'deny';
+              }[];
+              sourceId: string;
+              sourceName: string;
+              tokenId: string;
+              updatedAt: string;
+              version: string;
+              versionId: string;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getPublish: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            distTags: {
+              [key: string]: string;
+            };
+            expiresAt: string;
+            holdApproval: boolean;
+            holdScan: boolean;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            } | null;
+            readmePending: boolean;
+            requestedBy: {
+              name: string;
+              /** @enum {string} */
+              type: 'user' | 'service';
+            };
+            requestedById: string;
+            /** @enum {string} */
+            requestedByType: 'user' | 'service';
+            requiredScanners: string[];
+            revision: number;
+            routeProjectId: string | null;
+            scanAttempts: number;
+            /** @enum {string} */
+            scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+            scanVerdicts: {
+              plugin: string;
+              reason?: string;
+              /** @enum {string} */
+              verdict: 'allow' | 'deny';
+            }[];
+            sourceId: string;
+            sourceName: string;
+            tokenId: string;
+            updatedAt: string;
+            version: string;
+            versionId: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  approvePublish: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description At most 1000 UTF-8 bytes */
+          reason?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            distTags: {
+              [key: string]: string;
+            };
+            expiresAt: string;
+            holdApproval: boolean;
+            holdScan: boolean;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            } | null;
+            readmePending: boolean;
+            requestedBy: {
+              name: string;
+              /** @enum {string} */
+              type: 'user' | 'service';
+            };
+            requestedById: string;
+            /** @enum {string} */
+            requestedByType: 'user' | 'service';
+            requiredScanners: string[];
+            revision: number;
+            routeProjectId: string | null;
+            scanAttempts: number;
+            /** @enum {string} */
+            scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+            scanVerdicts: {
+              plugin: string;
+              reason?: string;
+              /** @enum {string} */
+              verdict: 'allow' | 'deny';
+            }[];
+            sourceId: string;
+            sourceName: string;
+            tokenId: string;
+            updatedAt: string;
+            version: string;
+            versionId: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  rejectPublish: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description At most 1000 UTF-8 bytes */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            distTags: {
+              [key: string]: string;
+            };
+            expiresAt: string;
+            holdApproval: boolean;
+            holdScan: boolean;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            } | null;
+            readmePending: boolean;
+            requestedBy: {
+              name: string;
+              /** @enum {string} */
+              type: 'user' | 'service';
+            };
+            requestedById: string;
+            /** @enum {string} */
+            requestedByType: 'user' | 'service';
+            requiredScanners: string[];
+            revision: number;
+            routeProjectId: string | null;
+            scanAttempts: number;
+            /** @enum {string} */
+            scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+            scanVerdicts: {
+              plugin: string;
+              reason?: string;
+              /** @enum {string} */
+              verdict: 'allow' | 'deny';
+            }[];
+            sourceId: string;
+            sourceName: string;
+            tokenId: string;
+            updatedAt: string;
+            version: string;
+            versionId: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  rescanPublish: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': Record<string, never>;
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            approvalState: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+            createdAt: string;
+            decidedAt: string | null;
+            decidedBy: {
+              name: string;
+            } | null;
+            decidedByUserId: string | null;
+            decisionReason: string | null;
+            distTags: {
+              [key: string]: string;
+            };
+            expiresAt: string;
+            holdApproval: boolean;
+            holdScan: boolean;
+            id: string;
+            packageId: string;
+            packageName: string;
+            project: {
+              id: string;
+              name: string;
+              slug: string;
+            } | null;
+            readmePending: boolean;
+            requestedBy: {
+              name: string;
+              /** @enum {string} */
+              type: 'user' | 'service';
+            };
+            requestedById: string;
+            /** @enum {string} */
+            requestedByType: 'user' | 'service';
+            requiredScanners: string[];
+            revision: number;
+            routeProjectId: string | null;
+            scanAttempts: number;
+            /** @enum {string} */
+            scanState: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+            scanVerdicts: {
+              plugin: string;
+              reason?: string;
+              /** @enum {string} */
+              verdict: 'allow' | 'deny';
+            }[];
+            sourceId: string;
+            sourceName: string;
+            tokenId: string;
+            updatedAt: string;
+            version: string;
+            versionId: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };
@@ -8462,6 +13506,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -8541,7 +13588,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -8685,6 +13732,9 @@ export interface operations {
             | 'org:tokens:read'
             | 'org:tokens:revoke'
             | 'org:service-principals:write'
+            | 'org:packages:read'
+            | 'org:packages:publish'
+            | 'org:packages:approve'
             | 'org:packages:manage'
             | 'org:import:write'
             | 'org:import:approve'
@@ -8984,7 +14034,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Authentication required */
+      /** @description Authentication required; A token is required to publish */
       401: {
         headers: {
           [name: string]: unknown;
@@ -9071,7 +14121,9 @@ export interface operations {
               removalAcceptanceArmed: boolean;
               /** @enum {string} */
               removalPolicy: 'flag' | 'exclude';
+              requirePublishApproval?: boolean;
               retentionDaysOverride?: number | null;
+              revision: number;
               /** @enum {string} */
               status: 'active' | 'degraded' | 'failing' | 'paused';
               sync?: {
@@ -9091,7 +14143,14 @@ export interface operations {
                     | 'too_large'
                     | 'policy_denied'
                     | 'credential_unavailable'
-                    | 'internal';
+                    | 'internal'
+                    | 'name_mismatch'
+                    | 'version_mismatch'
+                    | 'invalid_manifest'
+                    | 'unsupported_files_pattern'
+                    | 'invalid_packlist'
+                    | 'invalid_tarball'
+                    | 'archive_changed';
                   count: number;
                 }[];
                 /** @description Terminal package failures. */
@@ -9203,6 +14262,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           /** @enum {string} */
           type:
@@ -9214,6 +14274,535 @@ export interface operations {
             | 'hosted';
           url?: string | null;
           userAgent?: string | null;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            conflictingClaims?: string[];
+            error: {
+              code: string;
+              details?: {
+                /** @enum {string} */
+                code:
+                  | 'invalid_type'
+                  | 'too_small'
+                  | 'too_big'
+                  | 'invalid_format'
+                  | 'invalid_value'
+                  | 'unrecognized_keys'
+                  | 'invalid_union'
+                  | 'invalid'
+                  | 'invalid_encoding'
+                  | 'too_deep'
+                  | 'invalid_json';
+                /** @enum {string} */
+                location?: 'params' | 'query' | 'body';
+                path: string;
+              }[];
+              message: string;
+              problems?: ('too_short' | 'too_long' | 'equals_email' | 'not_well_formed')[];
+              requestId: string;
+            };
+          };
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  applySourceDiscovery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm';
+          includeForks?: boolean;
+          installationId: number;
+          nextCursor?: string | null;
+          repositories: string[];
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            created: number;
+            existing: number;
+            failed: number;
+            nextCursor: string | null;
+            remainingRepositories: string[];
+            results: {
+              error?: string;
+              /** @enum {string} */
+              outcome: 'created' | 'existing' | 'skipped' | 'failed';
+              /** @enum {string} */
+              reason?:
+                | 'archived'
+                | 'no_manifest'
+                | 'invalid_name'
+                | 'fork'
+                | 'name_public'
+                | 'name_public_unverified'
+                | 'claim_overlap'
+                | 'filtered_out'
+                | 'error_451'
+                | 'error_404'
+                | 'unsupported_ecosystem';
+              repository: string;
+            }[];
+            skipped: number;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listSourceDiscoveryConnections: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              credentialId: string;
+              installationId: number;
+              sourceCount: number;
+              sourceNames: string[];
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  planSourceDiscovery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          cursor: string | null;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm';
+          includeForks?: boolean;
+          installationId: number;
+          pattern: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            entries: {
+              /** @enum {string} */
+              action: 'new' | 'existing' | 'skipped';
+              ecosystem: ('composer' | 'npm') | null;
+              packageName: string | null;
+              reason:
+                | (
+                    | 'archived'
+                    | 'no_manifest'
+                    | 'invalid_name'
+                    | 'fork'
+                    | 'name_public'
+                    | 'name_public_unverified'
+                    | 'claim_overlap'
+                    | 'filtered_out'
+                    | 'error_451'
+                    | 'error_404'
+                    | 'unsupported_ecosystem'
+                  )
+                | null;
+              repository: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listDiscoveryRules: {
+    parameters: {
+      query?: {
+        after?: string;
+        limit?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: (
+              | {
+                  completed?: {
+                    created: number;
+                    existing: number;
+                    failed: number;
+                    failureReason?: string | null;
+                    lastRunAt: string | null;
+                    outcome: ('succeeded' | 'failed') | null;
+                    skipped: number;
+                    skips: {
+                      reason: string | null;
+                      repository: string;
+                    }[];
+                  } | null;
+                  consecutiveFailures?: number;
+                  created: number;
+                  createdAt: string;
+                  credentialId: string;
+                  cursor: string | null;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm' | 'both';
+                  enabled: boolean;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  id: string;
+                  includeForks: boolean;
+                  installationId: number;
+                  intervalSeconds: number;
+                  lastRunAt: string | null;
+                  name: string & (unknown & unknown);
+                  nextRunAt: string | null;
+                  outcome: ('running' | 'succeeded' | 'failed' | 'rate_limited') | null;
+                  pattern: string;
+                  pendingResults?: {
+                    ecosystem?: ('composer' | 'npm') | null;
+                    error?: string;
+                    /** @enum {string} */
+                    outcome: 'created' | 'existing' | 'skipped' | 'failed';
+                    reason?:
+                      | (
+                          | 'archived'
+                          | 'no_manifest'
+                          | 'invalid_name'
+                          | 'fork'
+                          | 'name_public'
+                          | 'name_public_unverified'
+                          | 'claim_overlap'
+                          | 'filtered_out'
+                          | 'error_451'
+                          | 'error_404'
+                          | 'unsupported_ecosystem'
+                        )
+                      | null;
+                    repository: string;
+                    retryable?: boolean;
+                  }[];
+                  remaining: string[];
+                  revision: number;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                  updatedAt: string;
+                }
+              | {
+                  completed?: {
+                    created: number;
+                    existing: number;
+                    failed: number;
+                    failureReason?: string | null;
+                    lastRunAt: string | null;
+                    outcome: ('succeeded' | 'failed') | null;
+                    skipped: number;
+                    skips: {
+                      reason: string | null;
+                      repository: string;
+                    }[];
+                  } | null;
+                  createdAt: string;
+                  /** @enum {string} */
+                  ecosystem: 'composer' | 'npm' | 'both';
+                  enabled: boolean;
+                  id: string;
+                  includeForks: boolean;
+                  intervalSeconds: number;
+                  name: string & (unknown & unknown);
+                  pattern: string;
+                  revision: number;
+                  updatedAt: string;
+                }
+            )[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm' | 'both';
+          enabled?: boolean;
+          includeForks?: boolean;
+          installationId: number;
+          intervalSeconds?: number;
+          name: string & (unknown & unknown);
+          pattern: string;
         };
       };
     };
@@ -9274,8 +14863,489 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Service unavailable */
-      503: {
+    };
+  };
+  getDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json':
+            | {
+                completed?: {
+                  created: number;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  lastRunAt: string | null;
+                  outcome: ('succeeded' | 'failed') | null;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                } | null;
+                consecutiveFailures?: number;
+                created: number;
+                createdAt: string;
+                credentialId: string;
+                cursor: string | null;
+                /** @enum {string} */
+                ecosystem: 'composer' | 'npm' | 'both';
+                enabled: boolean;
+                existing: number;
+                failed: number;
+                failureReason?: string | null;
+                id: string;
+                includeForks: boolean;
+                installationId: number;
+                intervalSeconds: number;
+                lastRunAt: string | null;
+                name: string & (unknown & unknown);
+                nextRunAt: string | null;
+                outcome: ('running' | 'succeeded' | 'failed' | 'rate_limited') | null;
+                pattern: string;
+                pendingResults?: {
+                  ecosystem?: ('composer' | 'npm') | null;
+                  error?: string;
+                  /** @enum {string} */
+                  outcome: 'created' | 'existing' | 'skipped' | 'failed';
+                  reason?:
+                    | (
+                        | 'archived'
+                        | 'no_manifest'
+                        | 'invalid_name'
+                        | 'fork'
+                        | 'name_public'
+                        | 'name_public_unverified'
+                        | 'claim_overlap'
+                        | 'filtered_out'
+                        | 'error_451'
+                        | 'error_404'
+                        | 'unsupported_ecosystem'
+                      )
+                    | null;
+                  repository: string;
+                  retryable?: boolean;
+                }[];
+                remaining: string[];
+                revision: number;
+                skipped: number;
+                skips: {
+                  reason: string | null;
+                  repository: string;
+                }[];
+                updatedAt: string;
+              }
+            | {
+                completed?: {
+                  created: number;
+                  existing: number;
+                  failed: number;
+                  failureReason?: string | null;
+                  lastRunAt: string | null;
+                  outcome: ('succeeded' | 'failed') | null;
+                  skipped: number;
+                  skips: {
+                    reason: string | null;
+                    repository: string;
+                  }[];
+                } | null;
+                createdAt: string;
+                /** @enum {string} */
+                ecosystem: 'composer' | 'npm' | 'both';
+                enabled: boolean;
+                id: string;
+                includeForks: boolean;
+                intervalSeconds: number;
+                name: string & (unknown & unknown);
+                pattern: string;
+                revision: number;
+                updatedAt: string;
+              };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  deleteDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          credentialId?: string;
+          /** @enum {string} */
+          ecosystem?: 'composer' | 'npm' | 'both';
+          enabled?: boolean;
+          includeForks?: boolean;
+          installationId?: number;
+          intervalSeconds?: number;
+          name?: string & (unknown & unknown);
+          pattern?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  getDiscoveryRuleResults: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            created: number;
+            existing: number;
+            failed: number;
+            failureReason?: string | null;
+            lastRunAt: string | null;
+            outcome: ('succeeded' | 'failed') | null;
+            skipped: number;
+            skips: {
+              reason: string | null;
+              repository: string;
+            }[];
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  runDiscoveryRule: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': Record<string, never>;
+      };
+    };
+    responses: {
+      /** @description Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
         headers: {
           [name: string]: unknown;
         };
@@ -9288,7 +15358,9 @@ export interface operations {
   updateOrganizationSource: {
     parameters: {
       query?: never;
-      header?: never;
+      header: {
+        'If-Match': string;
+      };
       path: {
         source: string;
       };
@@ -9330,6 +15402,7 @@ export interface operations {
           pollIntervalSeconds?: number;
           /** @enum {string} */
           removalPolicy?: 'flag' | 'exclude';
+          requirePublishApproval?: boolean;
           retentionDaysOverride?: number | null;
           url?: string | null;
           userAgent?: string | null;
@@ -9380,6 +15453,15 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
       /** @description Payload too large */
       413: {
         headers: {
@@ -9391,6 +15473,15 @@ export interface operations {
       };
       /** @description Unsupported media type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };
@@ -9463,7 +15554,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -9731,6 +15822,7 @@ export interface operations {
     requestBody: {
       content: {
         'application/json': {
+          /** @description For hosted npm sources, use an exact lowercase name or @scope/*. Scope claims hide public packages in the scope that are not yet cached. */
           pattern: string;
         };
       };
@@ -9776,6 +15868,15 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -9872,6 +15973,110 @@ export interface operations {
       };
       /** @description Not found */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Service unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateRegisteredName: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        source: string;
+        name: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description For hosted npm sources, use an exact lowercase name or @scope/*. Scope claims hide public packages in the scope that are not yet cached. */
+          pattern: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            id: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
         headers: {
           [name: string]: unknown;
         };
@@ -10074,7 +16279,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10481,7 +16686,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorEnvelope'];
         };
       };
-      /** @description Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required */
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
       409: {
         headers: {
           [name: string]: unknown;
@@ -10519,6 +16724,394 @@ export interface operations {
       };
       /** @description Service unavailable */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  listTrustedPublishers: {
+    parameters: {
+      query?: {
+        cursor?: string;
+        limit?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            items: {
+              createdAt: string;
+              createdByName: string;
+              createdByUserId: string;
+              disabledAt: string | null;
+              environment: string;
+              id: string;
+              lastUsedAt: string | null;
+              packageName: string;
+              refPattern: string | null;
+              repository: string;
+              repositoryId: string;
+              repositoryOwnerId: string;
+              revision: number;
+              servicePrincipalId: string;
+              servicePrincipalName: string;
+              workflow: string;
+            }[];
+            next: string | null;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  createTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          environment: string;
+          packageName: string;
+          refPattern?: string;
+          repository: string;
+          workflow: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            createdByName: string;
+            createdByUserId: string;
+            disabledAt: string | null;
+            environment: string;
+            id: string;
+            lastUsedAt: string | null;
+            packageName: string;
+            refPattern: string | null;
+            repository: string;
+            repositoryId: string;
+            repositoryOwnerId: string;
+            revision: number;
+            servicePrincipalId: string;
+            servicePrincipalName: string;
+            workflow: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  updateTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          environment: string;
+          packageName: string;
+          refPattern?: string;
+          repository: string;
+          workflow: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            createdAt: string;
+            createdByName: string;
+            createdByUserId: string;
+            disabledAt: string | null;
+            environment: string;
+            id: string;
+            lastUsedAt: string | null;
+            packageName: string;
+            refPattern: string | null;
+            repository: string;
+            repositoryId: string;
+            repositoryOwnerId: string;
+            revision: number;
+            servicePrincipalId: string;
+            servicePrincipalName: string;
+            workflow: string;
+          };
+        };
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Payload too large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Unsupported media type */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+    };
+  };
+  disableTrustedPublisher: {
+    parameters: {
+      query?: never;
+      header: {
+        'If-Match': string;
+      };
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Authentication required */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Access denied */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Not found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition failed */
+      412: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorEnvelope'];
+        };
+      };
+      /** @description Precondition required */
+      428: {
         headers: {
           [name: string]: unknown;
         };

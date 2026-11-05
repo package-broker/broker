@@ -150,26 +150,43 @@ function stringSet(accepts: (entry: string) => boolean, minLength = 0) {
     );
 }
 
-const vcsConfig = z
-  .strictObject({
-    provider: z.enum(['github', 'git', 'ssh']),
-    repository: z.string(),
-    installationId: z.nullable(z.number().check(z.refine((n) => Number.isSafeInteger(n) && n > 0))),
-    packageName: z.nullable(z.string().check(z.refine(isComposerKey))),
-    refs: z.strictObject({ tags: z.boolean(), branches: stringSet(isBranch) }),
-  })
-  .check(
-    z.refine((config) => {
-      const { provider, repository, installationId } = config;
-      if (installationId !== null && provider !== 'github') return false;
-      if (provider === 'github') {
-        return GITHUB_REPOSITORY.test(repository) && !/\/\.{1,2}$/.test(repository);
-      }
-      return provider === 'git'
-        ? isGitUrl(repository) && isCanonicalUrl(repository)
-        : isSshRepository(repository);
-    }),
-  );
+const vcsConfigFor = (ecosystem: 'composer' | 'npm') =>
+  z
+    .strictObject({
+      provider: z.enum(['github', 'git', 'ssh']),
+      repository: z.string(),
+      installationId: z.nullable(
+        z.number().check(z.refine((n) => Number.isSafeInteger(n) && n > 0)),
+      ),
+      packageName: z.nullable(
+        z.string().check(
+          z.refine((name) => {
+            try {
+              return packageKey(name, { ecosystem }) === name;
+            } catch (error) {
+              if (error instanceof PackageNameError) return false;
+              throw error;
+            }
+          }),
+        ),
+      ),
+      refs: z.strictObject({ tags: z.boolean(), branches: stringSet(isBranch) }),
+    })
+    .check(
+      z.refine((config) => {
+        const { provider, repository, installationId } = config;
+        if (installationId !== null && provider !== 'github') return false;
+        if (provider === 'github') {
+          return GITHUB_REPOSITORY.test(repository) && !/\/\.{1,2}$/.test(repository);
+        }
+        return provider === 'git'
+          ? isGitUrl(repository) && isCanonicalUrl(repository)
+          : isSshRepository(repository);
+      }),
+    );
+
+const vcsConfig = vcsConfigFor('composer');
+const npmVcsConfig = vcsConfigFor('npm');
 
 const composerRepositoryConfig = z.strictObject({
   selection: z.strictObject({
@@ -198,6 +215,7 @@ export const SOURCE_CONFIG_SCHEMAS = {
 
 export const sourceConfig = z.union([
   vcsConfig,
+  npmVcsConfig,
   composerRepositoryConfig,
   npmRegistryConfig,
   packagistProxyConfig,
@@ -235,8 +253,14 @@ export function isPackagistConfig(config: unknown): config is { githubToken: boo
   return z.safeParse(packagistProxyConfig, config).success;
 }
 
-export function isConfigOf(type: SourceType, config: unknown): boolean {
-  return z.safeParse(SOURCE_CONFIG_SCHEMAS[type], config).success;
+export function isConfigOf(
+  type: SourceType,
+  config: unknown,
+  ecosystem: 'composer' | 'npm' = ECOSYSTEM_OF[type],
+): boolean {
+  return (
+    ECOSYSTEM_OF[type] === ecosystem && z.safeParse(SOURCE_CONFIG_SCHEMAS[type], config).success
+  );
 }
 
 function compareCodeUnits(a: string, b: string): number {

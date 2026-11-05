@@ -594,3 +594,53 @@ describe('npmVersionInput', () => {
     });
   });
 });
+
+it('retains publisher-reported npm and Node client information through normalization', () => {
+  const metadata = stored(
+    npmVersionInput(
+      'left-pad',
+      manifest({ _npmVersion: '11.17.0', _nodeVersion: '24.0.0' }),
+      TIME,
+      origin,
+    ),
+  );
+  expect(metadata).toMatchObject({ _npmVersion: '11.17.0', _nodeVersion: '24.0.0' });
+});
+it.each(['_npmVersion', '_nodeVersion'])(
+  'refuses credential echoes in %s client information',
+  (field) => {
+    expect(npmVersionInput('left-pad', manifest({ [field]: SECRET }), TIME, origin)).toEqual({
+      ok: false,
+      reason: 'credential_echo',
+    });
+  },
+);
+describe('npm VCS version input', () => {
+  it('accepts a dist-less VCS manifest and retains its commit with no integrity', () => {
+    const result = npmVersionInput(
+      'left-pad',
+      manifest({ dist: undefined }),
+      {},
+      { ...origin, kind: 'vcs' },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      input: { distType: 'tgz', sourceRef: 'b'.repeat(40), metadata: { npmIntegrity: null } },
+    });
+    expect(stored(result)).not.toHaveProperty('dist');
+  });
+  it('refuses dist-less registry manifests and VCS manifests without an immutable commit', () => {
+    expect(npmVersionInput('left-pad', manifest({ dist: undefined }), {}, origin)).toMatchObject({
+      ok: false,
+      reason: 'no_installable_reference',
+    });
+    expect(
+      npmVersionInput(
+        'left-pad',
+        manifest({ dist: undefined, gitHead: 'main' }),
+        {},
+        { ...origin, kind: 'vcs' },
+      ),
+    ).toMatchObject({ ok: false, reason: 'no_installable_reference' });
+  });
+});

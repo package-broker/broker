@@ -1,22 +1,43 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectRegistrations, KernelConfigError } from '@package-broker/core/kernel/registry';
 import type { PluginDefinition } from '@package-broker/core/plugin';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { build, BuildDiagnosticsError, declarationOnlyPackageResolver } from './build.js';
+import {
+  build,
+  BuildConfigError,
+  BuildDiagnosticsError,
+  declarationOnlyPackageResolver,
+} from './build.js';
 
+const metadataOverrides = vi.hoisted(() => new Map<string, unknown>());
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    readFile: (...args: Parameters<typeof actual.readFile>) => {
+      const metadata = metadataOverrides.get(String(args[0]));
+      if (metadata !== undefined) return Promise.resolve(JSON.stringify(metadata));
+      return actual.readFile(...args);
+    },
+  };
+});
+
+const cliRequire = createRequire(import.meta.url);
 const dirs: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  metadataOverrides.clear();
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 const NODE_PORTS = {
-  blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+  blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
   cache: { adapter: 'lru', maxBytes: 1024 },
   jobs: { adapter: 'database', maxRunning: 2 },
   observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },
@@ -126,6 +147,31 @@ describe('build vulnerability configuration', () => {
   );
 });
 
+describe('build notifications configuration', () => {
+  it.each([undefined, {}, { enabled: false }, { enabled: true }])(
+    'accepts %j',
+    async (notifications) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], platformPorts: { node: ${JSON.stringify(NODE_PORTS)} }, notifications: ${JSON.stringify(notifications)} };`,
+      );
+      await expect(build(options)).resolves.toBeDefined();
+    },
+  );
+  it.each([false, null, { enabled: 'true' }, { enabled: true, extra: true }])(
+    'rejects invalid %j before emitting a build',
+    async (notifications) => {
+      const options = await fixture(routeSource(''));
+      await writeFile(
+        options.configPath,
+        `export default { platform: 'node', plugins: [], notifications: ${JSON.stringify(notifications)} };`,
+      );
+      await expect(build(options)).rejects.toBeInstanceOf(BuildDiagnosticsError);
+    },
+  );
+});
+
 describe('build source provenance', () => {
   it('records HEAD and clean, tracked and untracked worktree changes, with a CI override', async () => {
     vi.stubEnv('GITHUB_SHA', undefined);
@@ -168,4 +214,47 @@ describe('build source provenance', () => {
     vi.stubEnv('GITHUB_SHA', 'e'.repeat(40));
     expect(await info()).toMatchObject({ gitSha: 'e'.repeat(40), dirty: null });
   });
+});
+
+describe('local-auth runtime capability', () => {
+  function metadata(runtimeMarker: boolean) {
+    for (const name of ['cli', 'core', 'runtime-node']) {
+      const supported = name === 'runtime-node' ? runtimeMarker : !runtimeMarker;
+      metadataOverrides.set(cliRequire.resolve(`@package-broker/${name}/package.json`), {
+        version: '2.0.0-rc.4',
+        ...(supported ? { packageBroker: { localAuth: 1 } } : {}),
+      });
+    }
+  }
+
+  it.each([true, false])(
+    'takes default-build capability from the runtime marker: %s',
+    async (supported) => {
+      metadata(supported);
+      const fixtureOptions = await fixture(routeSource(''));
+      const options = { cwd: fixtureOptions.cwd, configPath: fixtureOptions.configPath };
+      const result = await build(options);
+      const manifest = JSON.parse(await readFile(result.manifestJson, 'utf8'));
+      if (supported) expect(manifest.localAuth).toEqual({ version: 1 });
+      else expect(manifest).not.toHaveProperty('localAuth');
+    },
+  );
+
+  it('omits capability for a custom entry even when the runtime has the marker', async () => {
+    metadata(true);
+    const options = await fixture(routeSource(''));
+    const result = await build(options);
+    expect(JSON.parse(await readFile(result.manifestJson, 'utf8'))).not.toHaveProperty('localAuth');
+  });
+});
+
+it('pb build refuses four scanners before bundling', async () => {
+  const options = await fixture(routeSource(''));
+  await writeFile(
+    options.configPath,
+    `export default { platform: 'node', plugins: ['a','b','c','d'].map(id => ({ id, package: '@package-broker/core', apiVersion: 3, platforms: ['node'], publishPolicy: { id, inspect: async () => ({ verdict: 'allow' }) } })) };`,
+  );
+  const error = await build(options).catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(BuildConfigError);
+  expect((error as BuildConfigError).configKeys).toContain('plugins.publishPolicy');
 });

@@ -185,6 +185,7 @@ describe('renderBuildManifest', () => {
         'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );
@@ -211,6 +212,7 @@ describe('renderBuildManifest', () => {
         'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );
@@ -239,6 +241,7 @@ describe('renderBuildManifest', () => {
         'export const audit = config.audit;',
         'export const vulnerability = config.vulnerability;',
         'export const mcp = config.mcp;',
+        'export const notifications = config.notifications;',
         '',
       ].join('\n'),
     );
@@ -384,7 +387,14 @@ describe('build with platformPorts', () => {
     const result = await build({ configPath, target: 'cloudflare', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).identity).toEqual({
       runtimeProviders: true,
-      compiled: [{ id: 'corp', kind: 'oidc', anchor: 'oidc:https://idp.example.com' }],
+      compiled: [
+        {
+          id: 'corp',
+          kind: 'oidc',
+          anchor: 'oidc:https://idp.example.com',
+          policy: { verifiedDomains: ['example.com'] },
+        },
+      ],
     });
   });
 
@@ -584,6 +594,17 @@ describe('build with platformPorts', () => {
     const result = await build({ configPath: file, target: 'node', cwd: project, runtimeEntry });
     expect((await readManifest(result.outDir)).platformPorts).toBeNull();
   }, 60_000);
+
+  it.each(['node', 'cloudflare'] as const)(
+    'builds %s with a blob ceiling below the publish cap',
+    async (target) => {
+      const ports = target === 'node' ? NODE_PORTS : CLOUDFLARE_PORTS;
+      const stanza = { ...ports, blob: { ...ports.blob, maxBytes: 1024 } };
+      const config = await writeConfig(target, { [target]: stanza });
+      const result = await build({ configPath: config, target, cwd: project, runtimeEntry });
+      expect((await readManifest(result.outDir)).platformPorts).toEqual(stanza);
+    },
+  );
 
   const rejected: [string, unknown, string, 'node' | 'cloudflare'][] = [
     [

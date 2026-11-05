@@ -1,3 +1,5 @@
+import { redactValue } from '../audit/redact.js';
+import { sha256Hex } from '../auth/primitives.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { auditEvent } from '../audit/actions.js';
 import type { AuthenticatedSession, SessionService } from '../auth/session.js';
@@ -14,6 +16,7 @@ export type { PackageManageScope } from '../db/catalogue.js';
 export type PackageVersionAction = 'quarantine' | 'tombstone' | 'release';
 
 export interface PackageManageInput {
+  readonly reason?: string;
   readonly packageId: string;
   readonly versionId: string;
   readonly action: PackageVersionAction;
@@ -21,7 +24,13 @@ export interface PackageManageInput {
 }
 
 export type PackageManageError =
-  'invalid_input' | 'reauth_required' | 'forbidden' | 'not_found' | 'conflict' | 'indeterminate';
+  | 'invalid_input'
+  | 'reauth_required'
+  | 'forbidden'
+  | 'not_found'
+  | 'conflict'
+  | 'indeterminate'
+  | 'publish_gate';
 
 export type PackageManageResult =
   | {
@@ -99,6 +108,18 @@ export function createPackageManageService(deps: {
         projectId: input.scope.kind === 'project' ? input.scope.projectId : null,
       });
       if (version === null) return fail('not_found');
+      if (version.publishGate) return fail('publish_gate');
+      if (version.hostedNpm && input.action === 'tombstone') {
+        if (input.scope.kind !== 'organization') return fail('forbidden');
+        if (
+          typeof input.reason !== 'string' ||
+          !input.reason.trim() ||
+          new TextEncoder().encode(input.reason).length > 1000
+        )
+          return fail('invalid_input');
+        const safe = redactValue(input.reason, 1000, 'reason');
+        if (!safe.ok || safe.value !== input.reason) return fail('invalid_input');
+      }
       const transition = {
         quarantine: { status: 'quarantined', reason: 'admin_quarantine' },
         tombstone: { status: 'tombstoned', reason: 'admin_tombstone' },
@@ -115,17 +136,23 @@ export function createPackageManageService(deps: {
         projectId: version.sourceProjectId,
         context: call.audit,
         changes: {
+          ...(version.hostedNpm && input.action === 'tombstone'
+            ? { reason_sha256: { new: await sha256Hex(input.reason!) } }
+            : {}),
           from_status: { old: version.status },
           to_status: { new: to.status },
           package_name: { new: version.packageName },
           version: { new: version.version },
         },
       });
-      if (!audit.ok) throw new TypeError('Invalid package manage audit event');
+      if (!audit.ok) return fail('invalid_input');
       const write = {
         packageId: input.packageId,
         versionId: input.versionId,
         expectedStatus: version.status,
+        ...(version.hostedNpm && input.action === 'tombstone'
+          ? { tombstoneReason: input.reason!, expectedRevision: version.revision! }
+          : {}),
         manage: input.scope,
         audit: audit.event,
         ...(call.idempotency === undefined ? {} : { idempotency: call.idempotency }),
@@ -145,6 +172,8 @@ export function createPackageManageService(deps: {
           return fail('forbidden');
         case 'conflict':
           return fail('conflict');
+        case 'publish_gate':
+          return fail('publish_gate');
         case 'indeterminate':
           return fail('indeterminate');
         default:

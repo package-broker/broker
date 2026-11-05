@@ -119,6 +119,18 @@ describe('Node audit assembly', () => {
         platformServices: {
           jobStore: createJobRepository(database.executor),
           blob: {
+            stage: async () => {
+              throw new Error('unused');
+            },
+            openStaged: async () => {
+              throw new Error('unused');
+            },
+            promote: async () => {
+              throw new Error('unused');
+            },
+            discard: async () => {
+              throw new Error('unused');
+            },
             head: async () => null,
             get: async () => null,
             put: async () => {
@@ -390,6 +402,18 @@ it('defers ordinary queued and scheduled jobs on a refusal and retries after rec
     platformServices: {
       jobStore: createJobRepository(database.executor),
       blob: {
+        stage: async () => {
+          throw new Error('unused');
+        },
+        openStaged: async () => {
+          throw new Error('unused');
+        },
+        promote: async () => {
+          throw new Error('unused');
+        },
+        discard: async () => {
+          throw new Error('unused');
+        },
         head: async () => null,
         get: async () => null,
         put: async () => {
@@ -509,6 +533,18 @@ it.each(['service', 'job'] as const)(
       platformServices: {
         jobStore: createJobRepository(database.executor),
         blob: {
+          stage: async () => {
+            throw new Error('unused');
+          },
+          openStaged: async () => {
+            throw new Error('unused');
+          },
+          promote: async () => {
+            throw new Error('unused');
+          },
+          discard: async () => {
+            throw new Error('unused');
+          },
           head: async () => null,
           get: async () => null,
           put: async () => {

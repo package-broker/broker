@@ -1069,3 +1069,23 @@ describe('buildIdentityProviders', () => {
     expect(map.size).toBe(2);
   });
 });
+
+describe('optional reauth capability resolver', () => {
+  it('preserves the receiver and snapshots the optional method', async () => {
+    const source = provider({
+      reauthCapability: async function (this: IdentityProvider) {
+        return this.id === 'dex';
+      },
+    });
+    const wrapped = build(() => [source]).get('dex')!;
+    (source as { reauthCapability: IdentityProvider['reauthCapability'] }).reauthCapability =
+      async () => false;
+    expect(await wrapped.reauthCapability!()).toBe(true);
+    expect(build(() => [provider()]).get('dex')!.reauthCapability).toBeUndefined();
+  });
+  it('rejects a non-callable capability resolver', () => {
+    expect(problemsOf(() => [provider({ reauthCapability: true })])).toEqual([
+      `${label(0)} reauthCapability must be a function`,
+    ]);
+  });
+});

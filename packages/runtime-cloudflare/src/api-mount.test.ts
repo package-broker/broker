@@ -1,4 +1,6 @@
 import { auditTrail } from './audit-trail.test.support.js';
+import { sha256Hex } from '@package-broker/core/auth/primitives';
+import { SESSION_COOKIE } from '@package-broker/core/auth/cookies';
 import { readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
@@ -119,6 +121,96 @@ interface ManagementAssemblyEntry {
 
 const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
   {
+    dependency: 'notifications',
+    constructed: 'notification endpoint service, read repository and human sessions',
+    routes: [
+      'GET /_pb/projects/:project/notifications',
+      'POST /_pb/projects/:project/notifications',
+      'GET /_pb/projects/:project/notifications/:id',
+      'PATCH /_pb/projects/:project/notifications/:id',
+      'POST /_pb/projects/:project/notifications/:id/enable',
+      'POST /_pb/projects/:project/notifications/:id/disable',
+      'DELETE /_pb/projects/:project/notifications/:id',
+      'GET /_pb/projects/:project/notifications/:id/deliveries',
+      'GET /_pb/projects/:project/notifications/:id/deliveries/:delivery',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM26I',
+  },
+  {
+    dependency: 'sourceDiscovery',
+    constructed: 'configured GitHub discovery, credential store and repository reader',
+    routes: [
+      'GET /_pb/sources/discovery/connections',
+      'POST /_pb/sources/discovery/plan',
+      'POST /_pb/sources/discovery/apply',
+      'POST /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules',
+      'GET /_pb/sources/discovery/rules/:id',
+      'PATCH /_pb/sources/discovery/rules/:id',
+      'DELETE /_pb/sources/discovery/rules/:id',
+      'POST /_pb/sources/discovery/rules/:id/run',
+      'GET /_pb/sources/discovery/rules/:id/results',
+    ],
+    jobs: ['discovery-rules', 'discovery-rule'],
+    ownerPacket: 'DISC2',
+  },
+  {
+    dependency: 'registryPolicy',
+    constructed: 'Registry policy management, mounted whenever the policy migration is applied',
+    routes: [
+      'GET /_pb/policies',
+      'POST /_pb/policies',
+      'GET /_pb/policies/:policy',
+      'PATCH /_pb/policies/:policy',
+      'GET /_pb/policies/packages/:package',
+      'GET /_pb/projects/:project/policies',
+      'POST /_pb/projects/:project/policies',
+      'GET /_pb/projects/:project/policies/:policy',
+      'PATCH /_pb/projects/:project/policies/:policy',
+      'GET /_pb/projects/:project/policies/packages/:package',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM27',
+  },
+  {
+    dependency: 'trustedPublishers',
+    constructed: 'Trusted publisher store and configured GitHub repository lookup',
+    routes: [
+      'GET /_pb/trusted-publishers',
+      'POST /_pb/trusted-publishers',
+      'PUT /_pb/trusted-publishers/:id',
+      'DELETE /_pb/trusted-publishers/:id',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM17c',
+  },
+  {
+    dependency: 'packageDetail',
+    constructed: 'SQLite package detail repository and idempotency repository',
+    routes: [
+      'GET /_pb/packages/:package',
+      'GET /_pb/projects/:project/packages/:package',
+      'GET /_pb/projects/:project/packages/:package/readme',
+      'PATCH /_pb/packages/:package/access',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM13a',
+  },
+  {
+    dependency: 'packageAccessRequests',
+    constructed: 'SQLite access request repository with provider anchors',
+    routes: [
+      'POST /_pb/projects/:project/package-access-requests',
+      'GET /_pb/package-access-requests',
+      'POST /_pb/package-access-requests/:id/approve',
+      'POST /_pb/package-access-requests/:id/reject',
+      'GET /_pb/projects/:project/requestable-packages',
+    ],
+    jobs: ['package-access-expire'],
+    ownerPacket: 'NPM12',
+  },
+  {
     dependency: 'organization',
     constructed: 'organization and user repositories; access administration',
     routes: ['GET /_pb/me', 'GET /_pb/organization', 'GET /_pb/users', 'PATCH /_pb/users/:user'],
@@ -138,6 +230,13 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ],
     jobs: [],
     ownerPacket: 'T531',
+  },
+  {
+    dependency: 'npmLogin',
+    constructed: 'npm login repository and personal token service',
+    routes: ['GET /_pb/me/npm-login/:selector', 'POST /_pb/me/npm-login/:selector'],
+    jobs: ['npm-login-expire'],
+    ownerPacket: 'NPM16',
   },
   {
     dependency: 'access',
@@ -247,6 +346,7 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
       'GET /_pb/sources/:source/names',
       'POST /_pb/sources/:source/names',
       'DELETE /_pb/sources/:source/names/:name',
+      'PATCH /_pb/sources/:source/names/:name',
     ],
     jobs: [],
     ownerPacket: 'T531',
@@ -260,6 +360,19 @@ const MANAGEMENT_ASSEMBLY: readonly ManagementAssemblyEntry[] = [
     ],
     jobs: [],
     ownerPacket: 'T531',
+  },
+  {
+    dependency: 'publishes',
+    constructed: 'publishes repository',
+    routes: [
+      'GET /_pb/publishes',
+      'GET /_pb/publishes/:id',
+      'POST /_pb/publishes/:id/approve',
+      'POST /_pb/publishes/:id/reject',
+      'POST /_pb/publishes/:id/rescan',
+    ],
+    jobs: [],
+    ownerPacket: 'NPM10',
   },
   {
     dependency: 'packages',
@@ -345,7 +458,27 @@ function assertManagementAssembly(mounted: readonly RouteDefinition[], jobs: rea
   const mountedKeys = mounted.map((route) => `${route.method} ${route.path}`);
   for (const entry of entries) {
     expect(deps[entry.dependency], entry.constructed).toBeDefined();
-    expect(entry.ownerPacket).toBe(entry.dependency === 'sourcePackages' ? 'T1041' : 'T531');
+    expect(entry.ownerPacket).toBe(
+      entry.dependency === 'notifications'
+        ? 'NPM26I'
+        : entry.dependency === 'sourceDiscovery'
+          ? 'DISC2'
+          : entry.dependency === 'registryPolicy'
+            ? 'NPM27'
+            : entry.dependency === 'trustedPublishers'
+              ? 'NPM17c'
+              : entry.dependency === 'packageDetail'
+                ? 'NPM13a'
+                : entry.dependency === 'publishes'
+                  ? 'NPM10'
+                  : entry.dependency === 'sourcePackages'
+                    ? 'T1041'
+                    : entry.dependency === 'npmLogin'
+                      ? 'NPM16'
+                      : entry.dependency === 'packageAccessRequests'
+                        ? 'NPM12'
+                        : 'T531',
+    );
     for (const key of entry.routes) {
       expect(
         mountedKeys.filter((candidate) => candidate === key),
@@ -367,6 +500,21 @@ describe('Workers management API mount', () => {
     built.kernels.length = 0;
     built.drop = undefined;
     built.dependencies.length = 0;
+  });
+
+  it('reads a README through the mounted package boundary', async () => {
+    const env = await environment();
+    const worker = createWorker([], { log: () => undefined });
+    await worker.services(env);
+    const request = await seedReadme(createD1Executor(env.DB as unknown as D1DatabaseLike));
+    const response = await worker.fetch(request, env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      filename: 'README.md',
+      body: '# Mounted',
+      contentType: 'text/markdown',
+      sizeBytes: 9,
+    });
   });
 
   it('refuses anonymous requests to every route in the API module table', async () => {
@@ -418,6 +566,18 @@ describe('Workers management API mount', () => {
     await worker.fetch(new Request(`${PUBLIC_URL}/_pb/me`), env);
     return (built.kernels.at(-1)?.coreRoutes ?? []).map((route) => `${route.method} ${route.path}`);
   };
+
+  it('mounts public npm login routes without registry services', async () => {
+    await mountedAfter(createWorker([], { log: () => undefined }), await environment());
+    expect(
+      built.kernels.at(-1)?.ecosystemRoutes?.map((route) => `${route.method} ${route.path}`),
+    ).toEqual(
+      expect.arrayContaining([
+        'POST /:project/npm/-/v1/login',
+        'GET /:project/npm/-/v1/done/:session',
+      ]),
+    );
+  });
 
   it('mounts the package manage routes without a rebuild route', async () => {
     const mounted = await mountedAfter(
@@ -511,3 +671,110 @@ describe('Workers management API mount', () => {
     expect(JSON.stringify(logged)).not.toContain(KEY);
   });
 });
+
+async function seedReadme(executor: import('@package-broker/core/db/port').SqlExecutor) {
+  const [org] = await executor.all<{ id: string }>({
+    sql: 'SELECT id FROM organization',
+    params: [],
+  });
+  const orgId = org!.id;
+  const packageId = ulid(),
+    versionId = ulid(),
+    projectId = ulid(),
+    sourceId = ulid(),
+    userId = ulid(),
+    roleId = ulid(),
+    credentialId = ulid();
+  const secret = 'R'.repeat(43);
+  const rows: Array<[string, ...import('@package-broker/core/db/port').Statement['params']]> = [
+    ["INSERT INTO project (id,org_id,slug,name) VALUES (?,?,'readme','Readme')", projectId, orgId],
+    [
+      "INSERT INTO source (id,org_id,name,ecosystem,type) VALUES (?,?,'Readme','npm','hosted')",
+      sourceId,
+      orgId,
+    ],
+    [
+      "INSERT INTO package (id,org_id,source_id,ecosystem,name) VALUES (?,?,?,'npm','readme-widget')",
+      packageId,
+      orgId,
+      sourceId,
+    ],
+    [
+      'INSERT INTO project_source (org_id,project_id,source_id) VALUES (?,?,?)',
+      orgId,
+      projectId,
+      sourceId,
+    ],
+    [
+      "INSERT INTO project_package (org_id,project_id,package_id,ecosystem,name,origin) VALUES (?,?,?,'npm','readme-widget','subscription')",
+      orgId,
+      projectId,
+      packageId,
+    ],
+    [
+      "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,status) VALUES (?,?,?,'1.0.0','1.0.0','2026-01-01T00:00:00Z','import_time','{}','active')",
+      versionId,
+      orgId,
+      packageId,
+    ],
+    [
+      "INSERT INTO dist_tag (org_id,package_id,tag,version_id) VALUES (?,?,'latest',?)",
+      orgId,
+      packageId,
+      versionId,
+    ],
+    [
+      "INSERT INTO version_readme (org_id,version_id,filename,body) VALUES (?,?,'README.md','# Mounted')",
+      orgId,
+      versionId,
+    ],
+    [
+      "INSERT INTO user_account (id,org_id,email) VALUES (?,?,'readme@example.test')",
+      userId,
+      orgId,
+    ],
+    [
+      "INSERT INTO credential (id,org_id,kind,ciphertext,nonce,key_version,aad) VALUES (?,?,'totp',X'00',zeroblob(12),1,'test')",
+      credentialId,
+      orgId,
+    ],
+    [
+      "INSERT INTO local_login (user_id,org_id,password_hash,totp_credential_id,totp_enabled_at) VALUES (?,?,'pbkdf2-sha256$test',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      userId,
+      orgId,
+      credentialId,
+    ],
+    [
+      "INSERT INTO role (id,org_id,key,name,scope,protects_last_holder) VALUES (?,?,'readme_admin','Readme admin','organization',1)",
+      roleId,
+      orgId,
+    ],
+    ...['project:read', 'project:packages:read'].map(
+      (permission) =>
+        [
+          'INSERT INTO role_permission (org_id,role_id,permission) VALUES (?,?,?)',
+          orgId,
+          roleId,
+          permission,
+        ] as [string, ...import('@package-broker/core/db/port').Statement['params']],
+    ),
+    [
+      "INSERT INTO access_grant (id,org_id,role_id,scope,subject_type,subject_value) VALUES (?,?,?,'organization','email','readme@example.test')",
+      ulid(),
+      orgId,
+      roleId,
+    ],
+    [
+      "INSERT INTO session (id,org_id,user_id,secret_hash,csrf_hash,expires_at,last_seen_at) VALUES (?,?,?,?,?,'2099-01-01T00:00:00.000Z',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      ulid(),
+      orgId,
+      userId,
+      await sha256Hex(secret),
+      'b'.repeat(64),
+    ],
+  ];
+  await executor.batch(rows.map(([sql, ...params]) => ({ sql, params })));
+  return new Request(`https://broker.test/_pb/projects/readme/packages/${packageId}/readme`, {
+    headers: { cookie: `${SESSION_COOKIE}=${secret}` },
+  });
+}

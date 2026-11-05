@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { fenceKind } from '../authz/fence.js';
 import { orgContext } from '../db/port.js';
 import { fixedClock, ulid } from '../ids.js';
-import { parseSha256, type BlobStore } from '../platform/blob.js';
+import { parseSha256, type CoreBlobStore as BlobStore } from '../platform/blob.js';
 import { jobFences } from '../platform/job-fences.js';
 import { JobError, type JobContext } from '../platform/jobs.js';
 import { importVerificationJob } from './jobs.js';

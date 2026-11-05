@@ -84,6 +84,18 @@ function storeFor(context: CaseContext) {
     },
     providerAnchors: [],
     blobs: {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
       async put() {
         throw new Error('unexpected blob upload');
       },

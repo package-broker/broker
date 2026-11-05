@@ -7,6 +7,8 @@ import {
   snapshotRef,
   UpstreamError,
   versionsFromRefs,
+  npmVersionsFromRefs,
+  npmVcsDescription,
   type PolicyFetch,
   type ProviderContext,
   type ProviderSource,
@@ -65,7 +67,7 @@ function repository(source: ProviderSource) {
   if (
     source.type !== 'vcs' ||
     source.config.provider !== 'github' ||
-    source.ecosystem !== 'composer'
+    !['composer', 'npm'].includes(source.ecosystem)
   ) {
     throw new GithubProviderError('invalid_request');
   }
@@ -191,7 +193,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
   return {
     id: 'github',
     sourceTypes: ['vcs'],
-    ecosystems: ['composer'],
+    ecosystems: ['composer', 'npm'],
     async listPackages(ctx: ProviderContext, source: ProviderSource, cursor: string | null) {
       if (cursor !== null) throw new GithubProviderError('invalid_request');
       const s = await session(ctx, source);
@@ -210,14 +212,16 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         cancel(response);
       }
       if (configuredName === undefined) {
-        const manifest = await tokenRest(s.fetch, s.apiCredential, s.repo, s.resetAt).manifest();
+        const manifest = await tokenRest(s.fetch, s.apiCredential, s.repo, s.resetAt).manifest(
+          source.ecosystem === 'npm' ? 'package.json' : 'composer.json',
+        );
         if (!record(manifest) || typeof manifest.name !== 'string')
           throw new GithubProviderError('invalid_response');
         configuredName = manifest.name;
       }
       let name: string;
       try {
-        name = packageKey(configuredName, { ecosystem: 'composer' });
+        name = packageKey(configuredName, { ecosystem: source.ecosystem });
       } catch {
         throw new GithubProviderError('invalid_response');
       }
@@ -272,10 +276,17 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
         throw new GithubProviderError('skipped');
       }
       const rest = s.tokenMode
-        ? tokenRest(metered!.fetch, s.apiCredential, s.repo, s.resetAt, {
-            textBytes: budget.textBytes,
-            remaining: metered!.remaining,
-          })
+        ? tokenRest(
+            metered!.fetch,
+            s.apiCredential,
+            s.repo,
+            s.resetAt,
+            {
+              textBytes: budget.textBytes,
+              remaining: metered!.remaining,
+            },
+            source.ecosystem === 'npm' ? 'package.json' : 'composer.json',
+          )
         : null;
       const listing = s.tokenMode
         ? {
@@ -313,11 +324,22 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
       if (describeOptions.snapshot !== undefined && describeOptions.snapshot.id !== snapshot.id) {
         throw new GithubProviderError('snapshot_changed');
       }
-      const versions = versionsFromRefs(
-        refs.filter((ref) => ref.name.startsWith('refs/tags/')).map((ref) => ref.name.slice(10)),
-        refs.filter((ref) => ref.name.startsWith('refs/heads/')).map((ref) => ref.name.slice(11)),
-        metadata.default_branch,
-      );
+      const versions =
+        source.ecosystem === 'npm'
+          ? npmVersionsFromRefs(
+              refs
+                .filter((ref) => ref.name.startsWith('refs/tags/'))
+                .map((ref) => ref.name.slice(10)),
+            )
+          : versionsFromRefs(
+              refs
+                .filter((ref) => ref.name.startsWith('refs/tags/'))
+                .map((ref) => ref.name.slice(10)),
+              refs
+                .filter((ref) => ref.name.startsWith('refs/heads/'))
+                .map((ref) => ref.name.slice(11)),
+              metadata.default_branch,
+            );
       const winningNames = new Set(
         versions.versions.map(
           (version) => `refs/${version.kind === 'tag' ? 'tags' : 'heads'}/${version.ref}`,
@@ -348,7 +370,7 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
           },
           s.gitUrl,
           winningRefs,
-          'composer.json',
+          source.ecosystem === 'npm' ? 'package.json' : 'composer.json',
         );
         complete =
           read.length === winningRefs.length &&
@@ -361,6 +383,20 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
             if (file !== undefined) yield file;
           }
         })();
+      }
+      if (source.ecosystem === 'npm') {
+        return {
+          kind: 'found',
+          description: await npmVcsDescription(
+            name,
+            s.config.packageName,
+            refs
+              .filter((ref) => ref.name.startsWith('refs/tags/'))
+              .map((ref) => ref.name.slice(10)),
+            files,
+            snapshot,
+          ),
+        };
       }
       const metadataArchived = metadata.archived;
       async function* members(): AsyncGenerator<VersionCandidate> {
@@ -444,10 +480,14 @@ export function createGithubProvider(options: GithubProviderOptions): SourceProv
     },
     async openDist(ctx, source, target) {
       const repo = repository(source);
-      if (target.distType !== 'zip' || target.sourceRef === null || !SHA.test(target.sourceRef)) {
+      if (
+        target.distType !== (source.ecosystem === 'npm' ? 'tgz' : 'zip') ||
+        target.sourceRef === null ||
+        !SHA.test(target.sourceRef)
+      ) {
         throw new GithubProviderError('invalid_request');
       }
-      const url = `${API}/repos/${repo.repo}/zipball/${target.sourceRef}`;
+      const url = `${API}/repos/${repo.repo}/${source.ecosystem === 'npm' ? 'tarball' : 'zipball'}/${target.sourceRef}`;
       if (target.url !== null && target.url !== url)
         throw new GithubProviderError('invalid_request');
       const s = await session(ctx, source);

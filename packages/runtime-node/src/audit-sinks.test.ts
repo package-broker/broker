@@ -231,6 +231,18 @@ describe('Node production audit budget', () => {
       platformServices: {
         jobStore: createJobRepository(database.executor),
         blob: {
+          stage: async () => {
+            throw new Error('unused');
+          },
+          openStaged: async () => {
+            throw new Error('unused');
+          },
+          promote: async () => {
+            throw new Error('unused');
+          },
+          discard: async () => {
+            throw new Error('unused');
+          },
           head: async () => null,
           get: async () => null,
           put: async () => {

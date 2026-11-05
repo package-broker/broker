@@ -1,3 +1,4 @@
+import { proxyClaimConflict } from './proxy-claims-schema.js';
 import * as z from 'zod';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
 import type { ApiRouteSpec } from '../route.js';
@@ -18,7 +19,7 @@ export const SOURCE_ATTACHMENT_API_SPECS = [
       tags: ['sources'],
       params,
       body: z.strictObject({ precedence: z.number().int().min(0).max(10000).optional() }),
-      responses: { 204: null },
+      responses: { 204: null, 409: proxyClaimConflict },
     },
   },
   {

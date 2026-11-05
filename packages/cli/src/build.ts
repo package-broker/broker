@@ -8,6 +8,7 @@ import type { BrokerConfig } from '@package-broker/core';
 import {
   brokerAuditProblems,
   brokerAuditWarnings,
+  brokerNotificationsProblems,
   brokerObservabilityProblems,
   brokerVulnerabilityProblems,
 } from '@package-broker/core/config';
@@ -194,6 +195,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     ...brokerObservabilityProblems(config),
     ...brokerVulnerabilityProblems(config),
     ...brokerAuditProblems(config, target),
+    ...brokerNotificationsProblems(config),
   ];
   if (
     config.audit?.policy === 'required' &&
@@ -278,6 +280,16 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     versions.set(plugin.package, await readPackageVersion(resolvePackageDir(plugin.package)));
   }
   const coreVersion = await readPackageVersion(resolveFromCli('@package-broker/core'));
+  const runtime = target === 'cloudflare' ? 'runtime-cloudflare' : 'runtime-node';
+  const runtimeMetadata =
+    options.runtimeEntry === undefined
+      ? JSON.parse(
+          await readFile(
+            path.join(resolveFromCli(`@package-broker/${runtime}`), 'package.json'),
+            'utf8',
+          ),
+        )
+      : undefined;
   const sources = await collectMigrations(plugins, resolvePackageDir);
   let assets;
   try {
@@ -324,6 +336,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         ...renderManifestJson(plugins, versions, target, {
           migrations: toManifestMigrations(sources),
           registration,
+          runtimeMetadata,
         }),
         platformPorts,
         audit,
@@ -361,7 +374,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }),
   );
 
-  const runtime = target === 'cloudflare' ? 'runtime-cloudflare' : 'runtime-node';
   const entry =
     options.runtimeEntry ??
     createRequire(import.meta.url).resolve(`@package-broker/${runtime}/entry`);

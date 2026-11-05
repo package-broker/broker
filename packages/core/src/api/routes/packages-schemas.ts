@@ -25,7 +25,7 @@ const filters = {
   ecosystem: ecosystem.optional(),
   q: z.string().min(1).max(100).optional(),
 };
-const packageItem = z.strictObject({
+export const packageItem = z.strictObject({
   id: ulid,
   ecosystem,
   name: z.string(),
@@ -45,6 +45,12 @@ const packageItem = z.strictObject({
     projectId: ulid.nullable(),
   }),
   versionCount: z.number().int().nonnegative(),
+  versionCountTruncated: z
+    .boolean()
+    .optional()
+    .describe(
+      'Present only when registry policy filters this view. True when only the newest 100 versions were counted, so the package has at least versionCount permitted versions and latestVersion is the newest permitted among them.',
+    ),
   lastSyncedAt: z.string().nullable(),
 });
 const assessment = z.enum(['affected', 'not_affected']);
@@ -83,6 +89,12 @@ const vulnerability = z.strictObject({
 });
 const versionItem = z.strictObject({
   vulnerability,
+  integrity: z.string().nullable(),
+  distTags: z.array(z.string()),
+  publishedBy: z
+    .strictObject({ kind: z.enum(['user', 'service', 'system']), displayName: z.string() })
+    .nullable(),
+  approvedBy: z.strictObject({ displayName: z.string(), decidedAt: z.string() }).nullable(),
   id: ulid,
   version: z.string(),
   stability: z.enum(['dev', 'alpha', 'beta', 'RC', 'stable']),
@@ -118,7 +130,15 @@ function scopeSpecs(boundary: 'project' | 'organization') {
             }),
         responses: {
           200: z.strictObject({
-            items: z.array(packageItem),
+            items: z.array(
+              scoped
+                ? packageItem
+                : packageItem.extend({
+                    visibleToNewProjects: z.boolean(),
+                    newProjectAccessMode: z.enum(['none', 'request']),
+                    revision: z.number().int().positive(),
+                  }),
+            ),
             next: (scoped ? projectCursor : organizationCursor).nullable(),
           }),
         },

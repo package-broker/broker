@@ -3,9 +3,16 @@ const API_PREFIX = '/_pb/';
 const MAX_DETAILS = 20;
 
 const API_ERROR_CODES = [
+  'github_credentials_required',
+  'ambiguous_trusted_publisher',
+  'name_not_claimed',
+  'claim_overlap',
+  'name_public',
+  'name_public_unverified',
   'invalid_request',
   'unauthorized',
   'forbidden',
+  'local_auth_disabled',
   'reauth_required',
   'not_found',
   'conflict',
@@ -25,6 +32,9 @@ const API_ERROR_CODES = [
   'source_paused',
   'upstream_refused',
   'bad_gateway',
+  'invalid_configuration',
+  'endpoint_limit',
+  'transport_unavailable',
 ] as const;
 
 const DETAIL_CODES = [

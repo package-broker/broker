@@ -75,7 +75,7 @@ export function assertWorkerBundle(bundle: string): void {
 
 export function removeWebhookRegistration(bundle: string): string {
   const pattern =
-    /coreRoutes: Object\.freeze\(\[createWebhookIntake\(\{ \.\.\.deps\.webhook, jobs \}\)\]\)/g;
+    /coreRoutes: Object\.freeze\(\[createWebhookIntake\(\{ \.\.\.deps\.webhook, jobs(?:: \w+)? \}\)\]\)/g;
   assert.equal([...bundle.matchAll(pattern)].length, 1, 'WebhookMutationTargetMissing');
   return bundle.replace(pattern, 'coreRoutes: Object.freeze([])');
 }

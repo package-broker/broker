@@ -2,7 +2,7 @@ import type { ApiCall } from '../api/idempotency.js';
 import { Buffer } from 'node:buffer';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { ActorContext } from '../authz/administration.js';
-import { mutationFence, type AuthenticatedActor } from '../authz/fence.js';
+import { discoveryRuleFence, mutationFence, type AuthenticatedActor } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { orgContext } from '../db/port.js';
 import type { SourceRecord } from '../db/source.js';
@@ -72,6 +72,8 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     delete: vi.fn().mockResolvedValue('deleted'),
   };
   const registeredNames = {
+    get: async () => null,
+    claimProxy: vi.fn().mockResolvedValue(null),
     list: vi.fn().mockResolvedValue({ items: [], next: null }),
     owner: vi.fn().mockResolvedValue({ sourceId: 'source', projectId: 'project-a' }),
     add: vi.fn().mockResolvedValue('added'),
@@ -95,7 +97,9 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     get: vi.fn().mockResolvedValue({ settings: { retentionRemovedUpstreamDays: 365 } }),
   };
   const log = vi.fn();
+  const claimProbe = vi.fn().mockResolvedValue('not_found');
   const service = createSourceService({
+    claimProbe,
     sources,
     organizations,
     registeredNames,
@@ -108,6 +112,7 @@ function setup(runtime: 'node' | 'cloudflare' = 'node', allowPrivateHosts: strin
     log,
   } satisfies SourceServiceDeps);
   return {
+    claimProbe,
     service,
     sources,
     organizations,
@@ -2451,3 +2456,395 @@ it.each([
   expect(changes).not.toHaveProperty('configJson');
   expect({ ...record, ...changes }.configJson).toBe(JSON.stringify(config));
 });
+
+describe('hosted npm and claim admission', () => {
+  it('creates an organization hosted source and refuses project ownership', async () => {
+    const f = setup();
+    const hosted = { ...input, type: 'hosted' as const, ecosystem: 'npm' as const, url: null };
+    expect(await f.service.create(ctx, org, fence, hosted, call)).toEqual({
+      ok: true,
+      value: { id: 'source' },
+    });
+    expect(
+      await f.service.create(ctx, project, fence, { ...hosted, projectId: 'project-a' }, call),
+    ).toMatchObject({ ok: false, error: 'invalid_config' });
+    expect(f.sources.create).toHaveBeenCalledTimes(1);
+  });
+  it('probes exact npm claims and passes the proxy snapshot to the mutation', async () => {
+    const f = setup();
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'hosted',
+      ecosystem: 'npm',
+      url: null,
+      credentialId: null,
+    } as SourceRecord);
+    f.registeredNames.claimProxy.mockResolvedValue('proxy');
+    expect(
+      await f.service.addRegisteredName(
+        ctx,
+        org,
+        fence,
+        { sourceId: 'source', pattern: 'widget' },
+        call,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(f.claimProbe).toHaveBeenCalledWith(
+      ctx,
+      'proxy',
+      'widget',
+      expect.any(AbortSignal),
+      'claim',
+    );
+    expect(f.registeredNames.add).toHaveBeenCalledWith(
+      ctx,
+      fence,
+      expect.objectContaining({ claimProbe: { proxyId: 'proxy' } }),
+    );
+  });
+  it.each(['found', 'unavailable', 'upstream_refused', 'bad_gateway'] as const)(
+    'refuses %s without a write',
+    async (answer) => {
+      const f = setup();
+      f.sources.get.mockResolvedValue({
+        ...input,
+        id: 'source',
+        ecosystem: 'npm',
+        type: 'hosted',
+        url: null,
+        credentialId: null,
+      } as SourceRecord);
+      f.registeredNames.claimProxy.mockResolvedValue('proxy');
+      f.claimProbe.mockResolvedValue(answer);
+      expect(
+        await f.service.addRegisteredName(
+          ctx,
+          org,
+          fence,
+          { sourceId: 'source', pattern: 'widget' },
+          call,
+        ),
+      ).toEqual({
+        ok: false,
+        error: answer === 'found' ? 'name_public' : 'name_public_unverified',
+      });
+      expect(f.registeredNames.add).not.toHaveBeenCalled();
+    },
+  );
+  it('skips wildcard probing and returns the public shadowing warning', async () => {
+    const f = setup();
+    f.registeredNames.claimProxy.mockResolvedValue('proxy');
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      ecosystem: 'npm',
+      type: 'hosted',
+      url: null,
+      credentialId: null,
+    } as SourceRecord);
+    const result = await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: '@scope/*' },
+      call,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      warnings: [{ field: 'pattern', message: expect.stringContaining('not yet cached') }],
+    });
+    expect(f.claimProbe).not.toHaveBeenCalled();
+  });
+});
+
+it('refuses manual upstream sync of a hosted source', async () => {
+  const f = setup();
+  f.sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type: 'hosted',
+    ecosystem: 'npm',
+    url: null,
+    credentialId: null,
+  } as SourceRecord);
+  expect(await f.service.syncNow(ctx, org, fence, 'source', call)).toMatchObject({
+    ok: false,
+    error: 'invalid_config',
+  });
+  expect(f.sources.syncNow).not.toHaveBeenCalled();
+});
+
+it.each(['npm_registry'])('does not probe registry npm source %s', async (type) => {
+  const f = setup();
+  f.sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type,
+    ecosystem: 'npm',
+    credentialId: null,
+  } as SourceRecord);
+  f.registeredNames.claimProxy.mockResolvedValue('proxy');
+  f.claimProbe.mockResolvedValue('found');
+  expect(
+    await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: 'widget' },
+      call,
+    ),
+  ).toMatchObject({ ok: true });
+  expect(
+    await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: '@sc*/foo' },
+      call,
+    ),
+  ).toMatchObject({ ok: true });
+  expect(f.claimProbe).not.toHaveBeenCalled();
+});
+it.each(['proxy', 'ownership'])('checks %s before probing', async (kind) => {
+  const f = setup();
+  f.sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type: kind === 'proxy' ? 'npmjs_proxy' : 'hosted',
+    ecosystem: 'npm',
+    projectId: kind === 'ownership' ? 'project-a' : null,
+    credentialId: null,
+  } as SourceRecord);
+  f.registeredNames.claimProxy.mockResolvedValue('proxy');
+  expect(
+    await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: 'widget' },
+      call,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(f.claimProbe).not.toHaveBeenCalled();
+});
+it('audits a replacement with old and new patterns', async () => {
+  const f = setup();
+  f.sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type: 'hosted',
+    ecosystem: 'npm',
+    projectId: null,
+    credentialId: null,
+  } as SourceRecord);
+  Object.assign(f.registeredNames, {
+    get: vi
+      .fn()
+      .mockResolvedValue({ id: 'claim', sourceId: 'source', ecosystem: 'npm', pattern: '@old/*' }),
+  });
+  expect(
+    await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', id: 'claim', pattern: '@new/*' },
+      call,
+    ),
+  ).toMatchObject({ ok: true });
+  expect(f.registeredNames.list).not.toHaveBeenCalled();
+  const audit = f.registeredNames.add.mock.calls[0]![2].audit;
+  expect(audit.action).toBe('registered_name.update');
+  expect(JSON.parse(audit.payloadJson)).toMatchObject({
+    changes: { pattern: { old: '@old/*', new: '@new/*' } },
+  });
+});
+
+it.each(['found', 'unavailable', 'not_found'] as const)(
+  'rechecks existing exact hosted claims before proxy creation: %s',
+  async (answer) => {
+    const f = setup();
+    f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+    f.registeredNames.list.mockResolvedValue({ items: [{ pattern: 'widget' }], next: null });
+    f.claimProbe.mockResolvedValue(answer);
+    const result = await f.service.create(
+      ctx,
+      org,
+      fence,
+      {
+        ...input,
+        name: 'public',
+        type: 'npmjs_proxy',
+        ecosystem: 'npm',
+        url: 'https://registry.npmjs.org',
+      },
+      call,
+    );
+    expect(result).toEqual(
+      answer === 'not_found'
+        ? { ok: true, value: { id: 'source' } }
+        : { ok: false, error: 'conflict', conflictingClaims: ['widget'] },
+    );
+    expect(f.sources.create).toHaveBeenCalledTimes(answer === 'not_found' ? 1 : 0);
+    if (answer === 'not_found')
+      expect(f.sources.create).toHaveBeenCalledWith(
+        ctx,
+        fence,
+        expect.objectContaining({ verifiedClaims: ['widget'] }),
+      );
+  },
+);
+
+it('keeps organization claim names opaque to a project-only proxy creator', async () => {
+  const f = setup();
+  f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+  f.registeredNames.list.mockResolvedValue({ items: [{ pattern: 'private-name' }], next: null });
+  f.claimProbe.mockResolvedValue('found');
+  const result = await f.service.create(
+    ctx,
+    project,
+    fence,
+    {
+      ...input,
+      projectId: 'project-a',
+      type: 'npmjs_proxy',
+      ecosystem: 'npm',
+      url: 'https://registry.npmjs.org',
+    },
+    call,
+  );
+  expect(result).toEqual({ ok: false, error: 'conflict' });
+  expect(f.sources.create).not.toHaveBeenCalled();
+});
+
+it('refuses proxy creation with the stable conflict code beyond the proof cap', async () => {
+  const f = setup();
+  f.sources.list.mockResolvedValue([{ ...input, id: 'host', type: 'hosted', ecosystem: 'npm' }]);
+  f.registeredNames.list.mockResolvedValue({
+    items: Array.from({ length: 230 }, (_, index) => ({
+      pattern: `${String(index).padStart(3, '0')}${'a'.repeat(211)}`,
+    })),
+    next: null,
+  });
+  f.claimProbe.mockResolvedValue('not_found');
+  const result = await f.service.create(
+    ctx,
+    org,
+    fence,
+    {
+      ...input,
+      name: 'public',
+      type: 'npmjs_proxy',
+      ecosystem: 'npm',
+      url: 'https://registry.npmjs.org',
+      userAgent: 'creation-agent',
+    },
+    call,
+  );
+  expect(result).toMatchObject({ ok: false, error: 'conflict' });
+  expect(f.sources.create).not.toHaveBeenCalled();
+  expect(f.claimProbe).toHaveBeenCalledWith(
+    ctx,
+    { type: 'new_npmjs_proxy', userAgent: 'creation-agent' },
+    expect.any(String),
+    expect.any(AbortSignal),
+    'claim',
+  );
+});
+
+it.each(['found', 'unavailable', 'not_found'] as const)(
+  'probes VCS npm claims: %s',
+  async (answer) => {
+    const f = setup();
+    f.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'vcs',
+      ecosystem: 'npm',
+      credentialId: null,
+    } as SourceRecord);
+    f.registeredNames.claimProxy.mockResolvedValue('proxy');
+    f.claimProbe.mockResolvedValue(answer);
+    const result = await f.service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: 'widget' },
+      call,
+    );
+    expect(result).toMatchObject(
+      answer === 'not_found'
+        ? { ok: true }
+        : { ok: false, error: answer === 'found' ? 'name_public' : 'name_public_unverified' },
+    );
+    expect(f.claimProbe).toHaveBeenCalled();
+    if (answer !== 'not_found') expect(f.registeredNames.add).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['lod*', '@sc*/foo', '@scope/pre*'])(
+  'refuses npm VCS legacy wildcard %s before the store',
+  async (pattern) => {
+    const { service, sources, registeredNames } = setup();
+    sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      type: 'vcs',
+      ecosystem: 'npm',
+      projectId: null,
+    });
+    expect(
+      await service.addRegisteredName(ctx, org, fence, { sourceId: 'source', pattern }, call),
+    ).toEqual({ ok: false, error: 'invalid_pattern' });
+    expect(registeredNames.add).not.toHaveBeenCalled();
+  },
+);
+
+it('warns when an npm VCS scope claim shadows public packages', async () => {
+  const { service, sources } = setup();
+  sources.get.mockResolvedValue({
+    ...input,
+    id: 'source',
+    type: 'vcs',
+    ecosystem: 'npm',
+    projectId: null,
+  });
+  expect(
+    await service.addRegisteredName(
+      ctx,
+      org,
+      fence,
+      { sourceId: 'source', pattern: '@scope/*' },
+      call,
+    ),
+  ).toMatchObject({
+    ok: true,
+    warnings: [
+      {
+        field: 'pattern',
+        message: 'This scope claim hides public packages in the scope that are not yet cached.',
+      },
+    ],
+  });
+});
+
+it.each(['pause', 'syncNow', 'resume', 'removeRegisteredName', 'update'] as const)(
+  'denies rule actors organization %s at service entry',
+  async (method) => {
+    const h = setup();
+    const who = { kind: 'rule', ruleId: 'rule' } as const;
+    const f = discoveryRuleFence('rule', 1, 'C', 41, { id: 'job', owner: 'worker', fence: 1 });
+    h.sources.get.mockResolvedValue({
+      ...input,
+      id: 'source',
+      projectId: null,
+      credentialId: null,
+    });
+    const result =
+      method === 'update'
+        ? await h.service.update(ctx, who, f, 'source', { pollIntervalSeconds: 600 }, call)
+        : await h.service[method](ctx, who, f, 'source', call);
+    expect(result).toEqual({ ok: false, error: 'forbidden' });
+    expect(h.sources.get).not.toHaveBeenCalled();
+  },
+);

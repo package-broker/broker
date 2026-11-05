@@ -1,0 +1,53 @@
+name: UI screenshots
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: ui-screenshots-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-screenshots:
+    name: ui screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read # list the changed files of this pull request
+    steps:
+      - name: Require before and after screenshots for UI changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            echo "Checked on the pull request."
+            exit 0
+          fi
+          ui_files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' \
+            | grep -E '^packages/ui/src/.*\.(tsx|css)$' | grep -vE '\.test\.tsx$' || true)
+          if [ -z "$ui_files" ]; then
+            echo "No UI source changes."
+            exit 0
+          fi
+          if printf '%s' "$PR_BODY" | grep -Eqi '^- \[x\] No visible UI change'; then
+            echo "Marked as no visible UI change."
+            exit 0
+          fi
+          images=$(printf '%s' "$PR_BODY" | grep -Eoi '!\[[^]]*\]\([^)]+\)|<img [^>]*src=' | wc -l)
+          if printf '%s' "$PR_BODY" | grep -qi '<details' \
+            && printf '%s' "$PR_BODY" | grep -q 'Before' \
+            && printf '%s' "$PR_BODY" | grep -q 'After' \
+            && [ "$images" -ge 2 ]; then
+            echo "Before and after screenshots found ($images images)."
+            exit 0
+          fi
+          echo "::error::This pull request changes UI source files. Add Before and After screenshots in the Screenshots section of the description, or tick 'No visible UI change'."
+          printf '%s\n' "$ui_files"
+          exit 1

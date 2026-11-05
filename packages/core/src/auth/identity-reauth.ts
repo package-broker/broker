@@ -3,6 +3,7 @@ import {
   type LoginFailureRecorder,
   type LoginFailureReason,
 } from './login-failure.js';
+import { reauthCapability } from '../identity/reauth-capability.js';
 import { REAUTH_WINDOW_MS, SESSION_IDLE_MS } from './session.js';
 import type { AuthCallMeta, AuthenticatedSession } from './session.js';
 import type { OrgContext } from '../db/port.js';
@@ -116,7 +117,7 @@ async function reauthenticateWithIdentityAttempt(
   }
   const identityId = session.session.identityId;
   if (identityId === null) return refuse('not_sso_session');
-  if (!provider.supportsReauth) return refuse('not_supported');
+  if (!(await reauthCapability(provider))) return refuse('not_supported');
   if (
     loginState.provider !== provider.id ||
     loginState.purpose !== 'reauth' ||

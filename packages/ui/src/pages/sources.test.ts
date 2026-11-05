@@ -27,6 +27,7 @@ const SOURCE = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
 const SECRET = 'credential-sentinel-DO-NOT-RETAIN';
 const NOW = '2026-10-22T10:00:00.000Z';
 const source: Source = {
+  revision: 1,
   id: SOURCE,
   projectId: null,
   name: 'Private packages',
@@ -348,11 +349,13 @@ describe('sources and registered names', () => {
     const { model, fetch } = setup(
       vi
         .fn()
+        .mockResolvedValueOnce(json({ items: [source], next: null }))
         .mockResolvedValueOnce(new Response(null, { status: 204 }))
         .mockResolvedValue(json({ items: [source], next: null })),
     );
+    await model.load();
     await model.edit(SOURCE, 600, 'exclude');
-    expect(fetch.mock.calls[0]).toMatchObject([
+    expect(fetch.mock.calls[1]).toMatchObject([
       `/_pb/sources/${SOURCE}`,
       {
         method: 'PATCH',
@@ -2976,4 +2979,79 @@ describe('npm scope registration suggestions', () => {
       /<input[^>]*id="registered-pattern"[^>]*name="pattern"[^>]*value="@two\/\*"/,
     );
   });
+});
+
+it.each([
+  ['claim_overlap', 'Another source already claims this package name or scope.'],
+  ['name_public', 'This name is already available from a public registry.'],
+  [
+    'name_public_unverified',
+    'The public registry could not be checked. Try registering the name again later.',
+  ],
+])('explains %s without echoing request data', async (code, message) => {
+  const fetch = vi.fn().mockResolvedValue(json({ error: { code } }, 409));
+  const { model } = setup(fetch);
+  await model.addName(SOURCE, '@scope/widget');
+  expect(model.snapshot().error).toBe(message);
+});
+
+it('offers no upstream sync action for hosted packages', () => {
+  const { model } = setup();
+  vi.spyOn(model, 'snapshot').mockReturnValue({ ...model.snapshot(), canWriteSources: true });
+  const html = renderToString(
+    createElement(SourceActions, {
+      source: { ...source, type: 'hosted', ecosystem: 'npm' },
+      model,
+      busy: false,
+    }),
+  );
+  expect(html).not.toContain('Sync now');
+});
+
+it.each([
+  ['npm', 214],
+  ['composer', 50],
+] as const)('uses the %s registered pattern input limit', async (ecosystem, limit) => {
+  const { model, fetch, html } = setup();
+  fetch.mockResolvedValueOnce(json({ items: [{ ...source, ecosystem }], next: null }));
+  await model.load();
+  fetch.mockResolvedValueOnce(json({ items: [], next: null }));
+  await model.names(SOURCE);
+  expect(html()).toMatch(new RegExp(`id="registered-pattern"[^>]*maxLength="${limit}"`));
+});
+
+it('keeps the source draft open on a stale revision and sends the displayed revision', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(json({ items: [{ ...source, revision: 7 }], next: null }))
+    .mockResolvedValueOnce(
+      json({ error: { code: 'precondition_failed', message: 'Precondition failed' } }, 412),
+    );
+  const { model } = setup(fetch);
+  await model.load();
+  model.openEditor(model.snapshot().items[0]!);
+  await model.saveSource({ requirePublishApproval: true });
+  expect(fetch.mock.calls[1]).toMatchObject([
+    expect.any(String),
+    {
+      headers: expect.objectContaining({ 'If-Match': '"r7"' }),
+    },
+  ]);
+  expect(model.snapshot().editor).toMatchObject({ revision: 7 });
+  expect(model.snapshot().formError).toBe(
+    'This source changed while you were editing. Reload the latest settings before saving.',
+  );
+});
+
+it('ignores discovery replays without changing a Sources draft or loading its list', async () => {
+  const fetch = vi.fn();
+  const model = createSourcesModel(
+    { client: createApiClient({ fetch, readCookie: () => undefined }), requireReauth: vi.fn() },
+    null,
+  );
+  model.openEditor();
+  const before = model.snapshot();
+  await model.replayed({ ok: true, status: 201, path: '/_pb/sources/discovery/rules' });
+  expect(model.snapshot()).toBe(before);
+  expect(fetch).not.toHaveBeenCalled();
 });

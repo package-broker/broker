@@ -205,3 +205,98 @@ it('keeps setup JSON missing token delivery to one safe stdout object before net
     process.argv = previous;
   }
 });
+
+it('runs CLI disabled setup past validation with the default false refresh flag', async () => {
+  vi.stubEnv('CLOUDFLARE_ACCOUNT_ID', 'a'.repeat(32));
+  vi.stubEnv('CLOUDFLARE_API_TOKEN', 'TEST_TOKEN');
+  vi.stubEnv('PB_IDP_DEX_CLIENT_SECRET', 'TEST_SECRET');
+  const { formatMasterKey, generateMasterKey } =
+    await import('@package-broker/core/secrets/master-key');
+  vi.stubEnv('SETUP_MASTER_KEY', formatMasterKey(generateMasterKey(1)));
+  const { InventoryStore } = await import('./commands/cloudflare/inventory.js');
+  vi.spyOn(InventoryStore.prototype, 'read').mockResolvedValue(null);
+  const build = vi.fn(async () => undefined);
+  const send = vi.fn(
+    async (input: string | URL | Request) =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          result: String(input).endsWith('/workers/subdomain') ? { subdomain: 'account' } : [],
+        }),
+      ),
+  );
+  vi.doMock('./commands/cloudflare/setup.js', async (original) => {
+    const actual = await original<typeof import('./commands/cloudflare/setup.js')>();
+    return {
+      ...actual,
+      runCloudflareSetup: async (o: Parameters<typeof actual.setup>[0]) => {
+        expect(o.refreshSetupToken).toBe(false);
+        const result = await actual.setup(
+          { ...o, fetch: send, progress: () => undefined },
+          {
+            build,
+            validateArtifact: vi.fn(
+              async () =>
+                ({
+                  localAuth: { version: 1 },
+                  identity: {
+                    runtimeProviders: false,
+                    compiled: [
+                      {
+                        id: 'dex',
+                        kind: 'oidc',
+                        anchor: 'oidc:https://idp.example.test',
+                        policy: {
+                          verifiedDomains: ['example.test'],
+                          emailAuthoritativeDomains: ['example.test'],
+                        },
+                      },
+                    ],
+                  },
+                }) as unknown as Awaited<
+                  ReturnType<
+                    (typeof import('./commands/cloudflare/deploy.js'))['validateDeploymentArtifact']
+                  >
+                >,
+            ),
+            provision: vi.fn(async () => ({
+              exitCode: 0,
+              output: (await import('./commands/cloudflare/api.js')).commandEnvelope('provision'),
+            })),
+          },
+        );
+        expect(result).toMatchObject({ exitCode: 0, output: { status: 'planned' } });
+        return result.exitCode;
+      },
+    };
+  });
+  try {
+    const { run } = await import('./cli.js');
+    expect(
+      await run([
+        'cloudflare',
+        'setup',
+        '--local-auth',
+        'disabled',
+        '--dry-run',
+        '--json',
+        '--worker-name',
+        'broker',
+        '--org-slug',
+        'demo',
+        '--org-name',
+        'Demo',
+        '--admin-email',
+        'admin@example.test',
+        '--master-key-env',
+        'SETUP_MASTER_KEY',
+        '--secret',
+        'PB_IDP_DEX_CLIENT_SECRET',
+      ]),
+    ).toBe(0);
+    expect(build).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalled();
+  } finally {
+    vi.doUnmock('./commands/cloudflare/setup.js');
+  }
+});

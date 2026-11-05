@@ -71,6 +71,20 @@ export const PROJECT_ACCESS_API_SPECS = [
   },
 ] as const satisfies readonly ApiRouteSpec[];
 
+const person = { kind: z.enum(['user', 'email']), id: z.string(), displayName: z.string() };
+const group = {
+  kind: z.literal('group'),
+  id: z.string(),
+  displayName: z.string(),
+  provider: z.string(),
+};
+const listedPrincipal = z.union([
+  z.strictObject({ ...person, email: z.string(), visibility: z.literal('visible') }),
+  z.strictObject({ ...person, visibility: z.literal('redacted') }),
+  z.strictObject({ ...group, groupValue: z.string(), visibility: z.literal('visible') }),
+  z.strictObject({ ...group, visibility: z.literal('redacted') }),
+]);
+
 export const PROJECT_GRANTS_LIST_API_SPEC = {
   method: 'GET',
   path: '/_pb/projects/:project/grants',
@@ -95,13 +109,7 @@ export const PROJECT_GRANTS_LIST_API_SPEC = {
             id: ulid,
             revision: z.number().int().positive(),
             createdAt: z.string(),
-            principal: z.strictObject({
-              kind: z.enum(['user', 'email', 'group']),
-              id: z.string(),
-              displayName: z.string(),
-              provider: z.string().optional(),
-              email: z.string().optional(),
-            }),
+            principal: listedPrincipal,
             role: z.strictObject({ id: ulid, name: z.string(), permissions: z.array(z.string()) }),
           }),
         ),

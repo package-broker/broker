@@ -216,3 +216,4 @@ export async function auditAlertAcknowledgementContract(
   const { auditAlertAcknowledgementContract: run } = await import('./audit-alert-ack.js');
   await run(executor, a, b);
 }
+export { bindSnapshot, restoreDatabase, type SnapshotStatement } from './sql-snapshot.js';

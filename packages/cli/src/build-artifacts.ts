@@ -226,5 +226,6 @@ export function renderBuildManifest(
   );
   lines.push('export const vulnerability = config.vulnerability;');
   lines.push('export const mcp = config.mcp;');
+  lines.push('export const notifications = config.notifications;');
   return `${lines.join('\n')}\n`;
 }

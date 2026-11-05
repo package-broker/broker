@@ -16,7 +16,7 @@ import {
   type ImportRunStore,
   type ImportRunWrite,
 } from '@package-broker/core/import/run-service';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { blobEligibleCondition } from '@package-broker/db-sqlite/repositories/blob-references';
@@ -68,6 +68,18 @@ describe('import run repository on the D1 executor', () => {
 
   let uploads: number;
   const blobStore: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     async put(_ctx, key, body, info) {
       uploads += 1;
       await new Response(body).arrayBuffer();

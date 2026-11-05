@@ -1,4 +1,14 @@
 import type { Generated } from 'kysely';
+import type {
+  NotificationAttemptCode,
+  NotificationAttemptOutcome,
+  NotificationDeliveryCode,
+  NotificationDeliveryState,
+  NotificationDisabledReason,
+  NotificationEndpointState,
+  NotificationEventType,
+  NotificationMethod,
+} from '@package-broker/core/db/notifications';
 import type { UpstreamForm } from '@package-broker/core/ingest/validators';
 import type { VersionStability } from '@package-broker/core/catalogue/versions';
 import type { VersionStatus } from '@package-broker/core/catalogue/version-rules';
@@ -198,7 +208,7 @@ export interface ServicePrincipalTable {
   last_op_id: string | null;
 }
 
-/** Mirrors `token` in `migrations/0001_init.sql`. */
+/** Mirrors `token` in `migrations/0001_init.sql` and `migrations/0003_npm_identity.sql`. */
 export interface TokenTable {
   id: string;
   org_id: string;
@@ -222,6 +232,8 @@ export interface TokenTable {
   validation_kind: string | null;
   validation_identity_id: string | null;
   last_op_id: string | null;
+  trusted_publisher_id: string | null;
+  package_name: string | null;
 }
 
 /** Mirrors `service_principal_permission` in `migrations/0001_init.sql`. */
@@ -341,8 +353,10 @@ export type PatternEffect = 'include' | 'exclude';
 export type DistType = 'zip' | 'tar' | 'tgz';
 export type DistTagAction = 'set' | 'remove';
 
-/** Mirrors `source` in `migrations/0001_init.sql`. */
+/** Mirrors `source` in the core migrations. */
 export interface SourceTable {
+  revision: Generated<number>;
+  require_publish_approval: Generated<number>;
   sync_generation: string | null;
   sync_counts: Generated<string>;
   id: string;
@@ -392,8 +406,11 @@ export interface RegisteredNameTable {
   created_at: Generated<string>;
 }
 
-/** Mirrors `package` in `migrations/0001_init.sql`. */
+/** Mirrors `package` in the core migrations. */
 export interface PackageTable {
+  settings_revision: Generated<number>;
+  new_project_access_mode: Generated<'none' | 'request'>;
+  held_until_active: Generated<number>;
   id: string;
   org_id: string;
   source_id: string;
@@ -763,7 +780,105 @@ export interface AuditHealthTable {
   failing: number;
 }
 
+export interface NpmLoginSessionTable {
+  id: string;
+  selector_hash: string;
+  done_hash: string;
+  org_id: string;
+  project_id: string;
+  state: Generated<'pending' | 'approved' | 'delivering' | 'consumed'>;
+  cli_hostname: string | null;
+  source_ip: string | null;
+  created_at: Generated<string>;
+  expires_at: string;
+  user_id: string | null;
+  token_id: string | null;
+  token_ciphertext: string | null;
+  token_nonce: string | null;
+  token_key_version: number | null;
+  consumed_at: string | null;
+  delivering_at: string | null;
+}
+
+export interface TrustedPublisherTable {
+  id: string;
+  org_id: string;
+  package_name: string;
+  repository_id: string;
+  repository_owner_id: string;
+  repository: string;
+  workflow: string;
+  environment: Generated<string>;
+  ref_pattern: string | null;
+  service_principal_id: string;
+  created_by_user_id: string;
+  created_at: Generated<string>;
+  disabled_at: string | null;
+  last_used_at: string | null;
+  revision: Generated<number>;
+}
+
+export interface OidcReplayTable {
+  issuer: string;
+  jti: string;
+  org_id: string;
+  trusted_publisher_id: string;
+  expires_at: string;
+}
+
+export interface NpmVcsBuildOutcomeTable {
+  org_id: string;
+  version_id: string;
+  source_ref: string;
+  packing_policy: string;
+  retry_generation: number;
+  outcome: string | null;
+}
+
+/** Mirrors `registry_policy_rule` in `migrations/0008_registry_policy.sql`. */
+export interface RegistryPolicyRuleTable {
+  id: string;
+  org_id: string;
+  project_id: string | null;
+  ecosystem: 'npm' | 'composer';
+  package_key: string | null;
+  kind: 'min_age' | 'block' | 'allowlist' | 'quarantine' | 'client_floor';
+  min_age_seconds: number | null;
+  client_family: 'npm' | 'pnpm' | 'yarn' | 'composer' | null;
+  client_min_version: string | null;
+  deny_unknown: Generated<number>;
+  reason_code: 'malware' | 'security_review' | 'compatibility' | 'organization_policy';
+  incident_id: string | null;
+  expires_at: string | null;
+  expiry_audited_at: string | null;
+  disabled_at: string | null;
+  disabled_reason: 'false_positive' | 'emergency_compatibility' | 'superseded' | 'other' | null;
+  revision: Generated<number>;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Mirrors `registry_policy_version` in `migrations/0008_registry_policy.sql`. */
+export interface RegistryPolicyVersionTable {
+  org_id: string;
+  rule_id: string;
+  version_normalized: string;
+}
+
 export interface Database {
+  npm_vcs_build_outcome: NpmVcsBuildOutcomeTable;
+  registry_policy_rule: RegistryPolicyRuleTable;
+  registry_policy_version: RegistryPolicyVersionTable;
+  npm_login_session: NpmLoginSessionTable;
+  trusted_publisher: TrustedPublisherTable;
+  oidc_replay: OidcReplayTable;
+  publish_approval: PublishApprovalTable;
+  package_access_request: PackageAccessRequestTable;
+  notification_endpoint: NotificationEndpointTable;
+  notification_event: NotificationEventTable;
+  notification_delivery: NotificationDeliveryTable;
+  notification_attempt: NotificationAttemptTable;
+  version_readme: VersionReadmeTable;
   audit_health: AuditHealthTable;
   audit_chain: AuditChainTable;
   audit_sink: AuditSinkTable;
@@ -883,4 +998,130 @@ export interface VulnerabilitySyncStateTable {
   next_request_at: string;
   consecutive_failures: Generated<number>;
   blocked_until: string | null;
+}
+
+export interface PublishApprovalTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  version_id: string;
+  source_id: string;
+  hold_approval: number;
+  hold_scan: number;
+  approval_state: 'not_required' | 'pending' | 'approved' | 'rejected' | 'expired';
+  scan_state: 'not_required' | 'queued' | 'running' | 'allowed' | 'denied' | 'failed';
+  required_scanners_json: Generated<string>;
+  scan_attempts: Generated<number>;
+  requested_by_type: 'user' | 'service';
+  requested_by_id: string;
+  token_id: string;
+  route_project_id: string | null;
+  dist_tags_json: Generated<string>;
+  readme_pending: Generated<number>;
+  decided_by_user_id: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  scan_verdict_json: Generated<string>;
+  expires_at: string;
+  revision: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface PackageAccessRequestTable {
+  id: string;
+  org_id: string;
+  package_id: string;
+  project_id: string;
+  state: Generated<'pending' | 'approved' | 'rejected' | 'expired'>;
+  requested_by_user_id: string;
+  reason: string | null;
+  decided_by_user_id: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  expires_at: string;
+  revision: Generated<number>;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
+export interface NotificationEndpointTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  name: string;
+  method: NotificationMethod;
+  events_json: string;
+  package_pattern: string;
+  credential_id: string;
+  headers_configured: Generated<0 | 1>;
+  template_configured: Generated<0 | 1>;
+  revision: Generated<number>;
+  state: Generated<NotificationEndpointState>;
+  disabled_reason: NotificationDisabledReason | null;
+  failure_streak: Generated<number>;
+  last_op_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationEventTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  operation_id: string;
+  ordinal: Generated<number>;
+  event_type: NotificationEventType;
+  source_id: string;
+  package_key: string;
+  payload_json: string;
+  occurred_at: string;
+  dispatched_at: string | null;
+  dispatch_generation: Generated<number>;
+}
+
+export interface NotificationDeliveryTable {
+  org_id: string;
+  project_id: string;
+  id: string;
+  event_id: string;
+  endpoint_id: string;
+  endpoint_revision: number;
+  configuration_credential_id: string;
+  body_credential_id: string | null;
+  state: Generated<NotificationDeliveryState>;
+  attempts: Generated<number>;
+  job_generation: Generated<number>;
+  active_job_id: string | null;
+  active_fence: number | null;
+  revision: Generated<number>;
+  next_attempt_at: string;
+  expires_at: string;
+  last_status: number | null;
+  outcome_code: NotificationDeliveryCode | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface NotificationAttemptTable {
+  org_id: string;
+  project_id: string;
+  delivery_id: string;
+  attempt: number;
+  job_id: string;
+  fence: number;
+  outcome: NotificationAttemptOutcome;
+  outcome_code: NotificationAttemptCode | null;
+  status: number | null;
+  duration_ms: number | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface VersionReadmeTable {
+  version_id: string;
+  org_id: string;
+  filename: string;
+  body: string;
+  created_at: Generated<string>;
 }

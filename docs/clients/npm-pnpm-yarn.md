@@ -49,6 +49,10 @@ npm install '@<scope>/<package>'
 npm ci
 ```
 
+### Web login recovery
+
+During collection, the session enters `delivering` before the broker decrypts the token and builds the response. It becomes `consumed` after the response body is built. If delivery remains unconfirmed in `delivering` for more than five minutes, the expiry job revokes the PAT and records `login_delivery_unconfirmed`; the job runs every 60 seconds. If the `consumed` write commits but the response never reaches the client, the token stays valid. Revoke that token in the UI before trying login again.
+
 ## pnpm
 
 Keep only the scope mapping in the application's `.npmrc`. pnpm 12 ignores repository-controlled auth settings, including an `_authToken` containing an environment placeholder:
@@ -143,12 +147,65 @@ For 401, check token placement, host/path, expiry and revocation. For 403, check
 <!-- source: packages/core/src/registry/registry-leak-contract.test.ts:544 -->
 <!-- source: packages/core/src/registry/registry-leak-contract.test.ts:813 -->
 
+## Web login
+
+For an interactive human login, use npm's browser flow with the project registry:
+
+```sh
+npm login --auth-type=web --registry=https://<broker-host>/<project>/npm/
+```
+
+Open the URL printed by npm, sign in to the broker, review the project and requested access, and approve. npm polls until approval and saves the issued personal token in your user npm configuration. Keep that file outside the repository. The token remains subject to your grants, expiry and revocation; login does not grant publishing permission. Legacy username/password registry login is unsupported.
+
+pnpm 12.5.1 does not support `login --auth-type=web`; **pnpm users log in with npm**, then use the user-level npm credential with pnpm as described above. Yarn 4.9.2 refuses `yarn npm login --web-login`; use a broker token in the Yarn configuration above. Yarn Classic users can also configure a broker token through `.npmrc`. Do not enter broker passwords into a client's legacy registry login prompt.
+
+<!-- source: scripts/client-matrix-login.mjs -->
+<!-- source: packages/core/src/api/routes/npm-login.ts -->
+
 ## Publishing
 
-This version serves npm installs but rejects npm package writes with HTTP 405 after access checks. Publishing through npm, pnpm, Yarn Classic or Yarn Berry is therefore unavailable. A token with scope `write` does not enable an unsupported registry operation. Do not use an install token for a publishing job; keep any publishing credentials separate when a supported publishing endpoint becomes available.
+An administrator must configure an npm hosted source, register a name or scope claim for it, and attach it to the project. Publishing requires `org:packages:publish` and a token with `write` scope that permits package writes. An install-only token cannot publish. Keep CI publishing credentials separate from read credentials.
 
-<!-- source: packages/core/src/registry/npm/routes.ts:363 -->
-<!-- source: packages/core/src/registry/npm/routes.ts:421 -->
-<!-- source: packages/core/src/authz/scope.ts:71 -->
+Set the package's `name` and `version` in `package.json` and run your build first. Configure the publishing token for the project registry with the client-specific placement above, then run one of:
 
-Continue with [GitHub Actions](../ci/github-actions.md) or [GitLab CI](../ci/gitlab-ci.md) for secret placement and client caches, or [Composer setup](composer.md) for PHP packages.
+```sh
+npm publish --registry=https://<broker-host>/<project>/npm/ --provenance=false
+pnpm publish --registry=https://<broker-host>/<project>/npm/ --provenance=false
+# Yarn Classic
+yarn publish --registry=https://<broker-host>/<project>/npm/
+# Yarn Berry: uses npmRegistryServer in .yarnrc.yml
+yarn npm publish
+```
+
+Disable any provenance setting inherited from your environment or client configuration. The broker rejects provenance attachments with `provenance_unsupported`; it does not verify or store them. For token-free GitHub Actions publishing, see [trusted publishing](../guides/npm-trusted-publishing.md).
+
+An immediately active publish returns HTTP **201**. A publish held for approval or policy scanning returns HTTP **202** with `ok: true`, `held` and a `status` URL. A successful CLI exit can therefore mean the package is held, not installable. Review it in the broker's Publishes view; the status URL is a management resource requiring authorized human access, not an unauthenticated polling link. Held versions remain unavailable to installs until all required approval and scan gates pass; rejection or expiry does not release them. Do not retry a held publish as a new upload of the same name/version. Existing name/version bytes are immutable.
+
+<!-- source: packages/core/src/registry/npm/publish-service.ts -->
+<!-- source: packages/core/src/registry/npm/publish-body.ts -->
+<!-- source: scripts/client-matrix-runtime.mjs -->
+
+## Package management
+
+Deprecation, dist-tag writes and unpublish require a PAT or service token with `full` scope, a project whose token ceiling is `full`, and `project:packages:manage` for the token holder. The exception applies to these npm operations; administrative API management stays session-only. Proxied and repository-built packages cannot be changed with these commands.
+
+```sh
+npm deprecate 'pkg@<2' 'Use version 2'
+npm install pkg@1
+npm deprecate pkg@1 ''
+npm dist-tag add pkg@1.1.0 beta
+npm dist-tag ls pkg
+npm dist-tag rm pkg beta
+```
+
+An empty deprecation message clears the warning; a message may be at most 1024 bytes. One `npm deprecate` call may change at most 64 versions; for a wider range, run it for narrower ranges in turn. Dist-tags must point to an active version; semver ranges cannot be tag names, `latest` cannot be deleted, and removing a tag that does not exist is refused. pnpm supports the equivalent `pnpm dist-tag add`, `pnpm dist-tag ls` and `pnpm dist-tag rm` commands. Yarn Berry uses `yarn npm tag add`, `yarn npm tag list` and `yarn npm tag remove`.
+
+A project package manager may unpublish within 72 hours of publication:
+
+```sh
+npm unpublish pkg@1.0.0 --force
+```
+
+Whole-package unpublish requires every remaining version to be active and inside that window; a held or quarantined version blocks it with a 409. Older versions require the organization tombstone API, `POST /_pb/packages/:package/versions/:version/tombstone`, called from an organization admin's freshly reauthenticated browser session. `:package` and `:version` are the package and version IDs that the packages API returns, not the package name or version string. For hosted npm packages the JSON body must carry a reason of 1 to 1000 characters, for example `{"reason":"Retired release"}`; the optional `Idempotency-Key` header makes a retry safe. A project-scoped tombstone route or a token cannot tombstone a hosted npm version. Unpublish and tombstone reserve the version string permanently; republishing it returns 409. Blobs remain subject to the organization/source retention policy, and tags pointing at a removed version move to the highest remaining active version or disappear when none remains.
+
+For packages built from tagged repositories rather than published by a client, see [npm repository ingestion](../guides/npm-repository-ingest.md). Continue with [GitHub Actions](../ci/github-actions.md) or [GitLab CI](../ci/gitlab-ci.md) for secret placement and client caches, or [Composer setup](composer.md) for PHP packages.

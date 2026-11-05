@@ -42,28 +42,7 @@ export const sessionResponse = z.strictObject({
   expiresAt: z.string(),
 });
 
-export const AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
-  'GET /_pb/auth/providers': {
-    operationId: 'listAuthProviders',
-    summary: 'List the sign-in methods',
-    tags: ['auth'],
-    responses: { 200: authProvidersResponse },
-  },
-  'POST /_pb/auth/sso/:provider/start': {
-    operationId: 'startSsoLogin',
-    summary: 'Start a single sign-on login or re-authentication',
-    tags: ['auth'],
-    params: providerParams,
-    body: ssoStartBody,
-    responses: { 200: ssoStartResponse, 303: null, 400: null, 401: null, 403: null, 502: null },
-  },
-  'GET /_pb/auth/sso/:provider/callback': {
-    operationId: 'finishSsoLogin',
-    summary: 'Finish a single sign-on login or re-authentication',
-    tags: ['auth'],
-    params: providerParams,
-    responses: { 303: null, 401: null },
-  },
+export const LOCAL_AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
   'POST /_pb/auth/local/setup/start': {
     operationId: 'startLocalSetup',
     summary: 'Start the local login setup',
@@ -92,6 +71,31 @@ export const AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
     body: localReauthBody,
     responses: { 204: null, 400: null, 401: null, 403: null },
   },
+});
+
+export const AUTH_API: Readonly<Record<string, ApiSlot>> = Object.freeze({
+  'GET /_pb/auth/providers': {
+    operationId: 'listAuthProviders',
+    summary: 'List the sign-in methods',
+    tags: ['auth'],
+    responses: { 200: authProvidersResponse },
+  },
+  'POST /_pb/auth/sso/:provider/start': {
+    operationId: 'startSsoLogin',
+    summary: 'Start a single sign-on login or re-authentication',
+    tags: ['auth'],
+    params: providerParams,
+    body: ssoStartBody,
+    responses: { 200: ssoStartResponse, 303: null, 400: null, 401: null, 403: null, 502: null },
+  },
+  'GET /_pb/auth/sso/:provider/callback': {
+    operationId: 'finishSsoLogin',
+    summary: 'Finish a single sign-on login or re-authentication',
+    tags: ['auth'],
+    params: providerParams,
+    responses: { 303: null, 401: null },
+  },
+  ...LOCAL_AUTH_API,
   'POST /_pb/auth/logout': {
     operationId: 'logout',
     summary: 'End the current session',

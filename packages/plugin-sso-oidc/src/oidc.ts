@@ -42,6 +42,7 @@ export interface OidcConfig {
   readonly issuer: string;
   readonly clientId: string;
   readonly policy: DomainPolicy;
+  readonly reauth?: 'auto' | 'enabled' | 'disabled';
   readonly scopes?: readonly string[];
   readonly trustedAudiences?: readonly string[];
   readonly trustedEndpointOrigins?: readonly string[];
@@ -110,6 +111,7 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'clientId',
   'policy',
   'scopes',
+  'reauth',
   'trustedAudiences',
   'trustedEndpointOrigins',
 ]);
@@ -249,6 +251,12 @@ function snapshotProblems(config: Record<string, unknown>): string[] {
     }
   }
   const { id, kind, displayName, issuer, clientId, scopes } = config;
+  if (
+    config['reauth'] !== undefined &&
+    !['auto', 'enabled', 'disabled'].includes(config['reauth'] as string)
+  ) {
+    problems.push('reauth must be auto, enabled or disabled');
+  }
   if (typeof id !== 'string' || !isValidProviderId(id)) {
     problems.push('id must be a valid provider id');
   } else if (isReservedProviderId(id)) {
@@ -316,6 +324,7 @@ export function oidcProblems(config: unknown): string[] {
 }
 
 interface Endpoints {
+  readonly supportsReauth: boolean;
   readonly authorization: string;
   readonly token: string;
   readonly jwks: string;
@@ -374,7 +383,19 @@ function parseDiscovery(
   if (methods !== undefined && !(Array.isArray(methods) && methods.includes('S256'))) {
     throw new OidcProviderError('discovery_invalid');
   }
-  return { authorization: authorization.href, token: token.href, jwks: jwks.href };
+  const claims = document['claims_supported'];
+  if (
+    claims !== undefined &&
+    (!Array.isArray(claims) || !claims.every((claim) => typeof claim === 'string'))
+  ) {
+    throw new OidcProviderError('discovery_invalid');
+  }
+  return {
+    authorization: authorization.href,
+    token: token.href,
+    jwks: jwks.href,
+    supportsReauth: claims === undefined || claims.includes('auth_time'),
+  };
 }
 
 function effectiveScopes(configured: readonly string[] | undefined): string {
@@ -669,7 +690,12 @@ export function createOidcProvider(config: OidcConfig, ctx: IdentityContext): Id
       emailAuthoritativeDomains: Object.freeze([...(policy.emailAuthoritativeDomains ?? [])]),
       autoJoin: policy.autoJoin,
     }),
-    supportsReauth: true,
+    supportsReauth: source['reauth'] !== 'disabled',
+    async reauthCapability(): Promise<boolean> {
+      if (source['reauth'] === 'enabled') return true;
+      if (source['reauth'] === 'disabled') return false;
+      return (await discover()).supportsReauth;
+    },
 
     async start(input: {
       readonly purpose: 'login' | 'reauth';

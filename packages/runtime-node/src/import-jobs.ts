@@ -8,7 +8,7 @@ import type { ImportRollbackStore } from '@package-broker/core/import/rollback';
 import type { ImportVerificationStore } from '@package-broker/core/import/verification';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { RegisteredCoreJob } from '@package-broker/core/kernel/registry';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import { JobError, type JobDefinition } from '@package-broker/core/platform/jobs';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
 

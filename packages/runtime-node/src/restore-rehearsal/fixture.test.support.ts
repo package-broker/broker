@@ -7,7 +7,7 @@ import { createFixtureVersionListings } from '@package-broker/db-sqlite/testing/
 import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata';
 import { orgContext, type SqlExecutor, type SqlValue } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
-import type { BlobStore, Sha256 } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore, Sha256 } from '@package-broker/core/platform/blob';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createCatalogueWriteGuard } from '@package-broker/db-sqlite/repositories/catalogue-write-package';
 import { createCatalogueWriter } from '@package-broker/db-sqlite/repositories/catalogue-writer';

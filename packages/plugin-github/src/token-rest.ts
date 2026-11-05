@@ -1,5 +1,6 @@
 import {
   GITHUB_API_VERSION,
+  parseNpmVcsManifest,
   UpstreamError,
   type PolicyFetch,
   type UpstreamCredential,
@@ -60,6 +61,7 @@ export function tokenRest(
   repo: string,
   resetAt: (epochSeconds: number | undefined) => number,
   limits: TextLimits = UNBOUNDED,
+  manifestPath: 'package.json' | 'composer.json' = 'composer.json',
 ) {
   const authorization = credential.apply(new Headers(), new URL(API)).headers.get('authorization');
   if (authorization === null || !authorization.startsWith('Bearer '))
@@ -92,7 +94,9 @@ export function tokenRest(
       timeoutMs: 30_000,
     });
     try {
-      const value: unknown = await new Response(response.body).json();
+      const text = await new Response(response.body).text();
+      const value: unknown =
+        raw && path === 'contents/package.json' ? parseNpmVcsManifest(text) : JSON.parse(text);
       const entries: unknown[] = Array.isArray(value) ? value : [value];
       for (const entry of entries) {
         if (typeof entry === 'object' && entry !== null && 'name' in entry) safeName(entry.name);
@@ -131,8 +135,8 @@ export function tokenRest(
     }
     throw new GithubRestError(kind === 'tags' ? 'tag_limit_exceeded' : 'invalid_response');
   }
-  async function manifest() {
-    return json('contents/composer.json', true);
+  async function manifest(path: 'package.json' | 'composer.json' = manifestPath) {
+    return json(`contents/${path}`, true);
   }
   async function branch(name: string) {
     let entry: unknown;
@@ -167,7 +171,7 @@ export function tokenRest(
       const fields = chunk
         .map(
           (ref) =>
-            `${aliases.get(ref)}: object(expression: "${ref.oid}:composer.json") { ... on Blob { byteSize${text ? ' text' : ''} } }`,
+            `${aliases.get(ref)}: object(expression: "${ref.oid}:${manifestPath}") { ... on Blob { byteSize${text ? ' text' : ''} } }`,
         )
         .join(' ');
       const response = await fetch({
@@ -280,9 +284,13 @@ export function tokenRest(
           throw new GithubRestError();
         // Keep malformed JSON local to its ref in the provider.
         try {
-          const manifest: unknown = JSON.parse(blob.text);
+          const manifest: unknown =
+            manifestPath === 'package.json'
+              ? parseNpmVcsManifest(blob.text)
+              : JSON.parse(blob.text);
           if (record(manifest)) safeName(manifest.name);
         } catch (error) {
+          if (error instanceof TypeError && error.message === 'invalid_manifest') continue;
           if (!(error instanceof SyntaxError)) throw error;
         }
         texts.set(chunk[index]!, blob.text);

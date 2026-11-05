@@ -199,12 +199,78 @@ describe('runEntry', () => {
         return JSON.parse(line as string) as Record<string, unknown>;
       });
       const applied = records.filter((record) => record['id'] !== undefined);
-      expect(applied.map((record) => record['id'])).toEqual(['core:0001_init', 'core:0002_audit']);
+      expect(applied.map((record) => record['id'])).toEqual([
+        'core:0001_init',
+        'core:0002_npm_publish',
+        'core:0003_npm_identity',
+        'core:0004_source_revision',
+        'core:0005_package_settings_revision',
+        'core:0006_npm_login_handoff',
+        'core:0007_npm_vcs_build_outcomes',
+        'core:0008_registry_policy',
+        'core:0009_npm_notifications',
+        'core:0010_source_discovery_rules',
+        'core:0011_audit',
+      ]);
       const holder = applied[0]?.['holder'];
       expect(holder).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/));
       expect(applied).toEqual([
         { level: 'info', message: 'applied core:0001_init', id: 'core:0001_init', holder },
-        { level: 'info', message: 'applied core:0002_audit', id: 'core:0002_audit', holder },
+        {
+          level: 'info',
+          message: 'applied core:0002_npm_publish',
+          id: 'core:0002_npm_publish',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0003_npm_identity',
+          id: 'core:0003_npm_identity',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0004_source_revision',
+          id: 'core:0004_source_revision',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0005_package_settings_revision',
+          id: 'core:0005_package_settings_revision',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0006_npm_login_handoff',
+          id: 'core:0006_npm_login_handoff',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0007_npm_vcs_build_outcomes',
+          id: 'core:0007_npm_vcs_build_outcomes',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0008_registry_policy',
+          id: 'core:0008_registry_policy',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0009_npm_notifications',
+          id: 'core:0009_npm_notifications',
+          holder,
+        },
+        {
+          level: 'info',
+          message: 'applied core:0010_source_discovery_rules',
+          id: 'core:0010_source_discovery_rules',
+          holder,
+        },
+        { level: 'info', message: 'applied core:0011_audit', id: 'core:0011_audit', holder },
       ]);
       expect(
         records.filter((record) => record['message'] === 'migration lock acquired'),
@@ -737,3 +803,26 @@ it.each([undefined, true, false])('forwards the mcp deployment switch %s', async
   if (mcp === undefined)
     expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('mcp');
 });
+
+it.each([undefined, true, false])(
+  'forwards the notifications deployment switch %s',
+  async (enabled) => {
+    const { broker } = fakeBroker();
+    const h = harness(async () => broker);
+    const notifications = enabled === undefined ? undefined : { enabled };
+    await runEntry(
+      Promise.resolve({
+        plugins: [],
+        migrations: [],
+        ...(notifications === undefined ? {} : { notifications }),
+      }),
+      {},
+      h.runtime,
+    );
+    expect(h.runtime.start).toHaveBeenCalledWith(
+      expect.objectContaining(notifications === undefined ? {} : { notifications }),
+    );
+    if (notifications === undefined)
+      expect(vi.mocked(h.runtime.start).mock.calls[0]?.[0]).not.toHaveProperty('notifications');
+  },
+);

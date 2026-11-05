@@ -17,7 +17,7 @@ import * as kernelModule from '@package-broker/core/kernel/kernel';
 import { projectGrantKey } from '@package-broker/db-sqlite/repositories/project-grant';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import type { JobClaim } from '@package-broker/core/platform/job-repository';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import { seedTwoOrganizations } from '@package-broker/db-sqlite/contract/two-organizations';
 import {
@@ -28,7 +28,7 @@ import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createWorker, type Env } from './index.js';
 import type { R2BucketLike } from './blob/r2.js';
 import { createQueueHandler, jobNotification } from './jobs/consumer.js';
-import { createPatJobHolder, patOffboardingRegistrations } from './token-jobs.js';
+import { createPatJobHolder, tokenJobRegistrations } from './token-jobs.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const ANCHOR = 'oidc:https://idp.example.test';
@@ -365,6 +365,9 @@ describe('Worker personal-token offboarding wiring', () => {
 
 describe('Worker personal-token job holder', () => {
   const jobs: Jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
     enqueue: async () => ({ id: ulid(), created: true }),
     get: async () => null,
   };
@@ -431,7 +434,7 @@ describe('Worker personal-token job holder', () => {
         settle,
         reap: fail,
       },
-      jobs: { jobs: patOffboardingRegistrations(executor, createPatJobHolder(), () => undefined) },
+      jobs: { jobs: tokenJobRegistrations(executor, createPatJobHolder(), () => undefined) },
       observability,
       scope: () => ({
         ports: {
@@ -460,4 +463,15 @@ describe('Worker personal-token job holder', () => {
       expect.objectContaining({ outcome: 'failed', errorCode: 'handler_error', permanent: false }),
     );
   });
+});
+
+it('registers the hourly OIDC replay expiry job', () => {
+  const jobs = tokenJobRegistrations(
+    { driver: 'none', all: async () => [], batch: async () => [] },
+    createPatJobHolder(),
+    () => undefined,
+  );
+  expect(
+    jobs.find((job) => job.qualifiedName === 'core:oidc-replay-expire:v1')?.definition,
+  ).toMatchObject({ version: 1, schedule: { everySeconds: 3600 } });
 });

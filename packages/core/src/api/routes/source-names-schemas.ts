@@ -1,6 +1,7 @@
 import * as z from 'zod';
+import { MAX_NPM_NAME_LENGTH } from '../../catalogue/names.js';
 import { PROJECT_SLUG_PATTERN } from '../../authz/project-path.js';
-import { MAX_PATTERN_BYTES, PATTERN_ALPHABET } from '../../catalogue/patterns.js';
+import { PATTERN_ALPHABET } from '../../catalogue/patterns.js';
 import type { ApiRouteSpec } from '../route.js';
 
 const ulid = z.string().regex(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
@@ -48,8 +49,16 @@ export const SOURCE_NAMES_API_SPECS = [
       summary: 'Register a name pattern',
       tags: ['sources'],
       params: sourceParams,
-      body: z.strictObject({ pattern: z.string().max(MAX_PATTERN_BYTES).regex(PATTERN_ALPHABET) }),
-      responses: { 201: z.strictObject({ id: ulid }) },
+      body: z.strictObject({
+        pattern: z
+          .string()
+          .max(MAX_NPM_NAME_LENGTH)
+          .regex(PATTERN_ALPHABET)
+          .describe(
+            'For hosted npm sources, use an exact lowercase name or @scope/*. Scope claims hide public packages in the scope that are not yet cached.',
+          ),
+      }),
+      responses: { 201: z.strictObject({ id: ulid }), 409: null },
     },
   },
   {
@@ -116,6 +125,29 @@ export const SOURCE_NAMES_API_SPECS = [
           winner: ulid.nullable(),
         }),
       },
+    },
+  },
+  {
+    method: 'PATCH',
+    path: '/_pb/sources/:source/names/:name',
+    boundary: 'organization',
+    permission: 'org:sources:write',
+    service: 'SourceError',
+    api: {
+      operationId: 'updateRegisteredName',
+      summary: 'Replace a hosted npm claim',
+      tags: ['sources'],
+      params: z.strictObject({ source: ulid, name: ulid }),
+      body: z.strictObject({
+        pattern: z
+          .string()
+          .max(MAX_NPM_NAME_LENGTH)
+          .regex(PATTERN_ALPHABET)
+          .describe(
+            'For hosted npm sources, use an exact lowercase name or @scope/*. Scope claims hide public packages in the scope that are not yet cached.',
+          ),
+      }),
+      responses: { 200: z.strictObject({ id: ulid }), 409: null },
     },
   },
 ] as const satisfies readonly ApiRouteSpec[];

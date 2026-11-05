@@ -421,3 +421,72 @@ describe('allowArchived route registration', () => {
     expect(found.join(' ')).toContain('allowArchived');
   });
 });
+
+describe('core organization alternative declaration', () => {
+  const core = {
+    allowOrganizationAlternative: true,
+    packageResolver: { resolve: async () => ({ kind: 'absent' as const }) },
+  };
+  const route = {
+    method: 'PUT',
+    path: '/:project/npm/:a',
+    boundary: 'project',
+    permission: 'project:packages:write',
+    organizationAlternative: 'org:packages:publish',
+  };
+  it('accepts a token eligible organization alternative on a core project route', () => {
+    expect(routeBoundaryProblems(route, 'publish', core)).toEqual([]);
+  });
+  it('refuses the declaration on plugin routes', () => {
+    expect(
+      routeBoundaryProblems(route, 'publish', { apiVersion: SUPPORTED_PLUGIN_API[0] }).join(' '),
+    ).toContain('reserved for core');
+  });
+  it.each(['organization', 'package', 'none'])('refuses a %s boundary alternative', (boundary) => {
+    expect(
+      routeBoundaryProblems({ ...route, boundary }, 'publish', {
+        ...core,
+      }).join(' '),
+    ).toContain('requires the project boundary');
+  });
+  it.each(['org:packages:approve', 'project:packages:write', 'org:unknown'])(
+    'refuses alternative %s',
+    (organizationAlternative) => {
+      expect(
+        routeBoundaryProblems({ ...route, organizationAlternative }, 'publish', {
+          ...core,
+        }).join(' '),
+      ).toContain('token-eligible organization permission');
+    },
+  );
+});
+
+describe('core project session declaration', () => {
+  const route = {
+    method: 'GET',
+    path: '/_pb/projects/:project/policies',
+    boundary: 'project',
+    permission: 'project:read',
+    projectSession: true,
+  };
+  it('accepts a project session on a core project route declaring project:read', () => {
+    expect(routeBoundaryProblems(route, 'policies', { allowSelf: true })).toEqual([]);
+  });
+  it('refuses the declaration on plugin and ecosystem routes', () => {
+    expect(
+      routeBoundaryProblems(route, 'policies', { apiVersion: SUPPORTED_PLUGIN_API[0] }).join(' '),
+    ).toContain('projectSession is reserved for core routes');
+    expect(
+      routeBoundaryProblems(route, 'policies', { allowOrganizationAlternative: true }).join(' '),
+    ).toContain('projectSession is reserved for core routes');
+  });
+  it.each([
+    ['another permission', { permission: 'project:packages:manage' }],
+    ['the organization boundary', { boundary: 'organization', permission: 'org:read' }],
+    ['a non-true flag', { projectSession: false }],
+  ])('refuses %s', (_name, change) => {
+    expect(
+      routeBoundaryProblems({ ...route, ...change }, 'policies', { allowSelf: true }).length,
+    ).toBeGreaterThan(0);
+  });
+});

@@ -700,3 +700,9 @@ describe('service error outcomes', () => {
     apiRoute(routeSpec, () => Promise.resolve({ serviceError: 'system_role' }));
   });
 });
+
+it('refuses claim lists on routes without the declared conflict schema', async () => {
+  await expect(
+    run({ headers: rev }, async () => ({ error: 'conflict', conflictingClaims: ['private-name'] })),
+  ).rejects.toThrow('API handler returned undeclared claim conflicts');
+});

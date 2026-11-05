@@ -1,5 +1,15 @@
+import { sourceDiscoveryRoutes } from './routes/source-discovery.js';
+import { trustedPublisherRoutes } from './routes/trusted-publishers.js';
+import { policyReadRoutes, type PolicyRouteDeps } from './routes/policies-read.js';
+import { policyWriteRoutes } from './routes/policies-write.js';
+import type { PackageViewPolicy } from '../catalogue/policy-views.js';
+import { notificationReadRoutes, type NotificationRouteDeps } from './routes/notifications-read.js';
+import { notificationWriteRoutes } from './routes/notifications-write.js';
+import { packageDetailRoutes } from './routes/package-detail.js';
+import { npmLoginRoutes } from './routes/npm-login.js';
+import { packageAccessRequestRoutes } from './routes/package-access-requests.js';
 import { routesConflict } from '../kernel/routes.js';
-import type { RouteDefinition } from '../plugin.js';
+import type { RouteDefinition } from '../kernel/routes.js';
 import { accessRoutes } from './routes/access.js';
 import { auditExportRoutes } from './routes/audit-export.js';
 import { auditRoutes } from './routes/audit.js';
@@ -7,6 +17,7 @@ import { auditHealthRoutes, auditStatusRoutes } from './routes/audit-status.js';
 import { importRoutes } from './routes/import.js';
 import { organizationRoutes } from './routes/organization.js';
 import { packageManageRoutes } from './routes/package-manage.js';
+import { publishRoutes } from './routes/publishes.js';
 import { packageRoutes } from './routes/packages.js';
 import { myPermissionsRoute, myProjectPermissionsRoute } from './routes/permissions.js';
 import { projectAccessRoutes } from './routes/project-access.js';
@@ -22,6 +33,12 @@ import { tokenRoutes } from './routes/tokens.js';
 export type ApiRouteFactory = () => readonly RouteDefinition[];
 
 export interface ApiModuleDeps {
+  readonly sourceDiscovery?: Parameters<typeof sourceDiscoveryRoutes>[0];
+  readonly trustedPublishers?: Parameters<typeof trustedPublisherRoutes>[0];
+  /** Mounted only while `notifications.enabled` is on. */
+  readonly notifications?: NotificationRouteDeps;
+  readonly npmLogin: Parameters<typeof npmLoginRoutes>[0];
+  readonly publishes: Parameters<typeof publishRoutes>[0];
   readonly organization: Parameters<typeof organizationRoutes>[0];
   readonly projects: Parameters<typeof projectRoutes>[0];
   readonly access: Parameters<typeof accessRoutes>[0];
@@ -43,6 +60,12 @@ export interface ApiModuleDeps {
   readonly packageManage: Parameters<typeof packageManageRoutes>[0];
   /** Import routes are mounted only when provided; they need a blob store. */
   readonly imports?: Parameters<typeof importRoutes>[0];
+  readonly packageDetail?: Parameters<typeof packageDetailRoutes>[0];
+  readonly packageAccessRequests?: Parameters<typeof packageAccessRequestRoutes>[0];
+  /** Registry policy management; mounted whenever the policy migration is applied. */
+  readonly registryPolicy?: PolicyRouteDeps;
+  /** Filters the package views; present only when registry policy is enabled. */
+  readonly packageViewPolicy?: PackageViewPolicy;
   readonly extensions?: readonly ApiRouteFactory[];
 }
 
@@ -55,7 +78,17 @@ export const API_EXEMPT_ROUTES = Object.freeze({
 
 type RouteDependencies = Omit<
   ApiModuleDeps,
-  'extensions' | 'imports' | 'auditHealth' | 'auditStatus' | 'auditTrail'
+  | 'extensions'
+  | 'imports'
+  | 'auditHealth'
+  | 'auditStatus'
+  | 'auditTrail'
+  | 'notifications'
+  | 'packageAccessRequests'
+  | 'packageDetail'
+  | 'trustedPublishers'
+  | 'registryPolicy'
+  | 'packageViewPolicy'
 > &
   Required<Pick<ApiModuleDeps, 'imports'>>;
 type DependencyRequirements<T> = {
@@ -65,6 +98,18 @@ type DependencyRequirements<T> = {
 };
 const CONTEXT_METHODS = { ids: { ulid: true }, clock: { now: true }, clientIp: true } as const;
 const REQUIRED_DEPENDENCIES = {
+  npmLogin: {
+    ...CONTEXT_METHODS,
+    store: { start: true, confirmation: true, poll: true },
+    publicUrl: null,
+    projects: { getBySlug: true },
+    sessions: { authenticate: true, isReauthFresh: true },
+    personal: true,
+  },
+  publishes: {
+    ...CONTEXT_METHODS,
+    publishes: { get: true, list: true, decide: true, rescan: true },
+  },
   organization: {
     ...CONTEXT_METHODS,
     organizations: { get: true },
@@ -237,6 +282,25 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
   const { imports, ...required } = REQUIRED_DEPENDENCIES;
   requireDependencies(deps, required, 'dependencies');
   if (deps.imports != null) requireDependencies(deps, { imports }, 'dependencies');
+  if (deps.packageDetail !== undefined)
+    requireDependencies(
+      deps.packageDetail,
+      {
+        ...CONTEXT_METHODS,
+        repository: { packageName: true, readme: true, setAccess: true },
+        idempotency: { find: true },
+      },
+      'dependencies.packageDetail',
+    );
+  if (deps.packageAccessRequests !== undefined)
+    requireDependencies(
+      deps.packageAccessRequests,
+      {
+        ...CONTEXT_METHODS,
+        repository: { request: true, list: true, get: true, decide: true, requestable: true },
+      },
+      'dependencies.packageAccessRequests',
+    );
   if (deps.packageManage.rebuild !== undefined) {
     requireDependencies(
       deps.packageManage.rebuild,
@@ -256,12 +320,56 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
     requireDependencies(deps, { auditHealth: { read: true } }, 'dependencies');
   }
 
+  if (deps.trustedPublishers !== undefined)
+    requireDependencies(
+      deps.trustedPublishers,
+      {
+        ...CONTEXT_METHODS,
+        store: { list: true, get: true, create: true, update: true, disable: true },
+        lookup: true,
+      },
+      'dependencies.trustedPublishers',
+    );
+  if (deps.registryPolicy !== undefined)
+    requireDependencies(
+      deps.registryPolicy,
+      {
+        ...CONTEXT_METHODS,
+        manage: { list: true, get: true, create: true, update: true, disable: true, managed: true },
+        members: { replace: true, release: true },
+        inspect: { inspect: true },
+        idempotency: { find: true },
+      },
+      'dependencies.registryPolicy',
+    );
+  if (deps.notifications !== undefined)
+    requireDependencies(
+      deps.notifications,
+      {
+        ...CONTEXT_METHODS,
+        reads: { listEndpoints: true, getEndpoint: true, listDeliveries: true, getDelivery: true },
+        service: { create: true, update: true, enable: true, disable: true, delete: true },
+        sessions: { authenticate: true, isReauthFresh: true },
+      },
+      'dependencies.notifications',
+    );
   const routes = [
+    ...(deps.notifications === undefined
+      ? []
+      : [
+          ...notificationReadRoutes(deps.notifications),
+          ...notificationWriteRoutes(deps.notifications),
+        ]),
+    ...(deps.trustedPublishers === undefined ? [] : trustedPublisherRoutes(deps.trustedPublishers)),
+    ...(deps.registryPolicy === undefined
+      ? []
+      : [...policyReadRoutes(deps.registryPolicy), ...policyWriteRoutes(deps.registryPolicy)]),
     ...organizationRoutes(deps.organization),
     ...projectRoutes(deps.projects),
     ...accessRoutes(deps.access),
     ...projectAccessRoutes(deps.projectAccess),
     ...tokenRoutes(deps.tokens),
+    ...npmLoginRoutes(deps.npmLogin).filter((route) => route.path.startsWith('/_pb/')),
     ...servicePrincipalRoutes({
       ...deps.servicePrincipals,
       sessions: deps.tokens.sessions,
@@ -269,10 +377,22 @@ export function createApiModule(deps: ApiModuleDeps): { routes: readonly RouteDe
       idempotency: deps.tokens.idempotency,
     }),
     ...sourceRoutes(deps.sources),
+    ...(deps.sourceDiscovery === undefined ? [] : sourceDiscoveryRoutes(deps.sourceDiscovery)),
     ...sourcePackageRoutes(deps.sourcePackages),
     ...sourceNameRoutes(deps.sourceNames),
     ...sourceAttachmentRoutes(deps.sourceAttachments),
-    ...packageRoutes(deps.packages),
+    ...packageRoutes(deps.packages, deps.packageViewPolicy),
+    ...(deps.packageDetail === undefined
+      ? []
+      : packageDetailRoutes(
+          deps.packageViewPolicy === undefined
+            ? deps.packageDetail
+            : { ...deps.packageDetail, policy: deps.packageViewPolicy },
+        )),
+    ...publishRoutes(deps.publishes),
+    ...(deps.packageAccessRequests === undefined
+      ? []
+      : packageAccessRequestRoutes(deps.packageAccessRequests)),
     ...auditRoutes(deps.auditTrail),
     ...auditExportRoutes(deps.auditExport),
     ...auditHealthRoutes(deps.auditHealth),

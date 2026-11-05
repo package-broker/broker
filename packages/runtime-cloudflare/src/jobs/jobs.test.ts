@@ -406,6 +406,9 @@ describe('createQueueHandler on D1', () => {
 function fakeRepository(overrides: Partial<SqliteJobRepository>): SqliteJobRepository {
   const fail = () => Promise.reject(new Error('unexpected call'));
   return {
+    enqueueStatements: () => {
+      throw new Error('unexpected call');
+    },
     enqueue: fail,
     status: fail,
     claim: fail,

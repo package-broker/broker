@@ -895,6 +895,7 @@ const MINTERS: Readonly<Record<string, readonly string[]>> = {
     'systemMutationFence',
     'tokenMutationFence',
     'delegatedMutationFence',
+    'discoveryRuleFence',
   ],
 };
 interface ImportRule {
@@ -915,6 +916,10 @@ const MINT_RULE: ImportRule = {
     systemMutationFence: FENCE_ISSUER_ROOTS,
     tokenMutationFence: FENCE_ISSUER_ROOTS,
     delegatedMutationFence: FENCE_ISSUER_ROOTS,
+    discoveryRuleFence: [
+      'packages/core/src/runtime/discovery-rule-jobs.ts',
+      'packages/db-sqlite/src/testing/discovery-rules-fixture.ts',
+    ],
   },
 };
 const ACCESS_CONTEXT_RULE: ImportRule = {
@@ -1304,7 +1309,23 @@ describe('minting modules', () => {
     ]);
   });
 
-  it('allows db-sqlite sources to import but not to re-export a mint', () => {
+  it('refuses discovery fence minting from arbitrary database repositories', () => {
+    const file = 'packages/db-sqlite/src/repositories/untrusted.ts';
+    expect(
+      findMintViolations(
+        file,
+        "import {discoveryRuleFence} from '@package-broker/core/authz/fence';",
+      ),
+    ).toEqual([`${file}:1: discoveryRuleFence`]);
+    expect(
+      findMintViolations(
+        'packages/db-sqlite/src/testing/discovery-rules-fixture.ts',
+        "import {discoveryRuleFence} from '@package-broker/core/authz/fence';",
+      ),
+    ).toEqual([]);
+  });
+
+  it('allows db-sqlite sources to import but refuses dynamic loads and re-exports of a mint', () => {
     const file = 'packages/db-sqlite/src/repositories/w.ts';
     expect(
       findMintViolations(
@@ -1315,7 +1336,7 @@ describe('minting modules', () => {
           "const m = await import('@package-broker/core/authz/fence');",
         ].join('\n'),
       ),
-    ).toEqual([]);
+    ).toEqual([`${file}:3: dynamic load of a minting module`]);
     expect(
       findMintViolations(
         file,

@@ -244,7 +244,12 @@ class Model {
   }
 
   readonly writer = {
+    async publishVersion() {
+      throw new Error('not_implemented');
+    },
+
     statementBudget: {
+      publishVersion: 40,
       syncPackage: 500,
       attachDist: 4,
       openListing: 3,
@@ -426,6 +431,8 @@ async function attempt(work: Promise<unknown>): Promise<unknown> {
 
 function sourceRecord(over: Partial<SourceRecord> = {}): SourceRecord {
   return {
+    revision: 1,
+    requirePublishApproval: false,
     id: SRC,
     projectId: null,
     name: 'source',
@@ -490,6 +497,7 @@ function sourceRig(
   };
   const deps: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: async () => sourceRecord(over),
       pollState: async (_ctx, guard, input) => {
         if (guard.fence !== model.jobFence) return 'stale';

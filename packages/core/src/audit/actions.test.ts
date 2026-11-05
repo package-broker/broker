@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_NPM_NAME_LENGTH } from '../catalogue/names.js';
 import { formatToken } from '../secrets/token-format.js';
 import { AUDIT_ALERT_CODES } from '../platform/observability.js';
 import { redactValue } from './redact.js';
@@ -9,6 +10,8 @@ import {
   type AuditAction,
   type AuditContext,
   auditEvent,
+  validateAuditEvent,
+  withPackageAuditName,
 } from './actions.js';
 
 const ACTION_PATTERN = /^[a-z][a-z_]*\.[a-z][a-z_]*$/;
@@ -44,9 +47,9 @@ function payloadOf(result: ReturnType<typeof build>): string {
 }
 
 describe('AUDIT_ACTIONS', () => {
-  it('has 63 unique actions, with alert_ack registered as a sink administration operation', () => {
-    expect(AUDIT_ACTIONS.length).toBe(63);
-    expect(new Set(AUDIT_ACTIONS).size).toBe(63);
+  it('has 104 unique actions, with alert_ack registered as a sink administration operation', () => {
+    expect(AUDIT_ACTIONS.length).toBe(104);
+    expect(new Set(AUDIT_ACTIONS).size).toBe(104);
     expect(AUDIT_ACTIONS).toContain('audit.sink_admin');
     expect(AUDIT_ACTIONS).not.toContain('audit.alert_ack');
   });
@@ -1604,6 +1607,121 @@ it('records system actions without invented correlation ids and refuses null ids
   });
 });
 
+describe('npm audit values', () => {
+  it.each(['sha512', 'sha1'] as const)(
+    'accepts a real %s SRI digest only for publish integrity',
+    async (algorithm) => {
+      const bytes = new Uint8Array(
+        await crypto.subtle.digest(
+          algorithm === 'sha512' ? 'SHA-512' : 'SHA-1',
+          new TextEncoder().encode('package tarball'),
+        ),
+      );
+      const digest = `${algorithm}-${btoa(String.fromCharCode(...bytes))}`;
+      expect(build('package.publish', { integrity: { new: digest } }).ok).toBe(true);
+      expect(build('publish.reject', { reason: { new: digest } }).ok).toBe(false);
+      for (const invalid of [
+        digest + 'x',
+        digest + '\n',
+        digest + '\r\n',
+        'sha512-abc',
+        digest.replace(/.$/, '!'),
+      ])
+        expect(build('package.publish', { integrity: { new: invalid } }).ok).toBe(false);
+    },
+  );
+  it.each([
+    'package.publish',
+    'token.workload_issue',
+    'package.access_request',
+    'package.access_decide',
+  ])('bounds npm package names in %s', (action) => {
+    expect(build(action, { package: { new: 'a'.repeat(MAX_NPM_NAME_LENGTH) } }).ok).toBe(true);
+    expect(build(action, { package: { new: 'a'.repeat(215) } }).ok).toBe(false);
+    expect(build(action, { package: { new: 'a/' + 'b'.repeat(213) } }).ok).toBe(false);
+  });
+});
+
+describe('workload claim audit bounds', () => {
+  it.each([
+    ['workflow', 255],
+    ['environment', 255],
+    ['ref', 1024],
+  ] as const)('preserves %s at its byte limit and refuses excess bytes', (field, limit) => {
+    const value = field === 'workflow' ? 'w'.repeat(limit - 4) + '.yml' : 'a'.repeat(limit);
+    const result = build('token.workload_issue', { [field]: { new: value } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.event.payloadJson).changes[field].new).toBe(value);
+    for (const oversized of [value + 'a', 'é'.repeat(Math.floor(limit / 2) + 1)])
+      expect(build('token.workload_issue', { [field]: { new: oversized } })).toEqual({
+        ok: false,
+        reason: 'bad_value',
+      });
+  });
+});
+
+describe('verified workload claim audit values', () => {
+  const uuid = '123e4567-e89b-12d3-a456-426614174000';
+  it.each([
+    ['workflow', `release-${uuid}.yml`],
+    ['environment', `release-${uuid}`],
+    ['ref', `refs/heads/release-${uuid}`],
+    ['repository_id', '12345678901234567890'],
+    ['repository_owner_id', '98765432109876543210'],
+    ['repository_visibility', 'private'],
+  ])('preserves verified %s without generic credential detection', (field, value) => {
+    const result = build('token.workload_issue', { [field]: { new: value } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(JSON.parse(result.event.payloadJson).changes[field].new).toBe(value);
+  });
+  it.each([
+    ['workflow', 'invalid.txt'],
+    ['workflow', 'dir/publish.yml'],
+    ['workflow', 'publish@main.yml'],
+    ['workflow', '\ud800.yml'],
+    ['environment', 'prod\n'],
+    ['ref', 'refs/heads/with space'],
+    ['ref', ''],
+    ['repository_id', '0123'],
+    ['repository_owner_id', 'a'],
+    ['repository_visibility', 'unknown'],
+  ])('refuses invalid %s claim characters', (field, value) => {
+    expect(build('token.workload_issue', { [field]: { new: value } })).toEqual({
+      ok: false,
+      reason: 'bad_value',
+    });
+  });
+  it('keeps credential detection on other actions and workload fields', () => {
+    expect(build('token.issue', { name: { new: `release-${uuid}` } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+    expect(build('token.workload_issue', { token_id: { new: `release-${uuid}` } })).toEqual({
+      ok: false,
+      reason: 'credential_value',
+    });
+  });
+});
+
+it('preserves complete publisher restriction snapshots including absent and long values', () => {
+  const changes = {
+    package: { old: 'a'.repeat(MAX_NPM_NAME_LENGTH), new: 'widget' },
+    environment: { old: '', new: 'prod' },
+    ref_pattern: { old: null, new: 'refs/tags/v*' },
+    repository_id: { old: '123', new: '789' },
+    repository_owner_id: { old: '456', new: '987' },
+    repository: { old: 'owner/repo', new: 'owner/next' },
+    workflow: { old: 'p'.repeat(240) + '.yml', new: 'publish.yml' },
+  };
+  expect(JSON.parse(payloadOf(build('trusted_publisher.update', changes))).changes).toEqual(
+    changes,
+  );
+  expect(build('token.workload_issue', { repository_id: { new: null } })).toEqual({
+    ok: false,
+    reason: 'bad_value',
+  });
+});
+
 describe('alert acknowledgement control action', () => {
   const changes = {
     operation: { new: 'alert_ack' },
@@ -1644,4 +1762,104 @@ describe('alert acknowledgement control action', () => {
       });
     },
   );
+});
+
+describe('final audit validation', () => {
+  it('validates package names after enrichment and preserves a valid event', () => {
+    const result = build('package.access_request', { package: { new: 'widget' } });
+    if (!result.ok) throw new Error('invalid fixture');
+    expect(withPackageAuditName(result.event, '@scope/widget')).toMatchObject({
+      payloadJson: expect.stringContaining('@scope/widget'),
+    });
+    expect(validateAuditEvent(result.event)).toEqual(result.event);
+    for (const name of ['person@example.test', 'https://user:password@example.test/path'])
+      expect(() => withPackageAuditName(result.event, name)).toThrow('invalid audit event');
+  });
+  it('enforces the final payload byte budget', () => {
+    const result = build('role.rename');
+    if (!result.ok) throw new Error('invalid fixture');
+    const payloadJson = JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { name: { new: Array.from({ length: 50 }, () => 'x'.repeat(90)) } },
+    });
+    expect(new TextEncoder().encode(payloadJson).length).toBeGreaterThan(4096);
+    expect(() => validateAuditEvent({ ...result.event, payloadJson })).toThrow(
+      'invalid audit event',
+    );
+  });
+  it.each([
+    '{',
+    'null',
+    '[]',
+    JSON.stringify({ op_id: context.opId, request_id: context.requestId, extra: 'private' }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { unknown: { new: true } },
+    }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { reason: { new: 'https://example.test/path?private=value' } },
+    }),
+    JSON.stringify({
+      op_id: context.opId,
+      request_id: context.requestId,
+      changes: { reason: { new: 'x'.repeat(4096) } },
+    }),
+  ])('rejects malformed, unsafe or oversized final payloads', (payloadJson) => {
+    const result = build('package.access_request');
+    if (!result.ok) throw new Error('invalid fixture');
+    expect(() => validateAuditEvent({ ...result.event, payloadJson })).toThrow(
+      'invalid audit event',
+    );
+  });
+});
+
+describe('merged audit privacy contract', () => {
+  it.each([
+    'publish.reject',
+    'publish.scan',
+    'package.access_request',
+    'package.access_decide',
+    'version.state_change',
+  ] as const)('refuses request free text for %s and accepts only its evidence hash', (action) => {
+    expect(build(action, { reason: { new: 'private request text' } }).ok).toBe(false);
+    expect(build(action, { reason_sha256: { new: 'a'.repeat(64) } }).ok).toBe(true);
+    expect(build(action, { reason_sha256: { new: 'person@example.test' } }).ok).toBe(false);
+  });
+  it('keeps public deprecation content out of the journal', () => {
+    expect(
+      build('package.deprecate', { deprecated: { new: 'Contact person@example.test' } }).ok,
+    ).toBe(false);
+    expect(
+      build('package.deprecate', {
+        deprecated: { old: false, new: true },
+        deprecated_sha256: { old: null, new: 'b'.repeat(64) },
+      }).ok,
+    ).toBe(true);
+  });
+  it.each(['environment', 'ref'])('refuses private content in verified %s claims', (field) => {
+    for (const value of [
+      'person@example.test',
+      'https://user:password@example.test/private',
+      'ghp_' + 'a'.repeat(36),
+    ])
+      expect(build('token.workload_issue', { [field]: { new: value } }).ok).toBe(false);
+  });
+});
+
+it('types replacement registered-name audit patterns', () => {
+  expect(
+    build('registered_name.update', { pattern: { old: 'vendor/*', new: 'vendor/package' } }).ok,
+  ).toBe(true);
+  for (const value of [
+    true,
+    7,
+    ['vendor/*'],
+    'person@example.test',
+    'https://user:password@example.test',
+  ])
+    expect(build('registered_name.update', { pattern: { new: value } }).ok).toBe(false);
 });

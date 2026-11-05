@@ -1,6 +1,8 @@
+import { proxyClaimConflict } from './routes/proxy-claims-schema.js';
+import type { ErrorEnvelope } from '../envelope.js';
 import { type $ZodType, type output } from 'zod/v4/core';
-import { routeApiProblems } from '../kernel/routes.js';
-import type { ApiSlot, RequestContext, RouteBoundary, RouteDefinition } from '../plugin.js';
+import { routeApiProblems, type RouteDefinition } from '../kernel/routes.js';
+import type { ApiSlot, RequestContext, RouteBoundary } from '../plugin.js';
 import { assertRepresentable } from './json-schema.js';
 import { apiError, jsonResponse, SERVICE_ERROR_TABLE, type ApiErrorCode } from './response.js';
 import {
@@ -21,6 +23,8 @@ export interface ApiRouteSpec {
   readonly permission: string | null;
   readonly boundary?: RouteBoundary;
   readonly allowArchived?: true;
+  /** See the kernel route definition; the handler decides by permission. */
+  readonly projectSession?: true;
   readonly concurrency?: 'if-match';
   readonly service?: keyof typeof SERVICE_ERROR_TABLE;
   readonly api: ApiSlot;
@@ -32,7 +36,8 @@ export type ApiOutcome =
       readonly error: ApiErrorCode;
       readonly details?: readonly ValidationDetail[];
       readonly retryAfterSeconds?: number;
-    };
+    }
+  | { readonly error: 'conflict'; readonly conflictingClaims: readonly string[] };
 
 type ServiceFamily = keyof typeof SERVICE_ERROR_TABLE;
 
@@ -47,6 +52,7 @@ const STALE_REVISION_ERROR: {
 } = {
   AdminError: 'conflict',
   ServicePrincipalError: 'conflict',
+  NotificationError: 'revision_conflict',
 };
 
 type Parsed<S extends $ZodType | undefined, Fallback> = S extends $ZodType ? output<S> : Fallback;
@@ -150,6 +156,7 @@ export function apiRoute<const S extends ApiRouteSpec>(
     permission: spec.permission,
     ...(spec.boundary === undefined ? {} : { boundary: spec.boundary }),
     ...(spec.allowArchived === true ? { allowArchived: true as const } : {}),
+    ...(spec.projectSession === true ? { projectSession: true as const } : {}),
     api,
     handler: async (ctx) => {
       const fail = (code: ApiErrorCode, details?: readonly ValidationDetail[]): Response =>
@@ -226,6 +233,18 @@ export function apiRoute<const S extends ApiRouteSpec>(
       }
 
       if ('error' in outcome) {
+        if ('conflictingClaims' in outcome) {
+          if (spec.api.responses[409] !== proxyClaimConflict)
+            throw new TypeError('API handler returned undeclared claim conflicts');
+          const response = fail('conflict');
+          return new Response(
+            JSON.stringify({
+              ...((await response.json()) as ErrorEnvelope),
+              conflictingClaims: outcome.conflictingClaims,
+            }),
+            { status: response.status, headers: response.headers },
+          );
+        }
         if (outcome.error === 'conflict' && concurrency !== undefined) {
           return fail('precondition_failed');
         }

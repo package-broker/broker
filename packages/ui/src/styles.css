@@ -355,3 +355,22 @@
   overflow: auto;
   overscroll-behavior: contain;
 }
+.product-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 16px;
+  padding: 16px;
+  color: #525252;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+.product-footer a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

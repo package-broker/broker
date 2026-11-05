@@ -503,6 +503,99 @@ it('removes only inventoried attachments before Worker, queues and data', async 
   expect(attachmentTrace()[8]?.body).toEqual([]);
 });
 
+it.each([
+  ...providerFixtures.workerDomainDeleteResponses,
+  { name: 'absent body', status: 200, body: null },
+  { name: 'no content', status: 204, body: null },
+])('completes teardown after a custom-domain DELETE with $name', async ({ status, body }) => {
+  await saveAttachments();
+  const bucket = await provisionedBucket();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    return init?.method === 'DELETE' &&
+      new URL(String(input)).pathname.endsWith('/workers/domains/domain-1')
+      ? new Response(body, { status })
+      : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(0);
+  expect(result.output.status).toBe('ok');
+  expect(result.output.checks).toEqual(
+    ['route', 'domain', 'consumer', 'schedules', 'worker', 'r2', 'jobs', 'dlq', 'd1'].map(
+      (name) => ({ name, status: 'deleted' }),
+    ),
+  );
+  const mutations = trace.filter((entry) => entry.method !== 'GET');
+  expect(
+    mutations.filter((entry) => entry.path.endsWith('/workers/domains/domain-1')),
+  ).toHaveLength(1);
+  expect(mutations.some((entry) => entry.path.endsWith(`/r2/buckets/${bucket}`))).toBe(true);
+  expect(mutations.at(-1)?.path).toBe(
+    `/client/v4/accounts/${ACCOUNT}/d1/database/${DB}?jurisdiction=eu`,
+  );
+});
+
+it.each([
+  '{"success":false}',
+  '{"success":false,"result":null}',
+  'null',
+  '[]',
+  '{}',
+  '{"result":null}',
+  '{"success":"true"}',
+  '{"success":true,"result":',
+  ' ',
+])('rejects an invalid custom-domain DELETE response: %s', async (body) => {
+  await saveAttachments();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    return init?.method === 'DELETE' &&
+      new URL(String(input)).pathname.endsWith('/workers/domains/domain-1')
+      ? new Response(body)
+      : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(6);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(result.output.checks).toEqual([{ name: 'route', status: 'deleted' }]);
+  expect(trace.at(-1)?.path).toBe(`/client/v4/accounts/${ACCOUNT}/workers/domains/domain-1`);
+  expect(trace.at(-1)?.method).toBe('DELETE');
+});
+
+it.each(
+  [null, '', '{"success":true}'].flatMap((body) =>
+    ['domain_read', 'route_delete', 'schedules_put', 'database_delete'].map((endpoint) => ({
+      body,
+      endpoint,
+    })),
+  ),
+)('keeps strict parsing for $endpoint with body $body', async ({ body, endpoint }) => {
+  await saveAttachments();
+  const fetcher = options.fetch!;
+  options.fetch = vi.fn(async (input, init) => {
+    const fallback = await fetcher(input, init);
+    const path = new URL(String(input)).pathname;
+    const selected =
+      endpoint === 'domain_read'
+        ? init?.method === 'GET' && path.endsWith('/workers/domains/domain-1')
+        : endpoint === 'route_delete'
+          ? init?.method === 'DELETE' && path.endsWith('/workers/routes/route-1')
+          : endpoint === 'schedules_put'
+            ? init?.method === 'PUT' && path.endsWith('/schedules')
+            : init?.method === 'DELETE' && path.endsWith(`/d1/database/${DB}`);
+    return selected ? new Response(body) : fallback;
+  });
+  const result = await teardown(options);
+  expect(result.exitCode).toBe(endpoint === 'domain_read' ? 1 : 6);
+  expect(result.output.error?.code).toBe('provider_failure');
+  expect(trace.at(-1)?.method).toBe(
+    endpoint === 'domain_read' ? 'GET' : endpoint === 'schedules_put' ? 'PUT' : 'DELETE',
+  );
+  expect(result.output.checks.some((check) => check.name === 'd1')).toBe(false);
+});
+
 it('uses only durable resolved IDs when a create response preceded the resource receipt', async () => {
   const resource = journal.resources.d1!;
   resource.id = null;
@@ -1214,6 +1307,7 @@ async function expectOwnershipConflict() {
   expect(result.output.checks).toEqual([]);
   expect(trace.length).toBeGreaterThan(0);
   expect(trace.every((entry) => entry.method === 'GET')).toBe(true);
+  return result;
 }
 
 it.each(['missing', 'empty', 'install_only', 'owner_only', 'foreign', 'changed'] as const)(
@@ -2590,6 +2684,66 @@ it('accepts only the recorded telemetry endpoint binding', async () => {
     expect((await teardown(options)).exitCode).toBe(exit);
   }
 });
+
+it.each(
+  (['current', 'version'] as const).flatMap((location) =>
+    (['enabled', 'disabled', 'unrecorded', 'missing_receipt', 'unknown', 'secret'] as const).map(
+      (kind) => ({ location, kind }),
+    ),
+  ),
+)('checks PB_AUTH_LOCAL ownership in $location settings ($kind)', async ({ location, kind }) => {
+  await saveAttachments();
+  const mode = kind === 'enabled' ? 'enabled' : 'disabled';
+  journal.deployment!.attempt.local_auth = mode;
+  recordDeploymentHistory(journal.deployment!, {
+    versionId: 'version-1',
+    ...(kind === 'missing_receipt' ? {} : { plainBinding: { name: 'PB_AUTH_LOCAL', text: mode } }),
+  });
+  await save();
+  const binding = {
+    name: 'PB_AUTH_LOCAL',
+    type: kind === 'secret' ? 'secret_text' : 'plain_text',
+    ...(kind === 'secret'
+      ? {}
+      : {
+          text:
+            kind === 'unknown' ? 'UNKNOWN_MODE_SENTINEL' : kind === 'unrecorded' ? 'enabled' : mode,
+        }),
+  };
+  versionsFake(['version-1'], location === 'version' ? [binding] : []);
+  if (location === 'current')
+    interceptRead(async (url, fallback) =>
+      url.pathname.endsWith(`/workers/scripts/${journal.identity.script_name}/settings`)
+        ? response(ownedWorkerSettings([binding]))
+        : fallback,
+    );
+  if (kind === 'enabled' || kind === 'disabled') {
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'worker', status: 'deleted' });
+    expect(result.output.checks).toContainEqual({ name: 'd1', status: 'deleted' });
+  } else {
+    const result = await expectOwnershipConflict();
+    expect(JSON.stringify(result)).not.toContain('UNKNOWN_MODE_SENTINEL');
+  }
+});
+
+it.each([false, true])(
+  'tears down a legacy inventory without local-auth metadata (history: %s)',
+  async (history) => {
+    await saveAttachments();
+    expect(journal.deployment!.attempt).not.toHaveProperty('local_auth');
+    if (history) journal.deployment!.history = { version_ids: ['version-1'], plain_bindings: [] };
+    await save();
+    const before = await readFile(inventory, 'utf8');
+    versionsFake(['version-1']);
+    const result = await teardown(options);
+    expect(result.exitCode).toBe(0);
+    expect(result.output.checks).toContainEqual({ name: 'worker', status: 'deleted' });
+    expect(result.output.checks).toContainEqual({ name: 'd1', status: 'deleted' });
+    expect(await readFile(inventory, 'utf8')).toBe(before);
+  },
+);
 
 it('reports possible unrecorded multipart uploads while retaining other resources', async () => {
   const name = await provisionedBucket();

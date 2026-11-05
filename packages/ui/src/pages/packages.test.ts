@@ -38,6 +38,10 @@ const shared: PackageItem = {
   source: { ...own.source, name: 'Organization source', projectId: null },
 };
 const version: VersionItem = {
+  integrity: null,
+  distTags: [],
+  publishedBy: null,
+  approvedBy: null,
   id: versionId,
   version: '1.2.3',
   stability: 'stable',
@@ -245,6 +249,34 @@ describe('filter reset', () => {
   );
 });
 
+it('waits for named filter choices before rendering Source and Project chips', () => {
+  vi.stubGlobal('window', {
+    location: { hash: `#/packages?source=${sourceId}&projectId=${projectId}&q=widget` },
+  });
+  try {
+    const html = renderToString(
+      createElement(
+        ServicesContext.Provider,
+        {
+          value: {
+            client: createApiClient<paths>({ fetch: vi.fn(), readCookie: () => undefined }),
+            requireReauth: vi.fn(),
+          },
+        },
+        createElement(PackagesPage),
+      ),
+    );
+    expect(html).toContain('Remove Name prefix filter');
+    expect(html).not.toContain('Remove Source filter');
+    expect(html).not.toContain('Remove Project filter');
+    const chips = html.match(/<div aria-label="Active filters"[\s\S]*?<\/div>/)?.[0];
+    expect(chips).toBeDefined();
+    expect(chips).not.toContain('Name unavailable');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 describe('page requests and actions', () => {
   it.each([false, true])(
     'describes the mutation route scope (organization admin: %s)',
@@ -272,7 +304,7 @@ describe('page requests and actions', () => {
       const scope = organizationAdmin ? 'Organization' : 'Project web';
       expect(html).toContain(`<dd>${scope}</dd>`);
       expect(html).toContain('Only this version is affected.');
-      await f.controller.confirmTombstone();
+      await f.controller.confirmTombstone('Retired release');
       expect(f.requireReauth).toHaveBeenCalledWith(
         expect.objectContaining({
           path: organizationAdmin
@@ -366,7 +398,7 @@ describe('page requests and actions', () => {
     await f.controller.act(versionId, 'tombstone');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
     expect(f.controller.snapshot().confirmVersion).toBe(versionId);
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1);
   });
   it('cancels a tombstone without sending a request', async () => {
@@ -375,7 +407,7 @@ describe('page requests and actions', () => {
     await f.controller.open(own.id);
     await f.controller.act(versionId, 'tombstone');
     f.controller.cancelTombstone();
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0);
   });
   it.each(['absent', 'foreign'])(
@@ -441,12 +473,12 @@ describe('page requests and actions', () => {
     await f.controller.load(query);
     await f.controller.open(own.id);
     await f.controller.act(versionId, 'tombstone');
-    await f.controller.confirmTombstone();
+    await f.controller.confirmTombstone('Retired release');
     expect(f.requireReauth).toHaveBeenCalledWith(
       expect.objectContaining({
         method: 'POST',
         path: `/_pb/projects/web/packages/${packageId}/versions/${versionId}/tombstone`,
-        body: {},
+        body: { reason: 'Retired release' },
       }),
       {
         credential: false,
@@ -498,7 +530,7 @@ describe('package markup', () => {
       'Version count',
       'Last synced',
       'Project source',
-      'vcs',
+      'Git repository',
     ])
       expect(html).toContain(text);
     expect(html).toContain('&lt;script&gt;secret&lt;/script&gt;');
@@ -812,3 +844,37 @@ it('explains proxy demand fill in the packages empty state', async () => {
   expect(html).toContain('For proxy sources, packages appear when a client first requests them.');
   expect(html).not.toContain('run a sync');
 });
+
+it.each(['', '   ', 'é'.repeat(501), 'x'.repeat(1001)])(
+  'keeps invalid tombstone reasons out of requests',
+  async (reason) => {
+    const f = fixture();
+    await f.controller.load(query);
+    await f.controller.open(own.id);
+    await f.controller.act(versionId, 'tombstone');
+    await f.controller.confirmTombstone(reason);
+    expect(f.fetch.mock.calls.filter(([, init]) => init.method === 'POST')).toEqual([]);
+    expect(f.controller.snapshot().confirmVersion).toBe(versionId);
+  },
+);
+it('keeps the tombstone confirmation available after a failed request', async () => {
+  const f = fixture({ status: 503 });
+  await f.controller.load(query);
+  await f.controller.open(own.id);
+  await f.controller.act(versionId, 'tombstone');
+  await f.controller.confirmTombstone('Retired release');
+  expect(f.controller.snapshot()).toMatchObject({ confirmVersion: versionId, busy: false });
+});
+
+it.each(['x'.repeat(1000), 'é'.repeat(500)])(
+  'sends the exact tombstone reason at the UTF-8 byte boundary',
+  async (reason) => {
+    const f = fixture();
+    await f.controller.load(query);
+    await f.controller.open(own.id);
+    await f.controller.act(versionId, 'tombstone');
+    await f.controller.confirmTombstone(reason);
+    const post = f.fetch.mock.calls.find(([, init]) => init.method === 'POST');
+    expect(JSON.parse(post![1].body as string)).toEqual({ reason });
+  },
+);

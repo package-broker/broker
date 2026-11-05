@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { orgContext } from '../db/port.js';
 import { fixedClock } from '../ids.js';
 import { createKernel } from '../kernel/kernel.js';
-import type { BlobStore } from '../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../platform/blob.js';
 import type { Cache } from '../platform/cache.js';
 import type { ObsRecord } from '../platform/observability.js';
 import { requirePlatformPorts } from '../plugin.js';

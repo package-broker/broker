@@ -60,6 +60,21 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     bytes.delete(key);
   });
   const retentionBytes: ByteStore = {
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      return [];
+    },
     remove,
     head: async () => null,
     get: async () => null,
@@ -71,6 +86,18 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     retention: { store: retentionBytes, deleteTimeoutMs, leaseMs: 900_000 },
     jobStore: createJobRepository(executor),
     blob: {
+      async stage() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discard() {
+        throw new Error('not_implemented');
+      },
       head: async () => null,
       get: async () => null,
       put: async () => {
@@ -79,7 +106,15 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     },
     cache: { get: async () => null, set: async () => undefined, delete: async () => undefined },
   };
-  const broker = createNodeServer([], { executor, platformServices });
+  const records: unknown[] = [];
+  const broker = createNodeServer([], {
+    executor,
+    platformServices,
+    observability: {
+      deploymentId: 'retention-test',
+      sink: { emit: (record) => records.push(record) },
+    },
+  });
   cleanup.push(() => broker.close());
   const kernel: Kernel = await broker.ready();
   const jobs = createJobRepository(executor);
@@ -180,6 +215,8 @@ async function boot({ deleteTimeoutMs = 30_000 } = {}) {
     rows,
     claim,
     exec,
+    records,
+    retentionBytes,
     cancels: () => writes.filter((sql) => CANCEL_PURGE.test(sql)).length,
     beforeBatch: (hook: typeof beforeBatch) => {
       beforeBatch = hook;
@@ -218,7 +255,7 @@ describe('Node retention jobs', () => {
     await h.publish(h.b);
     const foreign = await h.rows(h.b);
     await (await h.claim('retention-scan')).run();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(h.a.orgId, SHA));
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
     expect((await h.rows())[1]).toMatchObject({ deleted_at: null, purge_after: null });
     expect(await h.rows(h.b)).toEqual(foreign);
@@ -239,7 +276,7 @@ describe('Node retention jobs', () => {
     await h.released();
     await h.due();
     await (await h.claim('blob-purge')).run();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(h.a.orgId, SHA));
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
   });
 
@@ -484,4 +521,16 @@ describe('Node retention jobs', () => {
       h.afterBatch(undefined);
     }
   }, 45_000);
+});
+
+it('Round 4 real Node observability emits a staged sweep failure', async () => {
+  const h = await fast();
+  h.retentionBytes.listStaged = async () => {
+    throw new Error('listing failed');
+  };
+  await (await h.claim('blob-purge')).run();
+  expect(h.records).toContainEqual({
+    kind: 'log',
+    record: expect.objectContaining({ level: 'warn', event: 'staged_blob_sweep_failed' }),
+  });
 });

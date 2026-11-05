@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { CatalogueWriteGuard } from '@package-broker/core/db/catalogue';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import type { Observability } from '@package-broker/core/platform/observability';
 import { fetchAndVerifyDist } from '@package-broker/core/ingest/dist-fetch';
 import { nodeCodecs } from '../codec/node-codec.js';

@@ -14,6 +14,7 @@ import {
   fenceOf,
 } from '../testing/mutation-table/fixtures.js';
 import { seeder, type CaseContext } from '../testing/mutation-table/harness.js';
+import { auditPendingStatement } from '../repositories/audit-pending.js';
 import { createSessionRepository } from '../repositories/session.js';
 import { createVisibilityAttachRepository } from '../repositories/visibility-attach.js';
 import { createVisibilitySubsetRepository } from '../repositories/visibility-subset.js';
@@ -277,7 +278,13 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
     stagingCalls: 1,
   },
   {
-    actions: ['registered_name.add', 'registered_name.remove', 'source.pause', 'source.resume'],
+    actions: [
+      'registered_name.add',
+      'registered_name.update',
+      'registered_name.remove',
+      'source.pause',
+      'source.resume',
+    ],
     callers: ['core/src/sources/source-service.ts'],
     repository: 'registered-name',
     batchGuard:
@@ -415,6 +422,253 @@ export const AUDIT_COVERAGE: readonly CoverageEntry[] = [
       '0 or 1 removal event; changes drives outcome; counts patched with json_set in batch',
     stagingCalls: 1,
   },
+  {
+    actions: ['package.publish'],
+    callers: ['core/src/registry/npm/publish-service.ts'],
+    repository: 'catalogue-publish',
+    batchGuard:
+      'catalogue write guard; source/name/token authority, revision and notification capture in executor.batch',
+    cardinality: '1 per accepted publish; replay/refusal stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['package.deprecate'],
+    callers: ['core/src/registry/npm/publish-service.ts'],
+    repository: 'npm-deprecate',
+    batchGuard:
+      'publish binding and every version revision asserted before metadata, history, audit and notifications commit together',
+    cardinality: '1 per edited version; at most 64 per request; stale snapshots stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['package.dist_tag'],
+    callers: ['core/src/registry/npm/publish-service.ts'],
+    repository: 'npm-dist-tags',
+    batchGuard: 'publish binding, package revision and active target version in executor.batch',
+    cardinality: '1 per accepted tag change; stale authority stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['package.unpublish'],
+    callers: ['core/src/registry/npm/publish-service.ts'],
+    repository: 'npm-unpublish',
+    batchGuard:
+      'publish binding, package/version snapshot and unpublish window in executor.batch with tag history and notifications',
+    cardinality: '1 per accepted removal operation; no-op/refusal stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['publish.approve', 'publish.reject', 'publish.expire', 'publish.scan'],
+    callers: [
+      'core/src/api/routes/publishes.ts',
+      'core/src/ingest/publish-approval-expire-job.ts',
+      'core/src/ingest/publish-scan-job.ts',
+    ],
+    repository: 'publishes',
+    batchGuard:
+      'runFenced; actor/job authority, approval and scan state, revision and performed predicate; notifications in same batch',
+    cardinality:
+      '1 per performed decision or scan transition; stale, replay and refusal stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['package.access_request', 'package.access_decide'],
+    callers: [
+      'core/src/api/routes/package-access-requests.ts',
+      'core/src/api/routes/package-access-requests-expiry.ts',
+    ],
+    repository: 'package-access-requests',
+    batchGuard: 'runFenced; live session or job lease, target state/revision and changes() = 1',
+    cardinality:
+      '1 per inserted request or decision/expiry; duplicate and stale operations stage zero',
+    stagingCalls: 2,
+  },
+  {
+    actions: ['trusted_publisher.create', 'trusted_publisher.update', 'trusted_publisher.disable'],
+    callers: ['core/src/api/routes/trusted-publishers.ts'],
+    repository: 'trusted-publishers',
+    batchGuard:
+      'runFenced; organization authority, live reauthentication, binding and revision assertions',
+    cardinality: '1 per changed trusted publisher; stale and no-op stage zero',
+    stagingCalls: 2,
+  },
+  {
+    actions: ['token.workload_issue'],
+    callers: ['core/src/authz/service-token-service.ts'],
+    repository: 'workload-token',
+    batchGuard: 'executor.batch; live publisher binding, identity/replay and token assertions',
+    cardinality:
+      '1 per issued workload token; failed claims, duplicate JTI and failed batches stage zero',
+    stagingCalls: 2,
+  },
+  {
+    actions: ['token.revoke'],
+    callers: ['db-sqlite/src/repositories/npm-tokens.ts'],
+    repository: 'npm-tokens',
+    batchGuard: 'runFenced; human session, fresh validation and conditional issued-token effect',
+    cardinality: '1 per created npm token; failure stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['token.issue'],
+    callers: ['core/src/authz/pat-service.ts'],
+    repository: 'npm-login',
+    batchGuard: 'runFenced; handoff state, lease, live session and conditional issued token effect',
+    cardinality: '1 per approved handoff token; replays stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: [
+      'discovery_rule.create',
+      'discovery_rule.update',
+      'discovery_rule.delete',
+      'discovery_rule.run_requested',
+      'discovery_rule.run_started',
+      'discovery_rule.run_finished',
+    ],
+    callers: ['core/src/api/routes/discovery-rules.ts', 'core/src/runtime/discovery-rule-jobs.ts'],
+    repository: 'discovery-rules',
+    batchGuard:
+      'runFenced/runOrgFenced; live organization authority or discovery-rule lease, revision and performed guards',
+    cardinality:
+      '1 per accepted rule write/run request/start/finish; stale, replay and per-repository checkpoints stage zero',
+    stagingCalls: 3,
+  },
+  {
+    actions: ['registry_policy.create'],
+    callers: ['db-sqlite/src/repositories/registry-policy-create.ts'],
+    repository: 'registry-policy-create',
+    batchGuard: 'runFenced; scope authority, rule cap, identity and idempotency assertions',
+    cardinality: '1 per created rule; replay/refusal stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['registry_policy.update', 'registry_policy.disable', 'registry_policy.release'],
+    callers: ['db-sqlite/src/repositories/registry-policy-audit.ts'],
+    repository: 'registry-policy-update',
+    batchGuard: 'runFenced; policy authority, scope, revision and override-reason assertions',
+    cardinality: '1 per changed rule; no-op, stale or refused overrides stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['registry_policy.members_replace'],
+    callers: ['db-sqlite/src/repositories/registry-policy-members.ts'],
+    repository: 'registry-policy-members',
+    batchGuard: 'runFenced; scope, authority, member cap, revision and override-reason assertions',
+    cardinality: '1 per accepted member-set replacement; failed guards stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['registry_policy.expire'],
+    callers: ['db-sqlite/src/repositories/registry-policy-expiry.ts'],
+    repository: 'registry-policy-expiry',
+    batchGuard:
+      'system mutation fence and job lease; expired revision and changes() = 1 in same batch',
+    cardinality: '1 per rule revision first observed expired; repeated sweep stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['policy.read_denied', 'policy.inspect'],
+    callers: ['core/src/registry/policy/read-audit.ts', 'core/src/registry/policy/inspect.ts'],
+    repository: 'registry-policy-read-audit',
+    batchGuard:
+      'executor.batch; direct denied fetch before 404 or authorized manager inspection before response; no collection read writes',
+    cardinality:
+      '1 per inspected page (max 100 versions); direct denials once per version/revision per request, chunked at 32 reasons',
+    stagingCalls: 1,
+  },
+  {
+    actions: [
+      'notification.create',
+      'notification.update',
+      'notification.credential_set',
+      'notification.enable',
+      'notification.disable',
+      'notification.delete',
+    ],
+    callers: [
+      'core/src/notifications/endpoints.ts',
+      'db-sqlite/src/repositories/notification-write.ts',
+    ],
+    repository: 'notification-write',
+    batchGuard:
+      'runFenced; live human reauthentication, project authority, endpoint revision and AFTER_CHANGE predicate; credentials in same batch',
+    cardinality: '1 per changed endpoint; stale/no-op/replay stages zero',
+    stagingCalls: 3,
+  },
+  {
+    actions: ['notification.delivery_started'],
+    callers: ['db-sqlite/src/repositories/notification-attempt.ts'],
+    repository: 'notification-attempt',
+    batchGuard:
+      'job fence and delivery lease, attempt counter and started audit committed before network',
+    cardinality: '1 per reserved attempt; at most 8 per delivery; failed lease stages zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['notification.delivery_finished', 'notification.auto_disable'],
+    callers: ['db-sqlite/src/repositories/notification-settle.ts'],
+    repository: 'notification-settle',
+    batchGuard:
+      'job/attempt lease and endpoint revision guard; outcome/failure streak and audit patched in same batch',
+    cardinality: '1 per settled attempt; 0 or 1 auto-disable on threshold crossing',
+    stagingCalls: 3,
+  },
+  {
+    actions: ['notification.delivery_cancelled', 'notification.delivery_finished'],
+    callers: ['db-sqlite/src/repositories/notification-prepare.ts'],
+    repository: 'notification-prepare',
+    batchGuard: 'job fence; delivery state/lease and endpoint revision assertions',
+    cardinality: '1 per cancelled or terminal delivery; stale/refused transition stages zero',
+    stagingCalls: 2,
+  },
+  {
+    actions: ['notification.delivery_cancelled', 'notification.delivery_finished'],
+    callers: ['db-sqlite/src/repositories/notification-retention.ts'],
+    repository: 'notification-retention',
+    batchGuard:
+      'job fence; delivery state, attempt identity and bounded retention snapshot assertions',
+    cardinality:
+      '1 per expired/cancelled delivery or recovered attempt; repeated sweep stages zero',
+    stagingCalls: 3,
+  },
+  {
+    actions: ['notification.overflow'],
+    callers: ['core/src/notifications/enqueue.ts'],
+    repository: 'notification-capture',
+    batchGuard: 'owning mutation fenced batch; project/source state and org capture-cap predicate',
+    cardinality: '0 or 1 overflow event per rejected fanout; no enabled subscriber stages zero',
+    stagingCalls: 2,
+  },
+  {
+    actions: ['role.create'],
+    callers: ['db-sqlite/src/repositories/admin-bootstrap.ts'],
+    repository: 'admin-bootstrap',
+    batchGuard:
+      'executor.batch; live singleton setup/bootstrap guard and missing default-role permission comparison',
+    cardinality: '1 per topped-up default role; complete/no-op bootstraps stage zero',
+    stagingCalls: 1,
+  },
+  {
+    actions: ['token.revoke'],
+    callers: ['db-sqlite/src/repositories/npm-login-expire.ts'],
+    repository: 'npm-login-expire',
+    batchGuard: 'job lease and expired handoff predicate in executor.batch',
+    cardinality:
+      '1 per expired unconsumed handoff token actually revoked; repeated sweep stages zero',
+    stagingCalls: 1,
+  },
+
+  {
+    actions: ['package.access_update'],
+    callers: ['core/src/api/routes/package-detail.ts'],
+    repository: 'package-detail',
+    stagingBuilder: 'visibilityAuditStatements',
+    batchGuard:
+      'runOrgFenced; package scope, management authority, revision and conditional changes() predicate',
+    cardinality: '1 per changed access default; no-op/replay stages zero',
+    stagingCalls: 1,
+  },
 ];
 
 export const AUDIT_INJECTED_STATEMENTS = [
@@ -474,20 +728,21 @@ export const AUDIT_UNCAPTURED: readonly {
 export const AUDIT_SECURITY_ATTEMPTS = [
   {
     attempt: 'failed login',
-    captured: false,
+    captured: true,
     reason:
-      'Login events require a successful session/reauth effect; credential/throttle failures stage nothing.',
+      'Bound runtime failure recorder stages session.login_failed at rate-limited thresholds without submitted identifiers.',
   },
   {
     attempt: 'authorization denial',
-    captured: false,
+    captured: true,
     reason:
-      'Denied requests return before mutation or abort the authority fence; no denial action exists.',
+      'Bound runtime recorder stages access.denied for authenticated 403 responses with the route template; 401 is excluded.',
   },
   {
     attempt: 'failed reauthentication',
-    captured: false,
-    reason: 'Only a successful fresh reauthentication stages session.reauth.',
+    captured: true,
+    reason:
+      'Bound runtime failure recorder stages session.login_failed with method reauth at the failure thresholds.',
   },
   {
     attempt: 'logout without active session',
@@ -558,6 +813,65 @@ export function describeAuditCoverageContract(open: () => Promise<AuditCoverageD
         ),
       ]);
     }
+    it.each([
+      ['package.publish', false],
+      ['package.deprecate', false],
+      ['package.dist_tag', false],
+      ['package.unpublish', true],
+      ['publish.reject', true],
+      ['publish.expire', true],
+      ['trusted_publisher.disable', true],
+      ['token.workload_issue', false],
+      ['registry_policy.update', true],
+      ['registry_policy.release', true],
+      ['notification.disable', true],
+      ['notification.credential_set', true],
+      ['notification.delivery_finished', true],
+      ['notification.delivery_started', false],
+      ['notification.overflow', false],
+      ['policy.read_denied', false],
+      ['policy.inspect', false],
+      ['discovery_rule.delete', true],
+      ['discovery_rule.run_started', false],
+    ] as const)(
+      'required capacity class for %s is atomic (reserve: %s)',
+      async (action, reserve) => {
+        await fixture(async ({ executor, ctx }) => {
+          await executor.batch([
+            statement(
+              "UPDATE audit_chain SET policy = 'required', capacity_state = 'refusing' WHERE org_id = ?",
+              ctx.orgId,
+            ),
+          ]);
+          const attempt = () =>
+            executor.batch([
+              statement(
+                "INSERT INTO project(id,org_id,slug,name) VALUES ('capacity-business',?,'capacity-business','Capacity')",
+                ctx.orgId,
+              ),
+              auditPendingStatement(ctx, event(action)),
+            ]);
+          if (reserve) {
+            await expect(attempt()).resolves.toBeDefined();
+          } else {
+            await expect(attempt()).rejects.toMatchObject({ kind: 'backlog_full' });
+          }
+          expect(
+            await executor.all(
+              statement(
+                "SELECT id FROM project WHERE org_id = ? AND id = 'capacity-business'",
+                ctx.orgId,
+              ),
+            ),
+          ).toHaveLength(reserve ? 1 : 0);
+          expect(
+            await executor.all(
+              statement('SELECT id FROM audit_pending WHERE org_id = ?', ctx.orgId),
+            ),
+          ).toHaveLength(reserve ? 1 : 0);
+        });
+      },
+    );
     it('audit failure rolls back revocation, then the same operation succeeds once storage recovers', async () => {
       await fixture(async (database) => {
         const { executor, ctx } = database;

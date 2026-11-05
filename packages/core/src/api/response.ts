@@ -7,6 +7,7 @@ import type { ServiceTokenError } from '../authz/service-token-service.js';
 import type { ServicePrincipalError } from '../authz/service-principal-service.js';
 import type { TokenRevokeError } from '../authz/token-revoke.js';
 import type { ProjectListError } from '../authz/project-list.js';
+import type { NotificationErrorCode } from '../notifications/endpoints.js';
 import { errorEnvelope } from '../envelope.js';
 import type { ValidationDetail } from './validate.js';
 
@@ -14,15 +15,21 @@ export const API_ERROR_CODES = {
   rate_limited: { status: 429, message: 'Too many requests' },
   unsupported_package: { status: 400, message: 'Unsupported package' },
   unsupported_source_kind: { status: 400, message: 'Unsupported source kind' },
+  source_not_attached: {
+    status: 409,
+    message: 'The hosted source must be attached to the project first',
+  },
   package_not_found: { status: 404, message: 'Package not found' },
   invalid_request: { status: 400, message: 'Invalid request' },
   unauthorized: { status: 401, message: 'Authentication required' },
   forbidden: { status: 403, message: 'Access denied' },
+  local_auth_disabled: { status: 403, message: 'Local sign-in is disabled' },
   reauth_required: { status: 403, message: 'Reauthentication required' },
   not_found: { status: 404, message: 'Not found' },
   audit_trail_invalid_response: { status: 500, message: 'Invalid audit trail response' },
   audit_trail_unavailable: { status: 404, message: 'Audit trail unavailable' },
   conflict: { status: 409, message: 'Conflict' },
+  discovery_rule_disabled: { status: 409, message: 'Discovery rule is disabled' },
   source_paused: { status: 409, message: 'Source is paused' },
   duplicate: { status: 409, message: 'Already exists' },
   last_holder: { status: 409, message: 'Last holder cannot be removed' },
@@ -38,6 +45,68 @@ export const API_ERROR_CODES = {
   bad_gateway: { status: 502, message: 'Bad gateway' },
   gone: { status: 410, message: 'Archive is no longer available' },
   unavailable: { status: 503, message: 'Service unavailable' },
+  invalid_version: { status: 400, message: 'The package version is invalid' },
+  invalid_attachments: { status: 400, message: 'The package attachments are invalid' },
+  invalid_attachment: { status: 400, message: 'The package attachment is invalid' },
+  provenance_unsupported: { status: 400, message: 'Package provenance is not supported' },
+  integrity_mismatch: { status: 400, message: 'The package integrity does not match the tarball' },
+  invalid_tarball: { status: 400, message: 'The package tarball is invalid' },
+  manifest_mismatch: { status: 400, message: 'The package manifest does not match the tarball' },
+  license_missing: { status: 400, message: 'A license is required to publish' },
+  too_many_tags: { status: 400, message: 'The package has too many tags' },
+  token_required: { status: 401, message: 'A token is required to publish' },
+  scope: { status: 403, message: 'The token scope does not permit this operation' },
+  not_admitted: { status: 403, message: 'The package is not admitted to this project' },
+  already_decided: { status: 409, message: 'Publish approval already decided' },
+  self_approval: { status: 403, message: 'You cannot approve your own publish' },
+  package_binding: { status: 403, message: 'The token is bound to a different package' },
+  no_trusted_publisher: { status: 403, message: 'No trusted publisher matches this workload' },
+  claim_in_use: { status: 409, message: 'This claim still covers hosted packages' },
+  claim_overlap: { status: 409, message: 'This package name is already published or proxied' },
+  name_public: { status: 409, message: 'This package name is already published publicly' },
+  name_public_unverified: { status: 409, message: 'The public package name could not be verified' },
+  name_not_claimed: { status: 409, message: 'This package name has not been claimed' },
+  version_exists: { status: 409, message: 'This package version already exists' },
+  publish_gate: {
+    status: 409,
+    message: 'Approval is required before this version can be released',
+  },
+  too_many_sessions: { status: 409, message: 'There are too many pending login sessions' },
+  ambiguous_trusted_publisher: {
+    status: 409,
+    message: 'More than one trusted publisher matches this workload',
+  },
+  manifest_too_large: { status: 413, message: 'The package manifest is too large' },
+  tarball_too_large: { status: 413, message: 'The package tarball is too large' },
+  write_unsupported: { status: 405, message: 'This write operation is not supported' },
+  length_required: { status: 411, message: 'Content-Length is required' },
+  staging_failed: { status: 503, message: 'Publish staging failed' },
+  invalid_publish_body: { status: 400, message: 'The publish body is invalid' },
+  busy: { status: 503, message: 'Publishing is busy, try again later' },
+  github_credentials_required: {
+    status: 409,
+    message:
+      'Configure a GitHub App installation or GitHub token before creating a trusted publisher',
+  },
+  invalid_unpublish: { status: 400, message: 'Invalid unpublish request' },
+  unpublish_window: {
+    status: 409,
+    message: 'Unpublish window expired; an organization admin must tombstone with a reason',
+  },
+  invalid_dist_tag: { status: 400, message: 'Invalid dist-tag mutation' },
+  invalid_deprecation: { status: 400, message: 'Only deprecated may change' },
+  deprecation_too_long: { status: 400, message: 'Deprecation message is too long' },
+  deprecation_too_many: {
+    status: 400,
+    message: 'Too many versions in one deprecation request',
+  },
+  invalid_configuration: { status: 400, message: 'Invalid notification configuration' },
+  endpoint_limit: { status: 409, message: 'Notification endpoint limit reached' },
+  transport_unavailable: { status: 503, message: 'Notification delivery is unavailable' },
+  unpublish_blocked: {
+    status: 409,
+    message: 'A version that is not active blocks removal of the whole package',
+  },
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERROR_CODES;
@@ -65,6 +134,10 @@ export const SERVICE_ERROR_TABLE = {
     invalid_pattern: { status: 400, code: 'invalid_request' },
     proxy_source: { status: 400, code: 'invalid_request' },
     pattern_taken: { status: 409, code: 'conflict' },
+    claim_in_use: { status: 409, code: 'claim_in_use' },
+    claim_overlap: { status: 409, code: 'claim_overlap' },
+    name_public: { status: 409, code: 'name_public' },
+    name_public_unverified: { status: 409, code: 'name_public_unverified' },
     invalid_name: { status: 400, code: 'invalid_request' },
   } satisfies Record<SourceError, ServiceErrorMapping>,
   VisibilityError: {
@@ -163,6 +236,15 @@ export const SERVICE_ERROR_TABLE = {
     invalid_query: { status: 400, code: 'invalid_request' },
     source_invalid: { status: 503, code: 'unavailable' },
   } satisfies Record<ProjectListError, ServiceErrorMapping>,
+  NotificationError: {
+    invalid_configuration: { status: 400, code: 'invalid_configuration' },
+    endpoint_limit: { status: 409, code: 'endpoint_limit' },
+    transport_unavailable: { status: 503, code: 'transport_unavailable' },
+    revision_conflict: { status: 409, code: 'conflict' },
+    forbidden: { status: 403, code: 'forbidden' },
+    not_found: { status: 404, code: 'not_found' },
+    unavailable: { status: 503, code: 'unavailable' },
+  } satisfies Record<NotificationErrorCode, ServiceErrorMapping>,
 } as const;
 
 export function revisionEtag(revision: number): string {

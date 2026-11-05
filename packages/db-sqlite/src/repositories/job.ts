@@ -106,7 +106,14 @@ export interface DueJobLister {
   ): Promise<number>;
 }
 
-export type SqliteJobRepository = JobRepository & DueJobLister;
+export type SqliteJobRepository = JobRepository &
+  DueJobLister & {
+    enqueueStatements(
+      ctx: OrgContext,
+      row: JobEnqueue,
+      when?: RawBuilder<unknown>,
+    ): readonly Statement[];
+  };
 
 export interface JobRepositoryOptions {
   readonly random?: () => number;
@@ -199,6 +206,39 @@ function guardOf(ctx: OrgContext, guard: JobGuard) {
 function marker(outcome: JobAttemptOutcome, column: 'next_run_at' | 'finished_at') {
   return sql`(SELECT a.${sql.raw(column)} FROM job_attempt a
     WHERE a.job_id = job.id AND a.fence = job.fence AND a.outcome = ${outcome})`;
+}
+
+function enqueueStatement(
+  ctx: OrgContext,
+  row: JobEnqueue,
+  when: RawBuilder<unknown> = sql`1`,
+): Statement {
+  const id = text('id', row.id);
+  const type = text('type', row.type);
+  const key = text('idempotencyKey', row.idempotencyKey);
+  const payloadJson = jsonPayload(row.payloadJson);
+  const runAt = row.runAt === null ? null : normalizeRunAt(row.runAt);
+  if (
+    typeof row.maxAttempts !== 'number' ||
+    !Number.isSafeInteger(row.maxAttempts) ||
+    row.maxAttempts < 1 ||
+    row.maxAttempts > MAX_JOB_ATTEMPTS
+  ) {
+    throw new JobError('invalid_attempt');
+  }
+  const projectId = row.projectId === null ? null : text('projectId', row.projectId);
+  const tokenId =
+    row.initiatorTokenId === null ? null : text('initiatorTokenId', row.initiatorTokenId);
+  const resourceKey = row.resourceKey === null ? null : text('resourceKey', row.resourceKey);
+
+  return statement(sql`INSERT INTO job
+          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,
+           project_id, initiator_token_id)
+          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},
+            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}
+          WHERE (${projectId} IS NULL
+            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})) AND ${when}
+          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`);
 }
 
 export function createJobRepository(
@@ -306,12 +346,12 @@ export function createJobRepository(
   }
 
   return {
+    enqueueStatements: (ctx, row, when) => [enqueueStatement(ctx, row, when)],
     async enqueue(ctx, row: JobEnqueue) {
       const id = text('id', row.id);
       const type = text('type', row.type);
       const key = text('idempotencyKey', row.idempotencyKey);
       const payloadJson = jsonPayload(row.payloadJson);
-      const runAt = row.runAt === null ? null : normalizeRunAt(row.runAt);
       if (
         typeof row.maxAttempts !== 'number' ||
         !Number.isSafeInteger(row.maxAttempts) ||
@@ -321,20 +361,11 @@ export function createJobRepository(
         throw new JobError('invalid_attempt');
       }
       const projectId = row.projectId === null ? null : text('projectId', row.projectId);
-      const tokenId =
-        row.initiatorTokenId === null ? null : text('initiatorTokenId', row.initiatorTokenId);
       const resourceKey = row.resourceKey === null ? null : text('resourceKey', row.resourceKey);
 
       const [inserted, existing, project] = await executor
         .batch([
-          statement(sql`INSERT INTO job
-          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,
-           project_id, initiator_token_id)
-          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},
-            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}
-          WHERE ${projectId} IS NULL
-            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})
-          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING`),
+          enqueueStatement(ctx, row),
           statement(sql`SELECT id, type, payload_json, project_id, resource_key FROM job
           WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}`),
           statement(sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}`),

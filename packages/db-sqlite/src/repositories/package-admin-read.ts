@@ -1,3 +1,4 @@
+import { redactValue } from '@package-broker/core/audit/redact';
 import { sql, type RawBuilder } from 'kysely';
 import type { NameEcosystem } from '@package-broker/core/catalogue/names';
 import { validateLimit } from '@package-broker/core/db/catalogue';
@@ -11,6 +12,12 @@ import type {
 import type { OrgContext, ScalarSqlExecutor, ScalarStatement } from '@package-broker/core/db/port';
 import { compile, db } from '../kysely.js';
 import { visibleRowsCondition, winnerOrder } from './catalogue-predicates.js';
+
+function safeName(value: string | null, fallback: string): string {
+  if (!value || value.includes('@')) return fallback;
+  const safe = redactValue(value, 200, 'name');
+  return safe.ok && safe.value === value ? value : fallback;
+}
 
 const CANDIDATE_BUDGET = 500;
 const ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
@@ -98,19 +105,31 @@ function owner(ctx: OrgContext, projectId: string): RawBuilder<unknown> {
 function derivedStatus(ctx: OrgContext): RawBuilder<unknown> {
   return sql`case when c.status = 'removed_upstream' then 'removed_upstream'
     when exists (select 1 from version as vs where vs.org_id = ${ctx.orgId}
-      and vs.package_id = c.id and vs.status = 'quarantined') then 'quarantined'
+      and vs.package_id = c.id and vs.status = 'quarantined'
+      and not exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = vs.id)) then 'quarantined'
     when exists (select 1 from version as vs where vs.org_id = ${ctx.orgId}
       and vs.package_id = c.id and vs.status = 'tombstoned')
       and not exists (select 1 from version as vs indexed by version_package_status where vs.org_id = ${ctx.orgId}
-        and vs.package_id = c.id and vs.status <> 'tombstoned') then 'tombstoned'
+        and vs.package_id = c.id and vs.status <> 'tombstoned'
+        and not (vs.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = vs.id))) then 'tombstoned'
     else 'active' end`;
 }
 
 type PackageRow = Omit<
   PackageListItem,
-  'id' | 'source' | 'latestVersion' | 'versionCount' | 'lastSyncedAt'
+  | 'id'
+  | 'source'
+  | 'latestVersion'
+  | 'versionCount'
+  | 'lastSyncedAt'
+  | 'visibleToNewProjects'
+  | 'newProjectAccessMode'
+  | 'revision'
 > & {
   readonly id: string | null;
+  readonly visible_to_new_projects: number;
+  readonly new_project_access_mode: 'none' | 'request';
+  readonly settings_revision: number;
   readonly scanned: number;
   readonly source_id: string;
   readonly source_name: string;
@@ -128,15 +147,22 @@ async function list(
   query: PackageListQuery,
   projectId?: string,
   attachedProjectId?: string,
+  target?: { readonly packageId: string; readonly projectId: string | null },
 ) {
   validateQuery(query);
   const organization = projectId === undefined;
   const after = cursor(query.after, organization);
   const filters = [
     sql`pkg.org_id = ${ctx.orgId}`,
+    sql`pkg.held_until_active = 0`,
     sql`src.org_id = ${ctx.orgId}`,
     after?.condition ?? sql`1 = 1`,
   ];
+  if (target) {
+    filters.push(sql`pkg.id = ${target.packageId}`);
+    if (target.projectId !== null)
+      filters.push(sql`((${owner(ctx, target.projectId)}) or (${winner(ctx, target.projectId)}))`);
+  }
   const range = (eco: NameEcosystem | undefined, limit: RawBuilder<unknown>) => {
     const rangeFilters = [...filters];
     if (eco !== undefined) rangeFilters.push(sql`pkg.ecosystem = ${eco}`);
@@ -157,7 +183,7 @@ async function list(
         and substr(pkg.name, 1, length(${query.q})) = ${query.q}`);
     }
     return sql`
-    select pkg.id, pkg.ecosystem, pkg.name, pkg.status, pkg.last_synced_at,
+    select pkg.id, pkg.ecosystem, pkg.name, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.settings_revision,
       src.id as source_id, src.name as source_name, src.type as source_type, src.project_id as source_project_id
     from package as pkg join source as src on src.id = +pkg.source_id
     where ${sql.join(rangeFilters, sql` and `)}
@@ -180,7 +206,7 @@ async function list(
   const candidates =
     projectId === undefined
       ? sql`select * from scan`
-      : sql`select k.ecosystem, k.name, pkg.id, pkg.status, pkg.last_synced_at,
+      : sql`select k.ecosystem, k.name, pkg.id, pkg.status, pkg.last_synced_at, pkg.visible_to_new_projects, pkg.new_project_access_mode, pkg.settings_revision,
         src.id as source_id, src.name as source_name, src.type as source_type, src.project_id as source_project_id
       from (
         select ecosystem, name from scan group by ecosystem, name
@@ -192,11 +218,13 @@ async function list(
     statement(sql`with ${scan}, c as materialized (${candidates}), d as materialized (
     select c.*, ${derivedStatus(ctx)} as list_status from c
   ) select d.id, d.ecosystem, d.name, d.list_status as status,
+    d.visible_to_new_projects, d.new_project_access_mode, d.settings_revision,
     d.source_id, d.source_name, d.source_type, d.source_project_id, d.last_synced_at,
     (select count(*) from scan) as scanned,
     (select v.version from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id
       and v.status in ('active', 'removed_upstream') order by v.published_at desc, v.id desc limit 1) as latest_version,
-    (select count(*) from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id) as version_count,
+    (select count(*) from version as v where v.org_id = ${ctx.orgId} and v.package_id = d.id
+      and not (v.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed'))))) as version_count,
     (${sql.join(qualifies, sql` and `)}) as qualifies
   from d order by d.ecosystem, d.name, d.id`),
   );
@@ -207,6 +235,13 @@ async function list(
     if (row.qualifies === 1 && row.id !== null)
       items.push({
         id: row.id,
+        ...(organization
+          ? {
+              visibleToNewProjects: row.visible_to_new_projects === 1,
+              newProjectAccessMode: row.new_project_access_mode,
+              revision: row.settings_revision,
+            }
+          : {}),
         ecosystem: row.ecosystem,
         name: row.name,
         latestVersion: row.latest_version,
@@ -231,6 +266,12 @@ async function list(
 }
 
 type VersionRow = {
+  readonly integrity: string | null;
+  readonly dist_tags: string;
+  readonly publisher_kind: 'user' | 'service' | 'system' | null;
+  readonly publisher_name: string | null;
+  readonly approver_name: string | null;
+  readonly decided_at: string | null;
   readonly package_id: string;
   readonly id: string | null;
   readonly version: string;
@@ -260,21 +301,54 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
           : sql`((${owner(ctx, query.projectId)}) or (${winner(ctx, query.projectId)}))`;
       const after = query.after === undefined ? sql`1 = 1` : sql`v.id > ${query.after}`;
       const rows = await executor.all<VersionRow>(
-        statement(sql`with target as (
+        statement(sql`with publication as not materialized (
+        select id, target_id, actor_type, actor_id from audit_pending where org_id = ${ctx.orgId} and target_type = 'version' and action = 'package.publish'
+        union all select id, target_id, actor_type, actor_id from audit_event where org_id = ${ctx.orgId} and target_type = 'version' and action = 'package.publish'
+      ), target as (
         select pkg.id from package as pkg join source as src on src.id = pkg.source_id
         where pkg.org_id = ${ctx.orgId} and src.org_id = ${ctx.orgId}
-          and pkg.id = ${query.packageId} and ${access}
+          and pkg.held_until_active = 0 and pkg.id = ${query.packageId} and ${access}
       ), versions as (
         select v.id, v.version, v.stability, v.status, v.published_at,
-          v.removed_upstream_at, v.tombstoned_at, v.revision
+          v.removed_upstream_at, v.tombstoned_at, v.revision, v.npm_integrity as integrity,
+          (select json_group_array(tag) from (select dt.tag from dist_tag dt where dt.org_id = ${ctx.orgId} and dt.package_id = v.package_id and dt.version_id = v.id order by dt.tag)) as dist_tags,
+          coalesce(pa.requested_by_type, case pub.actor_type when 'service_principal' then 'service' when 'user' then 'user' when 'system' then 'system' end) as publisher_kind,
+          case when coalesce(pa.requested_by_type, pub.actor_type) = 'user' then pu.display_name else sp.name end as publisher_name,
+          au.display_name as approver_name, case when pa.approval_state = 'approved' then pa.decided_at end as decided_at
         from version as v join target as t on t.id = v.package_id
-        where v.org_id = ${ctx.orgId} and ${after} order by v.id limit ${limit + 1}
+        left join publish_approval pa on pa.version_id = v.id and pa.package_id = v.package_id and pa.org_id = ${ctx.orgId}
+        left join publication pub on pub.target_id = v.id and pub.id = (select p.id from publication p where p.target_id = v.id order by p.id desc limit 1)
+        left join user_account pu on pu.id = coalesce(pa.requested_by_id, pub.actor_id) and pu.org_id = ${ctx.orgId} and coalesce(pa.requested_by_type, pub.actor_type) = 'user'
+        left join service_principal sp on sp.id = coalesce(pa.requested_by_id, pub.actor_id) and sp.org_id = ${ctx.orgId} and coalesce(pa.requested_by_type, pub.actor_type) in ('service', 'service_principal')
+        left join user_account au on au.id = pa.decided_by_user_id and au.org_id = ${ctx.orgId}
+        where v.org_id = ${ctx.orgId}
+          and not (v.status = 'quarantined' and exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed')))) and ${after} order by v.id limit ${limit + 1}
       ) select t.id as package_id, versions.* from target as t left join versions on 1 = 1 order by versions.id`),
       );
       if (rows.length === 0) return null;
       const present = rows.filter((row) => row.id !== null);
       const items = present.slice(0, limit).map((row) => ({
         id: row.id!,
+        integrity: row.integrity,
+        distTags: JSON.parse(row.dist_tags) as string[],
+        publishedBy:
+          row.publisher_kind === null
+            ? null
+            : {
+                kind: row.publisher_kind,
+                displayName: safeName(
+                  row.publisher_name,
+                  row.publisher_kind === 'user'
+                    ? 'User'
+                    : row.publisher_kind === 'service'
+                      ? 'Service principal'
+                      : 'System',
+                ),
+              },
+        approvedBy:
+          row.decided_at === null
+            ? null
+            : { displayName: safeName(row.approver_name, 'User'), decidedAt: row.decided_at },
         version: row.version,
         stability: row.stability,
         status: row.status,
@@ -287,16 +361,39 @@ export function createPackageAdminReader(executor: ScalarSqlExecutor): PackageAd
     },
     async findManagedVersion(ctx, query) {
       const access = query.projectId === null ? sql`1 = 1` : owner(ctx, query.projectId);
-      const rows = await executor.all<ManagedVersion>(
+      const rows = await executor.all<
+        Omit<ManagedVersion, 'publishGate' | 'hostedNpm'> & {
+          publishGate: number;
+          hostedNpm: number;
+        }
+      >(
         statement(sql`select pkg.id as "packageId", v.id as "versionId",
-        pkg.ecosystem, pkg.name as "packageName", v.version, v.status,
-        src.id as "sourceId", src.project_id as "sourceProjectId"
+        pkg.ecosystem, pkg.name as "packageName", v.version, v.status, v.revision,
+        (pkg.ecosystem='npm' and src.type='hosted') as "hostedNpm",
+        src.id as "sourceId", src.project_id as "sourceProjectId",
+        exists (select 1 from publish_approval pa where pa.org_id = ${ctx.orgId} and pa.version_id = v.id and (pa.approval_state = 'pending' or pa.scan_state in ('queued', 'running', 'failed'))) as "publishGate"
         from package as pkg join source as src on src.id = pkg.source_id
         join version as v on v.package_id = pkg.id
         where pkg.org_id = ${ctx.orgId} and src.org_id = ${ctx.orgId} and v.org_id = ${ctx.orgId}
-          and pkg.id = ${query.packageId} and v.id = ${query.versionId} and ${access}`),
+          and pkg.held_until_active = 0 and pkg.id = ${query.packageId} and v.id = ${query.versionId} and ${access}`),
       );
-      return rows[0] ?? null;
+      const row = rows[0];
+      if (!row) return null;
+      const { publishGate, hostedNpm, ...version } = row;
+      return {
+        ...version,
+        ...(hostedNpm === 1 ? { hostedNpm: true as const } : {}),
+        ...(publishGate === 1 ? { publishGate: true } : {}),
+      };
     },
   };
+}
+
+export async function readPackageDetail(
+  executor: ScalarSqlExecutor,
+  ctx: OrgContext,
+  query: { readonly packageId: string; readonly projectId: string | null },
+): Promise<PackageListItem | null> {
+  const page = await list(executor, ctx, { limit: 1 }, undefined, undefined, query);
+  return page.items[0] ?? null;
 }

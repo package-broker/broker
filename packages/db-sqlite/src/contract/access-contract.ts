@@ -41,7 +41,58 @@ import { seedTwoOrganizations } from './two-organizations.js';
 export interface OpenedAccessDatabase {
   readonly executor: SqlExecutor;
   second?(): Promise<SqlExecutor>;
+  readonly doubleRevokeRead?: DoubleRevokeReadDiagnostics;
   close(): Promise<void>;
+}
+
+export interface DoubleRevokeReadSource {
+  readonly executor: SqlExecutor;
+  readonly label: string;
+  summary(): {
+    readonly fields: readonly string[];
+    readonly rows_read?: number;
+  };
+}
+
+export interface DoubleRevokeReadDiagnostics {
+  readonly primary: DoubleRevokeReadSource;
+}
+
+const DOUBLE_REVOKE_READ = {
+  sql: "SELECT revoked_at, last_op_id FROM token WHERE id = 'victim'",
+  params: [],
+} as const;
+
+export async function readDoubleRevoke(
+  executor: SqlExecutor,
+  diagnostics?: DoubleRevokeReadDiagnostics,
+): Promise<{ revoked_at: string; last_op_id: string }[]> {
+  const rows = await executor.all<{ revoked_at: string; last_op_id: string }>(DOUBLE_REVOKE_READ);
+  let message: string | undefined;
+  if (executor.driver === 'd1' && rows.length !== 1 && diagnostics !== undefined) {
+    const summarize = (source: DoubleRevokeReadSource, count: number | null) => {
+      const summary = source.summary();
+      return {
+        executor: source.label,
+        fields: summary.fields,
+        'results.length': count,
+        ...(summary.rows_read === undefined ? {} : { 'meta.rows_read': summary.rows_read }),
+      };
+    };
+    const initial = summarize(diagnostics.primary, rows.length);
+    const reread = async (source: DoubleRevokeReadSource) => {
+      try {
+        const rereadRows = await source.executor.all(DOUBLE_REVOKE_READ);
+        return summarize(source, rereadRows.length);
+      } catch {
+        return { executor: source.label, 'results.length': null };
+      }
+    };
+    const same = await reread({ ...diagnostics.primary, executor });
+    message = JSON.stringify({ initial, same });
+  }
+  expect(rows.length, message).toBe(1);
+  return rows;
 }
 
 type Open = () => Promise<OpenedAccessDatabase>;
@@ -118,6 +169,7 @@ function selector(n: number): string {
 interface World {
   readonly executor: SqlExecutor;
   readonly second: () => Promise<SqlExecutor>;
+  readonly doubleRevokeRead?: DoubleRevokeReadDiagnostics;
   readonly a: OrgContext;
   readonly b: OrgContext;
 }
@@ -231,6 +283,9 @@ async function fixture(
     await executor.batch(statements);
     await body({
       executor,
+      ...(database.doubleRevokeRead === undefined
+        ? {}
+        : { doubleRevokeRead: database.doubleRevokeRead }),
       second: async () =>
         database.second === undefined ? executor : wrap(await database.second()),
       a,
@@ -1738,10 +1793,7 @@ const doubleRevoke: Case = (open, wrap) =>
       const winners = results.filter((result) => result.status === 'revoked');
       expect(winners).toHaveLength(1);
       expect(results.filter((result) => result.status === 'already_revoked')).toHaveLength(1);
-      const rows = await world.executor.all<{ revoked_at: string; last_op_id: string }>(
-        st("SELECT revoked_at, last_op_id FROM token WHERE id = 'victim'"),
-      );
-      expect(rows).toHaveLength(1);
+      const rows = await readDoubleRevoke(world.executor, world.doubleRevokeRead);
       const winner = winners[0];
       if (winner?.status !== 'revoked') throw new Error('one revoke must win');
       expect(rows[0]?.last_op_id).toBe(winner.opId);

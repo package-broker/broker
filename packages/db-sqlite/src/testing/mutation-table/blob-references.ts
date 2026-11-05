@@ -454,7 +454,7 @@ const prematureEntry: MutationEntry = {
     },
     {
       name: 'a tombstoned version counts at its tombstone time',
-      pattern: /bref_v\.status = 'tombstoned'/,
+      pattern: /(?<=CASE WHEN )bref_v\.status = 'tombstoned'/,
       replacement: "bref_v.status = 'none'",
       expected: 2,
       case: prematureCaseOf('tombstoned'),

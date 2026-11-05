@@ -19,6 +19,13 @@ export interface VisibilityRule {
 
 export const PATTERN_ALPHABET = /^[a-z0-9._~@!/*-]+$/;
 
+/** Stored npm keys: lowercase, capitals encoded as `!` plus the lowercase letter. */
+export const STORED_KEY_ALPHABET = /^[a-z0-9._~@!/-]+$/;
+
+export function isStoredKey(key: unknown): key is string {
+  return typeof key === 'string' && key.length <= MAX_KEY_LENGTH && STORED_KEY_ALPHABET.test(key);
+}
+
 export function isValidPattern(pattern: string): boolean {
   return isPatternSyntax(pattern, MAX_PATTERN_BYTES);
 }

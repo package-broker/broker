@@ -294,11 +294,14 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/repositories/catalogue.ts',
   'db-sqlite/src/repositories/closure-edges.ts',
   'db-sqlite/src/repositories/credential.ts',
+  'db-sqlite/src/repositories/discovery-rule-authority.ts',
   'db-sqlite/src/repositories/fetch-lease.ts',
   'db-sqlite/src/repositories/idempotency.ts',
   'db-sqlite/src/repositories/ingest-session.ts',
   'db-sqlite/src/repositories/job-lease-guard.ts',
+  'db-sqlite/src/repositories/npm-vcs-build.ts',
   'db-sqlite/src/repositories/proxy-admission.ts',
+  'db-sqlite/src/repositories/proxy-claims.ts',
   'db-sqlite/src/repositories/registered-name.ts',
   'db-sqlite/src/repositories/session-liveness.ts',
   'db-sqlite/src/repositories/session.ts',
@@ -318,10 +321,12 @@ const REVIEWED_IMPORTS: readonly string[] = [
   'db-sqlite/src/testing/mutation-table/fixtures.ts',
   'db-sqlite/src/testing/mutation-table/harness.ts',
   'db-sqlite/src/testing/node-sqlite-executor.ts',
+  'db-sqlite/src/testing/sql-snapshot.ts',
 ];
 
 // Mutation targets in readers and imported statement builders; no whole-source pins.
 const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
+  'db-sqlite/src/repositories/discovery-rule-authority.ts': '',
   'db-sqlite/src/contract/catalogue-read-contract.ts':
     'DELETE FROM package; DELETE FROM project_package x2; DELETE FROM project_package_pattern; DELETE FROM project_source; DELETE FROM registered_name x2; DELETE FROM version; INSERT INTO blob; INSERT INTO dist_tag; INSERT INTO package; INSERT INTO project x3; INSERT INTO project_package; INSERT INTO project_package_pattern; INSERT INTO project_source; INSERT INTO registered_name x2; INSERT INTO source x2; INSERT INTO version; INSERT INTO version_revision x2; UPDATE package; UPDATE project x3; UPDATE project_package; UPDATE project_source x3; UPDATE source x6; UPDATE version x5; UPDATE version_revision',
   'db-sqlite/src/contract/count-calls.ts': '',
@@ -359,7 +364,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/catalogue-reconcile.ts':
     'INSERT INTO version_revision; UPDATE blob; UPDATE cache_epoch; UPDATE package x9; UPDATE source; UPDATE version x3',
   'db-sqlite/src/repositories/catalogue-write-dist.ts':
-    "updateTable('package'); updateTable('version')",
+    "insertInto('version_readme') [onConflict:doNothing]; updateTable('package'); updateTable('version')",
   'db-sqlite/src/repositories/catalogue-write-package.ts':
     "insertInto('package') [onConflict:doNothing]; updateTable('package')",
   'db-sqlite/src/repositories/catalogue-write-tags.ts':
@@ -390,13 +395,16 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     "deleteFrom('credential'); insertInto('credential'); updateTable('local_login') x3",
   'db-sqlite/src/repositories/local-login-success.ts':
     "updateTable('local_login') x2; updateTable('session')",
+  'db-sqlite/src/repositories/npm-vcs-build.ts':
+    "insertInto('npm_vcs_build_outcome') [onConflict:doNothing]; insertInto('npm_vcs_build_outcome') [onConflict:doUpdateSet]; updateTable('npm_vcs_build_outcome')",
   'db-sqlite/src/repositories/project.ts':
     "insertInto('access_grant'); insertInto('project'); updateTable('project') x2",
   'db-sqlite/src/repositories/provider-binding.ts':
     "deleteFrom('identity'); deleteFrom('session'); deleteFrom('user_group'); insertInto('identity_block') [onConflict:doNothing]; updateTable('identity_provider_binding'); updateTable('token')",
   'db-sqlite/src/repositories/proxy-admission.ts': '',
+  'db-sqlite/src/repositories/proxy-claims.ts': '',
   'db-sqlite/src/repositories/registered-name.ts':
-    "deleteFrom('registered_name'); insertInto('registered_name'); updateTable('source') x2",
+    "DELETE FROM source_discovery_admission; deleteFrom('registered_name'); insertInto('registered_name'); updateTable('registered_name'); updateTable('source') x2",
   'db-sqlite/src/repositories/session-liveness.ts': '',
   'db-sqlite/src/repositories/session.ts':
     "deleteFrom('session'); insertInto('session'); updateTable('session') x6",
@@ -405,7 +413,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
   'db-sqlite/src/repositories/source-selection-revision.ts': '',
   'db-sqlite/src/repositories/source-selection.ts': '',
   'db-sqlite/src/repositories/source.ts':
-    "DELETE FROM source_sync_package; deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x9",
+    "DELETE FROM source_sync_package; INSERT INTO source_discovery_admission; deleteFrom('project_package_pattern'); deleteFrom('project_source'); deleteFrom('source'); insertInto('source'); updateTable('source') x10",
   'db-sqlite/src/repositories/upstream-state.ts':
     "insertInto('upstream_state') [onConflict:doUpdateSet]; updateTable('upstream_state') x2",
   'db-sqlite/src/repositories/visibility-attach.ts':
@@ -435,6 +443,7 @@ const REVIEWED_TARGETS: Readonly<Record<string, string>> = {
     'INSERT INTO access_grant; INSERT INTO identity; INSERT INTO identity_provider_binding x2; INSERT INTO package; INSERT INTO project; INSERT INTO role; INSERT INTO role_permission; INSERT INTO session x2; INSERT INTO source; INSERT INTO user_account x2; INSERT INTO version',
   'db-sqlite/src/testing/mutation-table/harness.ts': '',
   'db-sqlite/src/testing/node-sqlite-executor.ts': '',
+  'db-sqlite/src/testing/sql-snapshot.ts': '',
   'runtime-cloudflare/src/db/d1-executor.ts': '',
 };
 
@@ -465,8 +474,12 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'dist_tag(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'package_access_request(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'package_access_request(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_package(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_package(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'upstream_state(package_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'version(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'version(package_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
@@ -485,8 +498,12 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'project_package_pattern(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_source(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'project_source(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'registered_name(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'registered_name(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_discovery_admission(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'source_discovery_admission(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'source_sync_package(source_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'webhook_delivery(source_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
   ],
@@ -498,6 +515,12 @@ const REVIEWED_PARENTS: Readonly<Record<string, readonly string[]>> = {
     'dist_tag_history(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(previous_version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'dist_tag_history(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'npm_vcs_build_outcome(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'npm_vcs_build_outcome(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'publish_approval(org_id) -> (org_id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'publish_approval(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
+    'version_readme(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
+    'version_readme(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'version_revision(version_id) -> (id): ON DELETE NO ACTION; ON UPDATE NO ACTION',
     'vulnerability_result(org_id) -> (org_id): ON DELETE CASCADE; ON UPDATE NO ACTION',
     'vulnerability_result(version_id) -> (id): ON DELETE CASCADE; ON UPDATE NO ACTION',
@@ -668,9 +691,32 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
   [
     {
       reason:
+        'Static capacity classifications are action names, not executed SQL; they never read driver changes metadata.',
+      sites: [
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'discovery_rule.delete' #1",
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'registry_policy.update' #1",
+        "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'notification.delete' #1",
+      ],
+    },
+    {
+      reason:
         'Loads the effective transition suite; persistence counts RETURNING rows without changes metadata.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-effective-suite.js') #1",
+      ],
+    },
+
+    {
+      reason:
+        'Discovery admission writes add only a cascading ownership row; SELECT-only ownership and credential guards and type imports do not inspect executor row counts. Contracts cover lease recovery and deletion refusal.',
+      sites: [
+        "db-sqlite/src/kysely.ts:opaque dependency: import {\n  fenceGuard,\n  runFenced,\n  type FailureProbes,\n  type FencedOutcome,\n  type FenceGuard,\n  type MutationFence,\n  type TokenMutationFence,\n  type DiscoveryRuleFence,\n} from '@package-broker/core/authz/fence'; #1",
+        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n          executor,\n          db\n            .deleteFrom('credential')\n            .where('org_id', '=', ctx.orgId)\n            .where('id', '=', id)\n            .returning('id'),\n        ); #1",
+        "db-sqlite/src/repositories/credential.ts:SQL input: sql: 'select 1 from source_discovery_rule where org_id=? and credential_id=? limit 1' #1",
+        'db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`exists(select 1 from source_discovery_admission da join source_discovery_rule dr\n    on dr.org_id=da.org_id and dr.id=da.rule_id where da.org_id=${ctx.orgId} and da.source_id=${sourceId}\n    and da.rule_id=${fence.ruleId})` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`(${held} and ${discoverySourceOwned(ctx, fence, discoverySourceId ?? '')} and exists(select 1 from source ds\n      where ds.org_id=${ctx.orgId} and ds.id=${discoverySourceId ?? ''} and ds.project_id is null\n        and ds.type='vcs' and ds.status='paused' and ds.credential_id=${fence.credentialId}\n        and json_extract(ds.config_json,'$.provider')='github'\n        and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))` #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          ...assertCheck(claimsVerified),\n          insert,\n          ...('ruleId' in fence\n            ? [\n                compile({\n                  compile: () =>\n                    sql`insert into source_discovery_admission(org_id,source_id,rule_id,run_started_at)\n            select ${ctx.orgId},${input.id},${fence.ruleId},last_run_at from source_discovery_rule where org_id=${ctx.orgId} and id=${fence.ruleId}`.compile(\n                      db,\n                    ),\n                }),\n              ]\n            : []),\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`(${authorized} and ${discoverySourceOwned(ctx, fence, input.id)} and exists(select 1 from source ds\n        where ds.org_id=${ctx.orgId} and ds.id=${input.id} and ds.status='paused'\n          and ds.project_id is null and ds.type='vcs' and ds.credential_id=${fence.credentialId}\n          and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))` #1",
       ],
     },
     {
@@ -680,11 +726,33 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-alert-ack.js') #1",
       ],
     },
+
+    {
+      reason:
+        'Management fixtures load the existing Node codec and index contract-case names; unpublish enumerates public dist-tags to record history. These operations do not inspect SQL affected-row counts.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n          new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n        ) #1",
+        'db-sqlite/src/repositories/npm-unpublish.ts:opaque object access: Object.entries(snapshot.tags) #1',
+        'db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: writeCases[index] #1',
+        "db-sqlite/src/testing/mutation-table/npm-management-cases.ts:unresolved computed access: ['p', 's', 'v'][index] #1",
+      ],
+    },
     {
       reason:
         'Loads the shared cutover persistence suite; registration counts RETURNING rows and never executor changes metadata.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-cutover-suite.js') #1",
+      ],
+    },
+
+    {
+      reason:
+        'Discovery rule authority imports and SELECT-only guards introduce no executor changes reads or mutation targets; exact predicates are contract and mutation tested.',
+      sites: [
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:opaque dependency: import {\n  fenceKind,\n  type DiscoveryRuleFence,\n  type SourceMutationFence,\n} from '@package-broker/core/authz/fence'; #1",
+        "db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`exists (\n    select 1 from source_discovery_rule dr\n    join credential dc on dc.org_id = dr.org_id and dc.id = dr.credential_id\n    join job dj on dj.org_id = dr.org_id\n    where dr.org_id = ${ctx.orgId} and dr.id = ${fence.ruleId}\n      and dr.revision = ${fence.revision} and dr.enabled = 1\n      and dr.credential_id = ${fence.credentialId} and dr.installation_id = ${fence.installationId}\n      and dc.kind = 'github_app' and dc.project_id is null\n      and dj.id = ${fence.job.id} and dj.lease_owner = ${fence.job.owner}\n      and dj.fence = ${fence.job.fence} and dj.state = 'running'\n      and dj.lease_until > strftime('%Y-%m-%dT%H:%M:%fZ','now')\n      and dj.type = 'core:discovery-rule:v1'\n      and dj.resource_key = ${`discovery-rule:${fence.ruleId}`}\n      and json_extract(dj.payload_json, '$.ruleId') = dr.id\n      and json_extract(dj.payload_json, '$.revision') = dr.revision)` #1",
+        'db-sqlite/src/repositories/discovery-rule-authority.ts:SQL template: sql<SqlBool>`0` #1',
       ],
     },
     {
@@ -699,11 +767,37 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-api-export-suite.js') #1",
       ],
     },
+
+    {
+      reason:
+        'Registry policy D1 contracts load Miniflare and the Workers executor at run time, the migration contract builds rows by column name and walks a constant digest table, and the rule update maps validated patch fields to their columns; none reads executor affected-row counts.',
+      sites: [
+        "db-sqlite/src/contract/d1-open.ts:dynamic dependency: import(require.resolve('miniflare')) #1",
+        'db-sqlite/src/contract/d1-open.ts:dynamic dependency: import(module) #1',
+        'db-sqlite/src/contract/policy-migration.ts:unresolved computed access: row[column] #1',
+        'db-sqlite/src/contract/policy-migration.ts:opaque object access: Object.entries(FROZEN) #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: rule[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: patch[field] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: set[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: fields[COLUMNS[field]] #1',
+        'db-sqlite/src/repositories/registry-policy-update.ts:unresolved computed access: COLUMNS[field] #1',
+      ],
+    },
     {
       reason:
         'Maps ledger kinds to fixed alert code strings; this lookup contains no executor result or change metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-health.ts:unresolved computed access: LEDGER_ALERT_CODES[kind] #1',
+      ],
+    },
+
+    {
+      reason:
+        'Publisher snapshot traversal pairs validated audit restriction values with their prior values; the contract traverses expected restrictions. None reads executor affected-row counts.',
+      sites: [
+        'db-sqlite/src/contract/trusted-publishers-contract.ts:opaque object access: Object.entries(values) #1',
+        'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(after) #1',
+        'db-sqlite/src/repositories/trusted-publishers.ts:unresolved computed access: old[field as keyof typeof old] #1',
       ],
     },
     {
@@ -714,11 +808,27 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/audit-fork.ts:unresolved computed access: results[sinkUpdateIndex] #1',
       ],
     },
+
+    {
+      reason:
+        'The SQL builder import constructs typed statements; it does not read executor changes counts.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+      ],
+    },
     {
       reason:
         'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(fields) #1',
+      ],
+    },
+
+    {
+      reason:
+        'The publisher page cursor comes from the last returned row of a bounded SELECT with one-row lookahead; it does not inspect executor affected-row metadata.',
+      sites: [
+        'db-sqlite/src/repositories/trusted-publishers.ts:unresolved computed access: rows[limit - 1] #1',
       ],
     },
     {
@@ -728,11 +838,33 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(chain) #1',
       ],
     },
+
+    {
+      reason:
+        'Source revision and hosted approval guards read org-scoped rows and leave referenced keys unchanged.',
+      sites: [
+        'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId}\n        and id = ${input.id} and revision = ${input.expectedRevision ?? current.revision})` #1',
+        'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`1` #2',
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId} and id = ${input.id}\n            and type = 'hosted' and ecosystem = 'npm')` #1",
+      ],
+    },
     {
       reason:
         'Enumerates constant SQL column mappings to build SELECT, CAS and UPDATE expressions; these objects contain no executor result metadata.',
       sites: [
         'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #1',
+      ],
+    },
+
+    {
+      reason:
+        'Build eligibility and retry-generation predicates read organization-scoped rows only; they neither write nor consume D1 changes counts.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<number>`coalesce((select retry_generation from npm_vcs_build_outcome as bo where bo.org_id = ${ctx.orgId} and bo.version_id = nv.id and bo.source_ref = nv.source_ref and bo.packing_policy = ${input.packingPolicy ?? 'npm-pack-v1'}), 0)` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<boolean>`nv.dist_type = 'tgz' AND nv.source_ref IS NOT NULL` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<boolean>`NOT EXISTS (SELECT 1 FROM npm_vcs_build_outcome AS terminal WHERE terminal.org_id = ${ctx.orgId} AND terminal.version_id = nv.id AND terminal.source_ref = nv.source_ref AND terminal.packing_policy = ${input.packingPolicy ?? 'npm-pack-v1'} AND terminal.outcome IS NOT NULL)` #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<SqlBool>`EXISTS (SELECT 1 FROM version AS ov\n        JOIN package AS op ON op.id = ov.package_id AND op.org_id = ${ctx.orgId}\n        JOIN source AS os ON os.id = op.source_id AND os.org_id = ${ctx.orgId}\n        WHERE ov.org_id = ${ctx.orgId} AND ov.id = ${input.versionId}\n          AND op.id = ${input.packageId} AND os.id = ${input.sourceId}\n          AND ov.source_ref = ${input.sourceRef} AND ov.status = 'active'\n          AND os.status = 'active' AND os.type = 'vcs' AND os.ecosystem = 'npm'\n          AND coalesce((SELECT retry_generation FROM npm_vcs_build_outcome AS fence_outcome\n            WHERE fence_outcome.org_id = ${ctx.orgId} AND fence_outcome.version_id = ov.id\n              AND fence_outcome.source_ref = ${input.sourceRef} AND fence_outcome.packing_policy = ${input.packingPolicy}), 0) = ${input.retryGeneration})` #1",
+        'db-sqlite/src/repositories/npm-vcs-build.ts:SQL template: sql<number>`retry_generation + 1` #1',
       ],
     },
     {
@@ -742,11 +874,31 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/audit-fork.ts:opaque object access: Object.entries(sink) #2',
       ],
     },
+
+    {
+      reason:
+        'Build-outcome upserts preserve all organization, version, commit and policy keys, changing only the outcome under the lease and retry fences; no changes count is read.',
+      sites: [
+        "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome: null,\n            })\n            .onConflict((oc) =>\n              oc.columns(['org_id', 'version_id', 'source_ref', 'packing_policy']).doNothing(),\n            ) #1",
+        "db-sqlite/src/repositories/npm-vcs-build.ts:conflict action: db\n            .insertInto('npm_vcs_build_outcome')\n            .values({\n              org_id: ctx.orgId,\n              version_id: input.versionId,\n              source_ref: input.sourceRef!,\n              packing_policy: input.packingPolicy!,\n              retry_generation: input.retryGeneration!,\n              outcome,\n            })\n            .onConflict((oc) =>\n              oc\n                .columns(['org_id', 'version_id', 'source_ref', 'packing_policy'])\n                .doUpdateSet({ outcome }),\n            ) #1",
+      ],
+    },
     {
       reason:
         'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
       sites: [
         'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected) #1',
+      ],
+    },
+
+    {
+      reason:
+        'Mutation-table indexes and entry metadata refer to contract cases and SQL decision registrations, never SQL result counts.',
+      sites: [
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: cases[3 + index] #1',
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: outcomeCases[index] #1',
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: retryCases[index] #1',
+        "db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:opaque object access: Object.assign(outcomeEntry, {\n  sqlDecisions: [\n    {\n      name: 'immutable commit fence',\n      pattern: /ov\\.source_ref = \\?/,\n      replacement: '? IS NOT NULL',\n      expected: 1,\n      case: staleBuildCase('commit'),\n    },\n    {\n      name: 'deliberate retry generation fence',\n      pattern: /\\), 0\\) = \\?/,\n      replacement: '), 0) >= ?',\n      expected: 1,\n      case: staleBuildCase('retry'),\n    },\n  ],\n}) #1",
       ],
     },
     {
@@ -756,11 +908,32 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: expect(\n          await port.save(\n            org,\n            {\n              ...expected,\n              [key]:\n                typeof value === 'number'\n                  ? value + 1\n                  : typeof value === 'boolean'\n                    ? !value\n                    : 'moved',\n            },\n            [],\n            change,\n            2,\n          ),\n          key,\n        ).toBe(false); #1",
       ],
     },
+
+    {
+      reason:
+        'These typed guards classify a refused publisher write; the result probe reads the selected failed flag, never executor changes.',
+      sites: [
+        'db-sqlite/src/repositories/trusted-publishers.ts:opaque object access: Object.entries(checks) #1',
+      ],
+    },
     {
       reason:
         'Enumerates or alters SELECT snapshot fields to test complete CAS rejection; the snapshot contains no executor change metadata.',
       sites: [
         'db-sqlite/src/testing/audit-fork-suite.ts:opaque object access: Object.entries(expected.sinks[0]!) #1',
+      ],
+    },
+
+    {
+      reason:
+        'The default enqueue condition is a constant true predicate; it performs no write and cannot affect a changes count.',
+      sites: ['db-sqlite/src/repositories/job.ts:SQL template: sql`1` #1'],
+    },
+    {
+      reason:
+        'Candidate reports check the package-sync or build payload source under a live job lease and set last_error without changing poll failures; no executor change metadata is read.',
+      sites: [
+        "db-sqlite/src/repositories/source.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM job\n          WHERE id=${guard.id} AND org_id=${ctx.orgId}\n          AND type=${pack ? 'core:npm-vcs-build:v1' : 'core:package-sync:v1'} AND json_extract(payload_json, '$.sourceId')=${input.id})` #1",
       ],
     },
     {
@@ -770,12 +943,34 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/audit-fork-suite.ts:unresolved computed key: const moved = {\n          ...expected.sinks[0]!,\n          [key]:\n            typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : 'moved',\n        }; #1",
       ],
     },
+
+    {
+      reason:
+        'The contract dispatches three named status writers and asserts their typed outcomes; the imported purge constant is a numeric retention interval. Neither site reads executor change counts.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:computed builder call: store[method](ctx, h.fence, {\n              ...base,\n              ...(method === 'tombstoneVersion'\n                ? { tombstoneReason: 'retired', expectedRevision: current!.revision }\n                : {}),\n              audit: { ...h.input.event, id: ulid() },\n              expectedStatus,\n              reason: method === 'quarantineVersion' ? 'admin_quarantine' : 'admin_tombstone',\n            } as never) #1",
+        "db-sqlite/src/repositories/blob-references.ts:opaque dependency: import { PUBLISH_PURGE_WINDOW_DAYS } from '@package-broker/core/db/publishes'; #1",
+      ],
+    },
     {
       reason:
         'Loads the shared fork persistence suite for Node and D1 tests; no executor change counts are read.',
       sites: [
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-fork-suite.js') #1",
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-backpressure-suite.js') #1",
+      ],
+    },
+
+    {
+      reason:
+        'Token lookup composes a typed read condition; blob publication uses returned rows and a transactional before-image for cleanup; tag lookup selects active patch targets. None reads executor change counts.',
+      sites: [
+        "db-sqlite/src/repositories/access.ts:SQL template: sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}` #1",
+        'db-sqlite/src/repositories/blob.ts:builder variable: const [before, written, current] = await executor.batch([\n        statement(previous),\n        statement(upsert),\n        statement(existing),\n      ]); #1',
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`version.status = 'active'` #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`version.status != 'tombstoned'` #1",
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND ${live})` #1',
+        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`NOT EXISTS (SELECT 1 FROM json_each(${JSON.stringify(\n            valid.map(([, target]) => target),\n          )}) AS wanted WHERE NOT EXISTS (SELECT 1 FROM version\n            WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n              AND version.version_normalized = wanted.value AND ${live}))` #1',
       ],
     },
     {
@@ -788,6 +983,20 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Sets each named nullable export snapshot field to null to exercise CAS rejection; the computed key never accesses executor metadata.',
       sites: [
         'db-sqlite/src/testing/audit-export-suite.ts:unresolved computed key: expect(\n          await port().save(\n            org(),\n            fence(),\n            { ...current, sink: { ...current.sink, [key]: null } },\n            before.sink,\n            1,\n          ),\n          key,\n        ).toBe(false); #1',
+      ],
+    },
+
+    {
+      reason:
+        'Publish authorization and batch assembly use prepared statement parameters and metadata records; these sites neither inspect executor changes nor infer success from change counts. Held-package filtering and tag patching preserve the existing returned-row decisions.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:opaque object access: Object.assign(input.version, {\n              metadata: {\n                ...input.version.metadata,\n                json: JSON.stringify({ name: 'widget', description: 'x'.repeat(262144) }),\n              },\n            }) #1",
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.package, 'held_until_active')} = 0 and\n    exists (\n      select 1 from project as ${sql.id(a.p)}\n      where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'\n    )\n    and (\n      ${status} = 'active'\n      or (${status} = 'removed_upstream' and ${at(pkg.source, 'removal_policy')} = 'flag')\n    )\n  )` #1",
+        'db-sqlite/src/repositories/catalogue-publish.ts:opaque object access: Object.entries(input.distTags) #1',
+        'db-sqlite/src/repositories/catalogue-publish.ts:opaque object access: Object.entries(a.distTags) #1',
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL text: 'replace' #1",
+        "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    ...(request.mode === 'patch' ? [] : [[removeHistory, remove]]),\n    [advance],\n  ]; #1",
+        'db-sqlite/src/repositories/package-admin-read.ts:object rest access: ...version #1',
       ],
     },
     {
@@ -840,6 +1049,19 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/migrated-database.ts:dynamic dependency: import('./audit-ledger-suite.js') #1",
       ],
     },
+
+    {
+      reason:
+        'Hosted-claim preflight adds only scoped SELECT predicates and a constant guard; no changes() reads or mutation targets. The names import is a Unicode character filter and Kysely builds the reviewed predicate.',
+      sites: [
+        "db-sqlite/src/repositories/project.ts:opaque dependency: import { FORBIDDEN_NAME_CHARACTERS } from '@package-broker/core/catalogue/names'; #1",
+        "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { sql, type SqlBool } from 'kysely'; #1",
+        "db-sqlite/src/repositories/proxy-claims.ts:opaque dependency: import { MAX_VERIFIED_CLAIMS_BYTES } from '@package-broker/core/sources/proxy-claims'; #1",
+        'db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`0` #1',
+        "db-sqlite/src/repositories/proxy-claims.ts:SQL template: sql<SqlBool>`not exists (\n    select 1 from registered_name as proxy_claim\n    join source as claim_owner on claim_owner.id = proxy_claim.source_id\n      and claim_owner.org_id = ${ctx.orgId}\n    where proxy_claim.org_id = ${ctx.orgId}\n      and claim_owner.ecosystem = 'npm'\n      and proxy_claim.ecosystem = 'npm' and instr(proxy_claim.pattern, '*') = 0\n      and proxy_claim.pattern not in (select value from json_each(${proof})))` #1",
+        'db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`1` #1',
+      ],
+    },
     {
       reason:
         'These fixed source-error lookups read JSON counter values, never executor change metadata.',
@@ -865,7 +1087,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/source.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
         "db-sqlite/src/repositories/job.ts:opaque dependency: import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
         "db-sqlite/src/repositories/source.ts:SQL template: sql<SqlBool>`exists (select 1 from source\n        where org_id = ${ctx.orgId} and id = ${input.id} and status <> 'paused')` #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx, sql<SqlBool>`${isProxy(current.type) ? 1 : 0}`),\n        [\n          ...assertCheck(active),\n          compile(\n            db\n              .updateTable('source')\n              .set({ next_poll_at: DB_NOW, updated_at: DB_NOW })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('status', '!=', 'paused'),\n          ),\n          npmVcsBuildRetryStatement(ctx, input.id),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        { authority: probe(held, true), conflict: probe(collision, false) },\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'requested'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority' || outcome.reason === 'indeterminate')\n        return failureResult(ctx, input.id, outcome.reason); #1",
       ],
@@ -1056,13 +1278,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'Add batch prepends an org-scoped visibility check; remaining writes are inserts, and no result count is read.',
-      sites: [
-        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          ...assertCheck(visible),\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
-      ],
-    },
-    {
-      reason:
         'Remove batch prepends a visibility check; the tail-relative count still selects the source status update, whose referenced keys are unchanged.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(visible),\n          compile(\n            db\n              .deleteFrom('registered_name')\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId),\n          ),\n          pause,\n          auditPendingStatement(ctx, input.pauseAudit, { sql: 'changes() = 1', params: [] }),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(liveIdempotencyCollision(ctx, input.idempotency), false),\n        },\n      ); #1",
@@ -1099,6 +1314,50 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Org-scoped source/project visibility SELECT used by the batch guard; it performs no mutation or count read.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as visible_source\n    where visible_source.id = ${sourceId} and visible_source.org_id = ${ctx.orgId}\n      and (visible_source.project_id is null or exists (\n        select 1 from project as visible_project\n        where visible_project.id = visible_source.project_id\n          and visible_project.org_id = ${ctx.orgId} and visible_project.status = 'active')))` #1",
+      ],
+    },
+    {
+      reason: 'Binds fixture column values for migration INSERTs; reads no executor count.',
+      sites: [
+        'db-sqlite/src/contract/notification-migration-contract.ts:opaque object access: Object.values(values) #1',
+        'db-sqlite/src/contract/discovery-rules-migration-contract.ts:opaque object access: Object.values(values) #1',
+      ],
+    },
+    {
+      reason:
+        'Notification fixtures and mutation entries build audit fields, twin rows and locator lists; they read no executor count.',
+      sites: [
+        'db-sqlite/src/contract/notification-delivery-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/contract/notification-prepare-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-prepare.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-attempt.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.entries(GUARDS) #1',
+        'db-sqlite/src/testing/mutation-table/notification-dispatch.ts:opaque object access: Object.values(LOCATORS) #1',
+        'db-sqlite/src/contract/notification-retention-contract.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.entries(fields) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.values(copy) #1',
+        'db-sqlite/src/testing/mutation-table/notification-retention.ts:opaque object access: Object.values(LOCATORS) #1',
+      ],
+    },
+    {
+      reason:
+        'Writers take returned rows by the index they recorded for the statement; mutation entries list locators. None reads executor change counts.',
+      sites: [
+        'db-sqlite/src/repositories/catalogue-publish.ts:unresolved computed access: results[index] #1',
+        'db-sqlite/src/repositories/notification-attempt.ts:unresolved computed access: results?.[head.length] #1',
+        'db-sqlite/src/testing/mutation-table/notification-capture.ts:opaque object access: Object.values(OVERFLOW_LOCATORS) #1',
+      ],
+    },
+    {
+      reason:
+        'Reads the previous target of a dist-tag from the package snapshot map; no executor count.',
+      sites: [
+        'db-sqlite/src/repositories/npm-dist-tags.ts:unresolved computed access: snapshot.tags[tag] #1',
       ],
     },
     {
@@ -1243,6 +1502,16 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'Publish integration fixtures load fixed Node codec, filesystem byte-store and tar fixture modules; these modules do not read SQL result changes.',
+      sites: [
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'codec/node-codec.ts', import.meta.url).href\n      ) #1",
+        "db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(\n        new URL(runtime + 'blob/filesystem.ts', import.meta.url).href\n      ) #1",
+        'db-sqlite/src/contract/npm-publish-writer-contract.ts:dynamic dependency: import(new URL(core, import.meta.url).href) #1',
+        'db-sqlite/src/contract/npm-publish-adversarial.ts:dynamic dependency: import(new URL(runtime, import.meta.url).href) #1',
+      ],
+    },
+    {
+      reason:
         'Codec contract deliberately imports its runtime adapter; fixture dependency boundary is manually reviewed.',
       sites: [
         'db-sqlite/src/contract/codec-contract.ts:dynamic dependency: import(/* @vite-ignore */ url) #1',
@@ -1304,8 +1573,13 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
-        'Object introspection in migration-contract; domain/fixture values are reviewed as possible indirect count access.',
+        'Object introspection and computed keys in migration contracts contain scalar fixture values, not executor mutation results.',
       sites: [
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:unresolved computed access: before[index] #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.entries(source!) #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.values(values) #1',
+        'db-sqlite/src/contract/npm-publish-migration-contract.ts:opaque object access: Object.values(columns) #1',
+        "db-sqlite/src/contract/npm-publish-migration-contract.ts:unresolved computed key: await expect(\n              insert(executor, table, { ...base, [column]: `other-${parent}` }),\n            ).rejects.toMatchObject({ kind: 'foreign_key' }); #1",
         'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #1',
         'db-sqlite/src/contract/migration-contract.ts:opaque object access: Object.values(values) #2',
       ],
@@ -1615,11 +1889,20 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
     },
     {
       reason:
+        'SSO bootstrap selects grant insert/promotion and permission top-up results; rowsOf counts RETURNING rows, excluding trigger and FK-action writes.',
+      sites: [
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[results.length - 1] #2',
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[results.length - 2] #1',
+        'db-sqlite/src/repositories/admin-bootstrap.ts:unresolved computed access: results[guards.length + topUp.length - 1] #1',
+      ],
+    },
+    {
+      reason:
         'SQL in audit-pending; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         'db-sqlite/src/repositories/audit-pending.ts:SQL text: `INSERT INTO audit_pending\n  (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,\n   action, target_type, target_id, project_id, payload_json)` #1',
         "db-sqlite/src/repositories/audit-pending.ts:SQL text: 'audit insert must bind at most 100 parameters' #1",
-        "db-sqlite/src/repositories/audit-pending.ts:SQL input: sql: `${INSERT}\n    SELECT pending_id, pending_org_id, ${createdAt}, pending_actor_type, pending_actor_id, pending_token_selector, pending_source_ip,\n      pending_action, pending_target_type, pending_target_id, pending_project_id, pending_payload_json\n    FROM (\n      SELECT ? AS pending_id, ? AS pending_org_id, ? AS pending_created_at, ? AS pending_actor_type, ? AS pending_actor_id,\n        ? AS pending_token_selector, ? AS pending_source_ip, ? AS pending_action, ? AS pending_target_type,\n        ? AS pending_target_id, ? AS pending_project_id, ? AS pending_payload_json\n    ) AS input${when === undefined ? '' : ` WHERE ${when.sql}`}` #1",
+        "db-sqlite/src/repositories/audit-pending.ts:SQL input: sql: `${INSERT}\n    SELECT pending_id, pending_org_id, ${createdAt}, pending_actor_type, pending_actor_id, pending_token_selector, pending_source_ip,\n      pending_action, pending_target_type, pending_target_id, pending_project_id, pending_payload_json\n    FROM (\n      SELECT ? AS pending_id, ? AS pending_org_id, ? AS pending_created_at, ? AS pending_actor_type, ? AS pending_actor_id,\n        ? AS pending_token_selector, ? AS pending_source_ip, ? AS pending_action, ? AS pending_target_type,\n        ? AS pending_target_id, ? AS pending_project_id, ${payload} AS pending_payload_json\n    ) AS input${when === undefined ? '' : ` WHERE ${when.sql}`}` #1",
       ],
     },
     {
@@ -1650,9 +1933,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'SQL in blob-references; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${orphanSql(blobRef)}\n    AND ${blobRef}.refetchable = 1\n    AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')\n    AND NOT EXISTS (\n      SELECT 1 FROM ingest_session bref_ing\n      WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)\n    AND NOT EXISTS (\n      SELECT 1 FROM upstream_state bref_up\n      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))` #1",
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel\n    WHERE bref_rel.rel <> ''\n    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) || ' days'), '${NEVER}'))` #1",
-        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted'`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${orphanSql(blobRef)}\n    AND (${blobRef}.refetchable = 1 OR (${blobRef}.refetchable = 0 AND ${blobRef}.storage_key LIKE 'npm-publish/%'))\n    AND julianday(COALESCE(${blobRef}.published_at, ${blobRef}.created_at)) <= julianday('now', '-${ORPHAN_GRACE_DAYS} days')\n    AND NOT EXISTS (\n      SELECT 1 FROM ingest_session bref_ing\n      WHERE bref_ing.org_id = ${blobRef}.org_id AND bref_ing.snapshot_blob_sha256 = ${blobRef}.sha256)\n    AND NOT EXISTS (\n      SELECT 1 FROM upstream_state bref_up\n      WHERE bref_up.org_id = ${blobRef}.org_id AND bref_up.content_sha256 = ${blobRef}.sha256))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `EXISTS (SELECT 1 FROM (${references(blobRef, columns, () => '')}) bref_rel\n    WHERE bref_rel.rel <> ''\n    AND ${blobRef}.purge_after < COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', bref_rel.rel, '+' || CASE WHEN bref_rel.rejected_hosted THEN ${PUBLISH_PURGE_WINDOW_DAYS} ELSE max((SELECT o.retention_removed_upstream_days FROM organization o WHERE o.id = ${blobRef}.org_id), bref_rel.ov) END || ' days'), '${NEVER}'))` #1",
+        "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `(${blobRef}.org_id = ?\n  AND ((EXISTS (${references(blobRef, '1', (c) => `AND ${c}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND NOT ${released(c)}`)})\n  AND NOT EXISTS (${references(blobRef, '1', (c) => `AND ${c} AND bref_s.type = 'hosted' AND NOT ((${REJECTED_HOSTED}) OR (${UNPUBLISHED_HOSTED}))`)}))\n  OR ${orphan.sql})\n  AND NOT EXISTS (\n    SELECT 1 FROM import_run bref_ru CROSS JOIN import_ref bref_ir INDEXED BY import_ref_run_external\n      ON bref_ir.import_run_id = bref_ru.id AND bref_ir.org_id = bref_ru.org_id\n    WHERE bref_ru.org_id = ${blobRef}.org_id\n      AND (bref_ru.before_image_expires_at IS NULL OR bref_ru.before_image_expires_at > ${NOW})\n      AND bref_ir.entity_type = 'version'\n      AND json_extract(bref_ir.before_image_json, '$.blob_id') = ${blobRef}.id))` #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: '' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: 'AND (b.created_at, b.id) > (?, ?)' #1",
         "db-sqlite/src/repositories/blob-references.ts:SQL input: sql: `SELECT b.id, b.sha256, b.created_at, ${overrideSql('b')} AS override_days, ${orphanSql('b')} AS orphan\nFROM blob b\nWHERE ${eligible.sql} AND NOT ${missingReleaseStampSql('b')} AND b.purge_after IS NULL AND b.deleted_at IS NULL ${cursor.sql}\nORDER BY b.created_at, b.id\nLIMIT ?` #1",
@@ -1696,8 +1979,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/blob.ts:builder variable: const bump = db\n        .updateTable('blob')\n        .set({ purge_generation: FRESH, purge_lease_until: null })\n        .where('org_id', '=', ctx.orgId)\n        .where('sha256', '=', sha256)\n        .where(sql<SqlBool>`not ${leaseLive('purge_lease_until')}`)\n        .returning('purge_generation'); #1",
         'db-sqlite/src/repositories/blob.ts:builder variable: const [bumped, fresh] = await executor.batch([statement(bump), statement(probe)]); #1',
-        "db-sqlite/src/repositories/blob.ts:builder variable: const upsert = db\n        .insertInto('blob')\n        .values({\n          id: FRESH,\n          org_id: ctx.orgId,\n          sha256,\n          size_bytes: input.size,\n          storage_key: blobStorageKey(ctx.orgId, sha256),\n          media_type: input.mediaType,\n          refetchable: input.refetchable ? 1 : 0,\n          purge_generation: input.generation,\n          published_at: NOW,\n        })\n        .onConflict((conflict) =>\n          conflict\n            .columns(['org_id', 'sha256'])\n            .doUpdateSet({\n              published_at: NOW,\n              refetchable: sql<number>`case when blob.deleted_at is not null then excluded.refetchable else min(blob.refetchable, excluded.refetchable) end`,\n              upstream_url: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.upstream_url else blob.upstream_url end`,\n              last_fetched_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_fetched_at else blob.last_fetched_at end`,\n              last_accessed_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_accessed_at else blob.last_accessed_at end`,\n              purge_lease_until: null,\n              size_bytes: sql<number>`excluded.size_bytes`,\n              media_type: sql<string>`excluded.media_type`,\n              storage_key: sql<string>`excluded.storage_key`,\n              purge_after: null,\n              deleted_at: null,\n            })\n            .where(\n              sql<SqlBool>`blob.purge_generation = excluded.purge_generation and not ${leaseLive('blob.purge_lease_until')} and (blob.deleted_at is not null or (blob.size_bytes = excluded.size_bytes and blob.media_type = excluded.media_type))`,\n            ),\n        )\n        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation']); #1",
-        'db-sqlite/src/repositories/blob.ts:builder variable: const [written, current] = await executor.batch([statement(upsert), statement(existing)]); #1',
+        "db-sqlite/src/repositories/blob.ts:builder variable: const upsert = db\n        .insertInto('blob')\n        .values({\n          id: FRESH,\n          org_id: ctx.orgId,\n          sha256,\n          size_bytes: input.size,\n          storage_key: storageKey,\n          media_type: input.mediaType,\n          refetchable: input.refetchable ? 1 : 0,\n          purge_generation: input.generation,\n          published_at: NOW,\n        })\n        .onConflict((conflict) =>\n          conflict\n            .columns(['org_id', 'sha256'])\n            .doUpdateSet({\n              published_at: NOW,\n              refetchable: sql<number>`case when blob.deleted_at is not null then excluded.refetchable else min(blob.refetchable, excluded.refetchable) end`,\n              upstream_url: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.upstream_url else blob.upstream_url end`,\n              last_fetched_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_fetched_at else blob.last_fetched_at end`,\n              last_accessed_at: sql<\n                string | null\n              >`case when blob.deleted_at is not null then excluded.last_accessed_at else blob.last_accessed_at end`,\n              purge_lease_until: null,\n              size_bytes: sql<number>`excluded.size_bytes`,\n              media_type: sql<string>`excluded.media_type`,\n              storage_key: sql<string>`excluded.storage_key`,\n              purge_after: null,\n              deleted_at: null,\n            })\n            .where(\n              sql<SqlBool>`blob.purge_generation = excluded.purge_generation and not ${leaseLive('blob.purge_lease_until')} and (blob.deleted_at is not null or (blob.size_bytes = excluded.size_bytes and blob.media_type = excluded.media_type))`,\n            ),\n        )\n        .returning(['sha256', 'size_bytes', 'media_type', 'purge_after', 'purge_generation']); #1",
+        'db-sqlite/src/repositories/blob.ts:builder variable: const [before, written, current] = await executor.batch([\n        statement(previous),\n        statement(upsert),\n        statement(existing),\n      ]); #1',
       ],
     },
     {
@@ -1713,8 +1996,9 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`null` #1',
         "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`lower(nullif(${jsonText(historyMeta, '$.dist.shasum')}, ''))` #1",
         'db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`null` #2',
-        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`\n  union all\n  select v.id, r.revision, 0, w.package_id, w.source_id, v.status, r.source_ref, r.blob_id, r.metadata_json,\n    case when json_extract(r.metadata_json, '$.dist.type') in ('zip', 'tar', 'tgz')\n      then json_extract(r.metadata_json, '$.dist.type') else v.dist_type end,\n    ${historyShasum}, ${historyIntegrity}\n  from w\n  join version as v on v.package_id = w.package_id\n  join version_revision as r on r.version_id = v.id and r.revision = ${query.revision}\n  where ${available} and r.org_id = ${ctx.orgId}\n    and v.id = ${query.versionId} and v.revision > ${query.revision}` #1",
-        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\nt (version_id, revision, current, package_id, source_id, status, source_ref, blob_id, metadata_json,\n   dist_type, composer_shasum, npm_integrity) as (\n  select v.id, v.revision, 1, w.package_id, w.source_id, v.status, v.source_ref, v.blob_id, v.metadata_json,\n    v.dist_type, v.composer_shasum, v.npm_integrity\n  from w\n  join version as v on v.package_id = w.package_id\n  where ${available} and ${selector}${history}\n)\nselect t.version_id, t.revision, t.current, t.package_id, t.source_id, t.status, t.source_ref,\n  t.dist_type, t.composer_shasum, t.npm_integrity,\n  ${jsonText(meta, npm ? '$.dist.tarball' : '$.dist.url')} as upstream_dist_url,\n  ${npm ? jsonText(meta, '$.dist.shasum') : sql`null`} as npm_shasum,\n  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable\nfrom t\nleft join blob as b on b.id = t.blob_id and b.org_id = ${ctx.orgId} and b.deleted_at is null\nlimit 1` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`\n  union all\n  select v.id, r.revision, 0, w.package_id, w.source_id, v.status, r.source_ref, r.blob_id, r.metadata_json,\n    case when json_extract(r.metadata_json, '$.dist.type') in ('zip', 'tar', 'tgz')\n      then json_extract(r.metadata_json, '$.dist.type') else v.dist_type end,\n    ${historyShasum}, ${historyIntegrity}, ${FACT_COLUMNS}\n  from w\n  join version as v on v.package_id = w.package_id\n  join version_revision as r on r.version_id = v.id and r.revision = ${query.revision}\n  where ${available} and r.org_id = ${ctx.orgId}\n    and v.id = ${query.versionId} and v.revision > ${query.revision}` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\nt (version_id, revision, current, package_id, source_id, status, source_ref, blob_id, metadata_json,\n   dist_type, composer_shasum, npm_integrity, version, version_normalized, published_at,\n   published_at_basis, version_created_at) as (\n  select v.id, v.revision, 1, w.package_id, w.source_id, v.status, v.source_ref, v.blob_id, v.metadata_json,\n    v.dist_type, v.composer_shasum, v.npm_integrity, ${FACT_COLUMNS}\n  from w\n  join version as v on v.package_id = w.package_id\n  where ${available} and ${selector}${history}\n)\nselect t.version_id, t.revision, t.current, t.package_id, t.source_id, t.status, t.source_ref,\n  t.dist_type, t.composer_shasum, t.npm_integrity,\n  ${jsonText(meta, npm ? '$.dist.tarball' : '$.dist.url')} as upstream_dist_url,\n  ${npm ? jsonText(meta, '$.dist.shasum') : sql`null`} as npm_shasum,\n  b.id as blob_id, b.sha256, b.size_bytes, b.media_type, b.refetchable,\n  t.version, t.version_normalized, t.published_at, t.published_at_basis, t.version_created_at\nfrom t\nleft join blob as b on b.id = t.blob_id and b.org_id = ${ctx.orgId} and b.deleted_at is null\nlimit 1` #1",
+        "db-sqlite/src/repositories/catalogue-dist.ts:opaque SQL input: sql.raw(\n  'v.version, v.version_normalized, v.published_at, v.published_at_basis, v.created_at',\n) #1",
       ],
     },
     {
@@ -1736,7 +2020,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL boundary in catalogue-lookup; callers supply compiled or parameterized statements and retain responsibility for count semantics.',
       sites: [
         "db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  'w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at, e.version as cache_epoch',\n) #1",
-        'db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json`,\n) #1',
+        'db-sqlite/src/repositories/catalogue-lookup.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,\n) #1',
       ],
     },
     {
@@ -1766,8 +2050,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`('packagist_proxy', 'npmjs_proxy')` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    length(cast(${pattern} as blob)) <> length(${pattern})\n    or length(${pattern}) not between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n    or ${pattern} glob '*[^a-z0-9._~@!/*-]*'\n    or length(${pattern}) - length(replace(${pattern}, '*', '')) > ${sql.lit(MAX_PATTERN_WILDCARDS)}\n  )` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`exists (\n    select 1 from project_source as ${sql.id(a.ps)}\n    join source as ${sql.id(a.s)} on ${at(a.s, 'id')} = ${at(a.ps, 'source_id')}\n    join project as ${sql.id(a.p)} on ${at(a.p, 'id')} = ${at(a.ps, 'project_id')}\n    where ${at(a.ps, 'project_id')} = ${projectRef}\n      and ${at(a.ps, 'source_id')} = ${sourceRef}\n      and ${at(a.ps, 'org_id')} = ${ctx.orgId}\n      and ${at(a.s, 'org_id')} = ${ctx.orgId}\n      and ${at(a.p, 'org_id')} = ${ctx.orgId}\n      and ${at(a.s, 'ecosystem')} = ${ecosystemRef}\n      and (${at(a.s, 'project_id')} is null or ${at(a.s, 'project_id')} = ${at(a.ps, 'project_id')})\n  )` #1",
-        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.source, 'type')} not in ${PROXY_TYPES}\n    or (\n      not exists (\n        select 1 from package as ${sql.id(a.q)} indexed by package_by_name\n        join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}\n          and ${at(a.qs, 'org_id')} = ${p('org_id')}\n        where ${at(a.q, 'org_id')} = ${p('org_id')}\n          and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}\n          and ${at(a.q, 'name')} = ${p('name')}\n          and ${at(a.qs, 'type')} not in ${PROXY_TYPES}\n      )\n      and not exists (\n        select 1 from registered_name as ${sql.id(a.r)}\n        where ${at(a.r, 'org_id')} = ${p('org_id')}\n          and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}\n          and (case when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)\n      )\n    )\n  )` #1",
-        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    exists (\n      select 1 from project as ${sql.id(a.p)}\n      where ${at(a.p, 'id')} = ${projectRef} and ${at(a.p, 'org_id')} = ${ctx.orgId} and ${at(a.p, 'status')} = 'active'\n    )\n    and (\n      ${status} = 'active'\n      or (${status} = 'removed_upstream' and ${at(pkg.source, 'removal_policy')} = 'flag')\n    )\n  )` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`${at(alias, 'org_id')} = ${ctx.orgId} and ${at(alias, 'project_id')} = ${projectRef} and ${at(alias, 'source_id')} = ${sourceRef}` #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`${at(alias, 'effect')} = ${sql.lit(value)}` #1",
         'db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql`project_package_pattern as ${sql.id(alias)}` #1',
@@ -1797,14 +2079,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`v.published_at >= ${after.publishedAt} and (v.published_at > ${after.publishedAt} or v.id > ${after.id})` #1',
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`` #1',
         'db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql` and ${sql.join(filters, sql` and `)}` #1',
-        "db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\ncand as (\n  select ${VERSION_COLUMNS}\n  from w cross join version as v indexed by version_by_published on v.package_id = w.package_id\n  where v.org_id = ${ctx.orgId} and ${bound}\n    and (v.status = 'active' or (v.status = 'removed_upstream' and w.removal_policy = 'flag'))${extra}\n  order by v.published_at, v.id\n  limit ${limit + 1}\n),\nsized as (\n  select cand.*,\n    row_number() over page as rn,\n    sum(length(cast(metadata_json as blob))) over (page rows between unbounded preceding and current row) as bytes,\n    count(*) over () as candidates\n  from cand\n  window page as (order by published_at, id)\n)\nselect w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at,\n  e.version as cache_epoch,\n  case when ${bound} then 0 else 1 end as changed,\n  s.candidates, s.id, s.revision, s.version, s.version_normalized, s.stability, s.status,\n  s.published_at, s.upstream_released_at, s.license, s.dist_type, s.composer_shasum,\n  s.npm_integrity, s.deprecated_message, s.metadata_json\nfrom (select 1) as one\nleft join w on 1 = 1\nleft join cache_epoch as e on e.org_id = ${ctx.orgId} and w.package_id is not null\nleft join sized as s on s.rn <= ${limit} and (s.rn = 1 or s.bytes <= ${CATALOGUE_PAGE_BYTES})\nwhere w.package_id is not null or ${sql.lit(binding ? 1 : 0)} = 1\norder by s.rn` #1",
+        "db-sqlite/src/repositories/catalogue-read.ts:SQL template: sql`with w as ${visibleWinner(ctx, query.projectId, query.ecosystem, query.key)},\ncand as (\n  select ${VERSION_COLUMNS}\n  from w cross join version as v indexed by version_by_published on v.package_id = w.package_id\n  where v.org_id = ${ctx.orgId} and ${bound}\n    and (v.status = 'active' or (v.status = 'removed_upstream' and w.removal_policy = 'flag'))${extra}\n  order by v.published_at, v.id\n  limit ${limit + 1}\n),\nsized as (\n  select cand.*,\n    row_number() over page as rn,\n    sum(length(cast(metadata_json as blob))) over (page rows between unbounded preceding and current row) as bytes,\n    count(*) over () as candidates\n  from cand\n  window page as (order by published_at, id)\n)\nselect w.package_id, w.source_id, w.rev, w.modified_at, w.created_at, w.last_synced_at,\n  e.version as cache_epoch,\n  case when ${bound} then 0 else 1 end as changed,\n  s.candidates, s.id, s.revision, s.version, s.version_normalized, s.stability, s.status,\n  s.published_at, s.upstream_released_at, s.license, s.dist_type, s.composer_shasum,\n  s.npm_integrity, s.deprecated_message, s.metadata_json, s.published_at_basis,\n  s.version_created_at\nfrom (select 1) as one\nleft join w on 1 = 1\nleft join cache_epoch as e on e.org_id = ${ctx.orgId} and w.package_id is not null\nleft join sized as s on s.rn <= ${limit} and (s.rn = 1 or s.bytes <= ${CATALOGUE_PAGE_BYTES})\nwhere w.package_id is not null or ${sql.lit(binding ? 1 : 0)} = 1\norder by s.rn` #1",
       ],
     },
     {
       reason:
         'SQL boundary in catalogue-read; callers supply compiled or parameterized statements and retain responsibility for count semantics.',
       sites: [
-        'db-sqlite/src/repositories/catalogue-read.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json`,\n) #1',
+        'db-sqlite/src/repositories/catalogue-read.ts:opaque SQL input: sql.raw(\n  `v.id, v.revision, v.version, v.version_normalized, v.stability, v.status, v.published_at,\n   v.upstream_released_at, v.license, v.dist_type, v.composer_shasum, v.npm_integrity,\n   v.deprecated_message, v.metadata_json, v.published_at_basis, v.created_at as version_created_at`,\n) #1',
       ],
     },
     {
@@ -1911,16 +2193,15 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL in catalogue-write-dist; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         'db-sqlite/src/repositories/catalogue-write-dist.ts:SQL template: sql<string>`(SELECT blob.id FROM blob\n    WHERE blob.org_id = ${ctx.orgId} AND blob.sha256 = ${sha256} AND blob.deleted_at IS NULL\n      AND ${fence})` #1',
-        "db-sqlite/src/repositories/catalogue-write-dist.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM version\n      WHERE version.id = ${versionId} AND version.org_id = ${ctx.orgId}\n        AND version.revision = ${revision} AND version.status <> 'tombstoned'\n        AND version.blob_id = ${liveBlob})` #1",
+        "db-sqlite/src/repositories/catalogue-write-dist.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM version\n      WHERE version.id = ${versionId} AND version.org_id = ${ctx.orgId}\n        AND version.revision = ${revision} AND version.status <> 'tombstoned'\n        AND version.blob_id = ${liveBlob}\n        AND (${npmIntegrity === undefined ? 1 : 0} = 1 OR version.npm_integrity = ${npmIntegrity ?? null}))` #1",
       ],
     },
     {
       reason:
         'Local builder in catalogue-write-dist; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
-        "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const attach = db\n    .updateTable('version')\n    .set({ blob_id: liveBlob, last_op_id: opId })\n    .where('version.id', '=', versionId)\n    .where('version.org_id', '=', ctx.orgId)\n    .where('version.revision', '=', revision)\n    .where('version.status', '<>', 'tombstoned')\n    .where(sql<SqlBool>`${liveBlob} IS NOT NULL`)\n    .where('version.blob_id', 'is', null); #1",
         "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const advance = db\n    .updateTable('package')\n    .set({\n      rev: sql<number>`package.rev + 1`,\n      modified_at: monotonicNow,\n    })\n    .where('package.org_id', '=', ctx.orgId)\n    .where(\n      sql<SqlBool>`EXISTS (SELECT 1 FROM version\n        WHERE version.package_id = package.id AND version.id = ${versionId}\n          AND version.last_op_id = ${opId})`,\n    ); #1",
-        'db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const statements = [...guard, compile(attach), ...attached, compile(advance)]; #1',
+        'db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const statements = [\n    ...guard,\n    compile(attach),\n    ...attached,\n    ...readmeStatements,\n    compile(advance),\n  ]; #1',
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: return {\n        changed: (results[attachIndex]?.changes ?? 0) > 0,\n        statements: statements.length,\n      }; #1',
       ],
@@ -1947,8 +2228,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM package\n      WHERE package.id = ${packageId} AND package.org_id = ${ctx.orgId}\n        AND package.ecosystem = 'npm')` #1",
-        "db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`(SELECT version.id FROM version\n    WHERE version.package_id = ${packageId} AND version.org_id = ${ctx.orgId}\n      AND version.version_normalized = ${target} AND version.status != 'tombstoned')` #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NOT NULL` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`${tag}` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<boolean>`${targetOf(target)} IS NULL` #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:SQL template: sql<string>`${newOpId()}` #1',
@@ -1984,7 +2263,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const removeHistory = compile(\n    db\n      .insertInto('dist_tag_history')\n      .columns([\n        'id',\n        'org_id',\n        'package_id',\n        'tag',\n        'version_id',\n        'previous_version_id',\n        'action',\n        'actor_type',\n        'actor_id',\n        'op_id',\n      ])\n      .expression(\n        db\n          .selectFrom('dist_tag')\n          .select([\n            // One statement removes many rows: share the ULID time prefix, generate 64 random bits per row.\n            sql<string>`${newOpId().slice(0, 10)} || upper(hex(randomblob(8)))`.as('id'),\n            'dist_tag.org_id',\n            'dist_tag.package_id',\n            'dist_tag.tag',\n            sql<string | null>`NULL`.as('version_id'),\n            'dist_tag.version_id',\n            sql<string>`'remove'`.as('action'),\n            sql<string>`${actorType}`.as('actor_type'),\n            sql<string | null>`${actorId}`.as('actor_id'),\n            sql<string>`${opId}`.as('op_id'),\n          ])\n          .where(absent),\n      ),\n  ); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const remove = compile(db.deleteFrom('dist_tag').where(absent)); #1",
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const advance = compile(\n    db\n      .updateTable('package')\n      .set({\n        rev: sql<number>`package.rev + 1`,\n        modified_at: monotonicNow,\n      })\n      .where('package.id', '=', packageId)\n      .where('package.org_id', '=', ctx.orgId)\n      .where(\n        sql<boolean>`EXISTS (SELECT 1 FROM dist_tag_history\n          WHERE dist_tag_history.package_id = package.id AND dist_tag_history.op_id = ${opId})`,\n      ),\n  ); #1",
-        'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const groups = [\n    head,\n    ...probes.map((probe) => [probe]),\n    ...valid.map((_, index) => sets.slice(index * 2, index * 2 + 2)),\n    [removeHistory, remove],\n    [advance],\n  ]; #1',
         'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: const statementCount = groups.reduce((sum, group) => sum + group.length, 0); #1',
         "db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: if (results.length !== statementCount) throw new TypeError('incomplete dist tag results'); #1",
         'db-sqlite/src/repositories/catalogue-write-tags.ts:builder variable: return {\n        packageId,\n        inserted: 0,\n        updated: setChanges + removed,\n        unchanged: valid.length - (skipped.length - badGrammar.length) - setChanges,\n        conflicts: [],\n        refused: [],\n        skippedTags: skipped,\n        statements: statementCount,\n      }; #1',
@@ -2036,7 +2314,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/catalogue-write-version-update.ts:SQL template: sql<string | null>`CASE\n                WHEN version.dist_type IS NOT ${input.distType}\n                  OR version.composer_shasum IS NOT ${metadata.composerShasum}\n                  OR json_extract(version.metadata_json, '$.dist') IS NOT json_extract(${metadata.json}, '$.dist')\n                  OR (${metadata.composerShasum} IS NULL AND version.source_ref IS NOT ${input.sourceRef})\n                THEN NULL ELSE version.blob_id END` #1",
         'db-sqlite/src/repositories/catalogue-write-version-update.ts:SQL template: sql<number>`version.revision + 1` #1',
         'db-sqlite/src/repositories/catalogue-write-version-update.ts:SQL template: sql<boolean>`EXISTS (SELECT 1 FROM version_revision AS before\n                WHERE before.version_id = version.id AND before.org_id = ${ctx.orgId}\n                  AND before.revision = version.revision\n                  AND before.op_id = ${opId})` #1',
-        'db-sqlite/src/repositories/catalogue-write-version-update.ts:SQL template: sql<boolean>`(version.metadata_json IS NOT ${metadata.json}\n                OR version.npm_integrity IS NOT ${metadata.npmIntegrity})` #1',
+        "db-sqlite/src/repositories/catalogue-write-version-update.ts:SQL template: sql<boolean>`(version.metadata_json IS NOT ${metadata.json}\n                OR (version.npm_integrity IS NOT ${metadata.npmIntegrity}\n                  AND NOT (${metadata.npmIntegrity} IS NULL AND EXISTS (\n                    SELECT 1 FROM source\n                    WHERE source.org_id = version.org_id AND source.type='vcs'\n                      AND source.id = (SELECT package.source_id FROM package WHERE package.id=version.package_id AND package.org_id=version.org_id)))))` #1",
       ],
     },
     {
@@ -2119,7 +2397,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       sites: [
         "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .updateTable('credential')\n          .set({\n            ciphertext: sealed.ciphertext,\n            nonce: sealed.nonce,\n            key_version: nextVersion,\n            rotated_at: now,\n            updated_at: now,\n          })\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .where('key_version', '=', expectedVersion)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #1',
-        "db-sqlite/src/repositories/credential.ts:builder variable: const rows = await run<{ readonly id: string }>(\n        executor,\n        db\n          .deleteFrom('credential')\n          .where('org_id', '=', ctx.orgId)\n          .where('id', '=', id)\n          .returning('id'),\n      ); #1",
         'db-sqlite/src/repositories/credential.ts:builder variable: return rows.length > 0; #2',
       ],
     },
@@ -2351,7 +2628,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/job.ts:SQL template: sql`0` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`${next} IS NULL` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql`UPDATE job SET\n      state = CASE WHEN ${dead} THEN 'dead' ELSE 'queued' END,\n      attempts = ${outcome === 'released' ? sql`max(attempts - 1, 0)` : sql`attempts`},\n      run_at = COALESCE(${next}, run_at),\n      sync_error = CASE WHEN job.type = 'core:package-sync:v1' AND job.lease_until > ${finished}\n        THEN ${syncError} ELSE NULL END,\n      last_error = ${lastError === null ? sql`last_error` : sql`${lastError}`},\n      finished_at = CASE WHEN ${dead} THEN ${finished} ELSE NULL END,\n      lease_owner = NULL,\n      lease_until = NULL,\n      updated_at = ${finished}\n      WHERE ${where}\n      AND EXISTS (SELECT 1 FROM job_attempt a WHERE a.job_id = job.id AND a.fence = job.fence\n        AND a.worker = job.lease_owner AND a.outcome = ${outcome} AND a.finished_at IS NOT NULL) RETURNING id` #1",
-        'db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job\n          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,\n           project_id, initiator_token_id)\n          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},\n            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}\n          WHERE ${projectId} IS NULL\n            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})\n          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1',
+        'db-sqlite/src/repositories/job.ts:SQL template: sql`INSERT INTO job\n          (id, org_id, type, payload_json, resource_key, idempotency_key, max_attempts, run_at,\n           project_id, initiator_token_id)\n          SELECT ${id}, ${ctx.orgId}, ${type}, ${payloadJson}, ${resourceKey}, ${key},\n            ${row.maxAttempts}, COALESCE(${runAt}, ${NOW}), ${projectId}, ${tokenId}\n          WHERE (${projectId} IS NULL\n            OR EXISTS (SELECT 1 FROM project WHERE id = ${projectId} AND org_id = ${ctx.orgId})) AND ${when}\n          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, payload_json, project_id, resource_key FROM job\n          WHERE org_id = ${ctx.orgId} AND idempotency_key = ${key}` #1',
         'db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id FROM project WHERE org_id = ${ctx.orgId} AND id = ${projectId}` #1',
         "db-sqlite/src/repositories/job.ts:SQL template: sql`SELECT id, type, state, attempts, max_attempts, run_at, last_error\n          FROM job WHERE org_id = ${ctx.orgId} AND id = ${text('id', id)}` #1",
@@ -2549,13 +2826,11 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'SQL in registered-name; exact text and interpolations are reviewed with the count-reader mutation targets and FK assumptions.',
       sites: [
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as rn_act_s\n    where rn_act_s.id = ${sourceId} and rn_act_s.org_id = ${ctx.orgId}\n      and (rn_act_s.type in (${sql.join(PROXY_TYPES)})\n        or (exists (select 1 from registered_name as rn_act_r\n              where rn_act_r.source_id = rn_act_s.id and rn_act_r.org_id = rn_act_s.org_id)\n          and (rn_act_s.type <> 'npm_registry' or not exists (\n            select 1 from json_each(rn_act_s.config_json, '$.scopes') as rn_act_j\n            where not exists (select 1 from registered_name as rn_act_c\n              where rn_act_c.source_id = rn_act_s.id and rn_act_c.org_id = rn_act_s.org_id\n                and rn_act_c.pattern = rn_act_j.value || '/*'))))))` #1",
-        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as rn_cov\n    where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}\n      and rn_cov.ecosystem = ${ecosystem}\n      and (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'\n      and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)\n      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n      and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))\n        <= ${sql.lit(MAX_PATTERN_WILDCARDS)}\n        then ${key} glob rn_cov.pattern else 0 end))` #1",
+
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<number>`(${condition}) is not 1` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<number>`(${condition})` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`(${sql.join(conditions, sql` and `)})` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId}\n          and (existing.id = ${input.id}\n            or (existing.source_id = ${input.sourceId} and existing.ecosystem = ${source.ecosystem}\n              and existing.pattern = ${input.pattern})))` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId} and existing.ecosystem = ${source.ecosystem}\n          and existing.pattern = ${input.pattern} and existing.source_id <> ${input.sourceId})` #1',
-        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as owner\n        where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}\n          and owner.ecosystem = ${source.ecosystem}\n          and owner.type not in (${sql.join(PROXY_TYPES)}))` #1',
+
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId}\n          and target.source_id = ${sourceId})` #1',
         'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId}\n          and target.project_id is ${source.project_id})` #1',
         "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as target\n        where target.id = ${input.id} and target.org_id = ${ctx.orgId} and target.status = 'paused')` #1",
@@ -2565,7 +2840,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'Local builder in registered-name; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const insert = compile(\n        db.insertInto('registered_name').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          source_id: input.sourceId,\n          ecosystem: source.ecosystem,\n          pattern: input.pattern,\n        }),\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'added'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #1",
@@ -2577,7 +2851,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #2",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'conflict') return 'conflict'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'indeterminate') return 'indeterminate'; #2",
-        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, owned]), ctx),\n        [\n          ...assertCheck(paused),\n          ...assertCheck(activatable),\n          compile(\n            db\n              .updateTable('source')\n              .set({\n                status: 'active',\n                next_poll_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n                updated_at: sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ','now')`,\n              })\n              .where('id', '=', input.id)\n              .where('org_id', '=', ctx.orgId)\n              .where('status', '=', 'paused'),\n          ),\n          compile({\n            compile: () =>\n              sql`delete from source_discovery_admission where org_id=${ctx.orgId} and source_id=${input.id}`.compile(\n                db,\n              ),\n          }),\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${allOf([owned, paused, sql<SqlBool>`not ${activatable}`])})`,\n            false,\n          ),\n          collision: probe(allOf([owned, sql<SqlBool>`not ${paused}`]), false),\n        },\n      ); #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.ok) return 'enabled'; #1",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #3",
         "db-sqlite/src/repositories/registered-name.ts:builder variable: if (\n        outcome.reason === 'conflict' &&\n        input.idempotency !== undefined &&\n        (await holds(liveIdempotencyCollision(ctx, input.idempotency)))\n      )\n        return 'conflict'; #2",
@@ -2695,15 +2969,14 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
       reason:
         'Local builder in source; aliases, conflict behavior and escapes are reviewed with the module mutation targets.',
       sites: [
-        "db-sqlite/src/repositories/source.ts:builder variable: const insert = compile(\n        db.insertInto('source').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          project_id: input.projectId,\n          name: input.name,\n          ecosystem: input.ecosystem,\n          type: input.type,\n          url: input.url,\n          credential_id: input.credential?.id ?? null,\n          config_json: jsonConfig,\n          user_agent: input.userAgent ?? null,\n          status: isProxy(input.type) ? 'active' : 'paused',\n          ...(interval === undefined ? {} : { poll_interval_seconds: interval }),\n          ...(policy === undefined ? {} : { removal_policy: policy }),\n          ...(retention === undefined ? {} : { retention_days_override: retention }),\n          ...(input.defaultVisibleToNewProjects === undefined\n            ? {}\n            : { default_visible_to_new_projects: input.defaultVisibleToNewProjects ? 1 : 0 }),\n          next_poll_at: DB_NOW,\n        }),\n      ); #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.credential !== null && 'statement' in input.credential\n            ? [input.credential.statement]\n            : []),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          insert,\n          auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),\n        ],\n        probes,\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const insert = compile(\n        db.insertInto('source').values({\n          id: input.id,\n          org_id: ctx.orgId,\n          project_id: input.projectId,\n          name: input.name,\n          ecosystem: input.ecosystem,\n          type: input.type,\n          url: input.url,\n          credential_id: input.credential?.id ?? null,\n          config_json: jsonConfig,\n          require_publish_approval: input.requirePublishApproval ? 1 : 0,\n          user_agent: input.userAgent ?? null,\n          status: isProxy(input.type) ? 'active' : 'paused',\n          ...(interval === undefined ? {} : { poll_interval_seconds: interval }),\n          ...(policy === undefined ? {} : { removal_policy: policy }),\n          ...(retention === undefined ? {} : { retention_days_override: retention }),\n          ...(input.defaultVisibleToNewProjects === undefined\n            ? {}\n            : { default_visible_to_new_projects: input.defaultVisibleToNewProjects ? 1 : 0 }),\n          next_poll_at: DB_NOW,\n        }),\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) return 'created'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'authority') return 'forbidden'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'conflict') return 'credential_scope_mismatch'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'collision') return 'duplicate'; #1",
         "db-sqlite/src/repositories/source.ts:builder variable: return outcome.reason === 'indeterminate' ? 'indeterminate' : 'conflict'; #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const update = compile(\n        db\n          .updateTable('source')\n          .set({\n            ...set,\n            ...(touchesCoverage\n              ? {\n                  status: sql<SourceStatus>`case when status <> 'paused' then 'paused' else status end`,\n                }\n              : {}),\n            updated_at: DB_NOW,\n          })\n          .where('id', '=', input.id)\n          .where('org_id', '=', ctx.orgId),\n      ); #1",
-        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          statusBefore,\n          update,\n          ...input.audit.map((event) =>\n            auditPendingStatement(ctx, event, { sql: 'changes() > 0', params: [] }),\n          ),\n        ],\n        {\n          authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),\n          ...(credentialOk === null || input.preparedCredential !== undefined\n            ? {}\n            : { conflict: probe(credentialOk, true) }),\n        },\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const update = compile(\n        db\n          .updateTable('source')\n          .set({\n            ...set,\n            revision: sql<number>`revision + 1`,\n            ...(touchesCoverage\n              ? {\n                  status: sql<SourceStatus>`case when status <> 'paused' then 'paused' else status end`,\n                }\n              : {}),\n            updated_at: DB_NOW,\n          })\n          .where('id', '=', input.id)\n          .where('org_id', '=', ctx.orgId),\n      ); #1",
+        "db-sqlite/src/repositories/source.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [\n          ...assertCheck(revisionOk),\n          ...assertCheck(approvalOk),\n          ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),\n          ...(credentialOk === null ? [] : assertCheck(credentialOk)),\n          statusBefore,\n          update,\n          ...input.audit.map((event) =>\n            auditPendingStatement(ctx, event, { sql: 'changes() > 0', params: [] }),\n          ),\n        ],\n        {\n          authority: probe(authority(ctx, fence, current.projectId, input.providerAnchors), true),\n          ...(credentialOk === null || input.preparedCredential !== undefined\n            ? {}\n            : { conflict: probe(credentialOk, true) }),\n        },\n      ); #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.ok) {\n        const before = outcome.results[outcome.results.length - 2 - input.audit.length]?.rows[0];\n        return touchesCoverage && before?.status !== 'paused'\n          ? 'paused_for_reactivation'\n          : 'updated';\n      } #1",
         "db-sqlite/src/repositories/source.ts:builder variable: if (outcome.reason === 'conflict' && credentialOk !== null) {\n        return (await read(ctx, input.id)) === null ? 'not_found' : 'credential_scope_mismatch';\n      } #1",
         'db-sqlite/src/repositories/source.ts:builder variable: return failureResult(ctx, input.id, outcome.reason); #1',
@@ -2790,7 +3063,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const insert = db\n    .insertInto('project_source')\n    .columns(['org_id', 'project_id', 'source_id', 'precedence'])\n    .expression(\n      db\n        .selectFrom('source')\n        .select([\n          'org_id',\n          sql<string>`${projectId}`.as('project_id'),\n          'id',\n          DEFAULT_PRECEDENCE.as('precedence'),\n        ])\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', 'is', null)\n        .where(\n          sql<SqlBool>`exists (select 1 from project as new_project\n            where new_project.id = ${projectId} and new_project.org_id = ${ctx.orgId})`,\n        ),\n    )\n    .onConflict((conflict) => conflict.columns(['project_id', 'source_id']).doNothing()); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: return [compile(insert), ...rederiveStatements(ctx, { kind: 'project', projectId })]; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const insert = db\n        .insertInto('project_source')\n        .columns(['org_id', 'project_id', 'source_id', 'precedence'])\n        .expression(\n          db\n            .selectFrom('source')\n            .select([\n              'org_id',\n              sql<string>`${input.projectId}`.as('project_id'),\n              'id',\n              (precedence === undefined ? DEFAULT_PRECEDENCE : sql<number>`${precedence}`).as(\n                'precedence',\n              ),\n            ])\n            .where('org_id', '=', ctx.orgId)\n            .where('id', '=', input.sourceId),\n        )\n        .onConflict((conflict) =>\n          precedence === undefined\n            ? conflict.columns(['project_id', 'source_id']).doNothing()\n            : conflict\n                .columns(['project_id', 'source_id'])\n                .doUpdateSet({ precedence: (eb) => eb.ref('excluded.precedence') })\n                .where(sql<SqlBool>`project_source.precedence is not excluded.precedence`),\n        ); #1",
-        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const result = await run(\n        ctx,\n        fence,\n        authority,\n        sourceServes(ctx, input.sourceId, found.owner, input.projectId),\n        [\n          projectRevision(ctx, input.projectId, changed),\n          compile(insert),\n          ...visibilityAuditStatements(ctx, input),\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId: input.sourceId,\n          }),\n        ],\n        changed,\n      ); #1",
+        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const result = await run(\n        ctx,\n        fence,\n        authority,\n        allOf(\n          sourceServes(ctx, input.sourceId, found.owner, input.projectId),\n          sql<SqlBool>`(not exists (select 1 from source as attaching_proxy where attaching_proxy.org_id = ${ctx.orgId} and attaching_proxy.id = ${input.sourceId} and attaching_proxy.type = 'npmjs_proxy') or ${proxyClaimsVerified(ctx, input.verifiedClaims)})`,\n        ),\n        [\n          projectRevision(ctx, input.projectId, changed),\n          compile(insert),\n          ...visibilityAuditStatements(ctx, input),\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId: input.sourceId,\n          }),\n        ],\n        changed,\n      ); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: return found.owner === null && !result.ok && result.reason === 'authority'\n        ? notFound\n        : result; #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const rows = db\n        .deleteFrom('project_package')\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', '=', projectId)\n        .where('package_id', 'in', (qb) =>\n          qb\n            .selectFrom('package')\n            .select('id')\n            .where('org_id', '=', ctx.orgId)\n            .where('source_id', '=', sourceId),\n        ); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const patterns = db\n        .deleteFrom('project_package_pattern')\n        .where('org_id', '=', ctx.orgId)\n        .where('project_id', '=', projectId)\n        .where('source_id', '=', sourceId); #1",
@@ -2800,7 +3073,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/repositories/visibility-attach.ts:builder variable: return run(\n        ctx,\n        fence,\n        holds(ctx, fence, found.owner, input.projectId),\n        allOf(\n          sourceServes(ctx, input.sourceId, found.owner, input.projectId),\n          isAttached(ctx, input.projectId, input.sourceId),\n        ),\n        [\n          projectRevision(ctx, input.projectId, changed),\n          compile(update),\n          ...visibilityAuditStatements(ctx, input),\n        ],\n        changed,\n      ); #1',
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const update = compile(\n        db\n          .updateTable('project_source')\n          .set({ precedence })\n          .where('org_id', '=', ctx.orgId)\n          .where('project_id', '=', projectId)\n          .where('precedence', 'is not', precedence),\n      ); #1",
         'db-sqlite/src/repositories/visibility-attach.ts:builder variable: return run(\n        ctx,\n        fence,\n        authority,\n        state,\n        [revision, update, ...visibilityAuditStatements(ctx, input)],\n        changed,\n      ); #1',
-        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const update = db\n        .updateTable('package')\n        .set({ visible_to_new_projects: flag })\n        .where('org_id', '=', ctx.orgId)\n        .where('id', '=', input.packageId)\n        .where('visible_to_new_projects', 'is not', flag); #1",
+        "db-sqlite/src/repositories/visibility-attach.ts:builder variable: const update = db\n        .updateTable('package')\n        .set({ visible_to_new_projects: flag, settings_revision: sql`settings_revision + 1` })\n        .where('org_id', '=', ctx.orgId)\n        .where('id', '=', input.packageId)\n        .where('visible_to_new_projects', 'is not', flag); #1",
         "db-sqlite/src/repositories/visibility-attach.ts:builder variable: return run(ctx, fence, holds(ctx, fence, owner, null), state, [\n        compile(update),\n        ...rederiveStatements(ctx, { kind: 'package', packageId: input.packageId }),\n      ]); #1",
       ],
     },
@@ -2882,12 +3155,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(held, ctx, patternRow(ctx, input, sql`vs_pattern.pattern = ${input.pattern}`)),\n        [\n          ...assertCheck(narrowing),\n          remove,\n          ...visibilityAuditStatements(ctx, input, true),\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId: input.sourceId,\n          }),\n        ],\n        { authority: probe(sql<SqlBool>`(${held} and ${narrowing})`) },\n      ); #1",
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: if (outcome.ok) return changesAt(outcome.results, 1) > 0 ? 'removed' : 'not_found'; #1",
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: return failure(outcome.reason) ?? 'failed'; #1",
-        "db-sqlite/src/repositories/visibility-subset.ts:builder variable: const upsert = compile(\n        db\n          .insertInto('project_package')\n          .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])\n          .expression(\n            db\n              .selectFrom('package')\n              .select([\n                'org_id',\n                sql<string>`${input.projectId}`.as('project_id'),\n                'id',\n                sql<'explicit'>`'explicit'`.as('origin'),\n                'ecosystem',\n                'name',\n              ])\n              .where('id', '=', input.packageId)\n              .where('org_id', '=', ctx.orgId),\n          )\n          .onConflict((conflict) =>\n            conflict\n              .columns(['project_id', 'package_id'])\n              .doUpdateSet({ origin: 'explicit' })\n              .where('project_package.origin', '<>', 'explicit'),\n          ),\n      ); #1",
-        'db-sqlite/src/repositories/visibility-subset.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allowed, ctx),\n        [...assertCheck(eligible), ...checks.flatMap((check) => assertCheck(check)), upsert],\n        {\n          authority: probe(authorized),\n          conflict: probe(eligible),\n        },\n      ); #1',
-        "db-sqlite/src/repositories/visibility-subset.ts:builder variable: if (outcome.ok) return changesAt(outcome.results, 4) > 0 ? 'added' : 'unchanged'; #1",
-        'db-sqlite/src/repositories/visibility-subset.ts:builder variable: const refused = failure(outcome.reason); #2',
-        'db-sqlite/src/repositories/visibility-subset.ts:builder variable: if (refused !== null) return refused; #2',
-        "db-sqlite/src/repositories/visibility-subset.ts:builder variable: return outcome.reason === 'conflict' ? 'not_eligible' : 'failed'; #1",
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: const remove = compile(\n        db\n          .deleteFrom('project_package')\n          .where('org_id', '=', ctx.orgId)\n          .where('project_id', '=', input.projectId)\n          .where('package_id', '=', input.packageId)\n          .where('origin', '=', 'explicit'),\n      ); #1",
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(held, ctx),\n        [\n          remove,\n          ...rederiveStatements(ctx, {\n            kind: 'projectSource',\n            projectId: input.projectId,\n            sourceId,\n          }),\n        ],\n        { authority: probe(held) },\n      ); #1",
         "db-sqlite/src/repositories/visibility-subset.ts:builder variable: if (outcome.ok) return changesAt(outcome.results, 0) > 0 ? 'removed' : 'not_found'; #1",
@@ -3229,6 +3496,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[role.key] #1',
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[role.key] #2',
         'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[key] #1',
+        'db-sqlite/src/testing/mutation-table/role.ts:unresolved computed access: ids[DEFAULT_ROLES[index]!.key] #1',
       ],
     },
     {
@@ -3431,7 +3699,6 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/contract/two-organizations.ts:opaque dependency: import { orgContext } from '@package-broker/core/db/port'; #1",
         "db-sqlite/src/internal/catalogue-status-statements.ts:opaque dependency: import {\n  statusRevisionReason,\n  versionTransition,\n  type StatusReason,\n  type VersionStatus,\n} from '@package-broker/core/catalogue/version-rules'; #1",
         "db-sqlite/src/internal/catalogue-write-guard.ts:opaque dependency: import { catalogueWriteGuard, type CatalogueWriteGuard } from '@package-broker/core/db/catalogue'; #1",
-        "db-sqlite/src/kysely.ts:opaque dependency: import {\n  fenceGuard,\n  runFenced,\n  type FailureProbes,\n  type FencedOutcome,\n  type FenceGuard,\n  type MutationFence,\n  type TokenMutationFence,\n} from '@package-broker/core/authz/fence'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { ulid } from '@package-broker/core/ids'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { isValidDomain } from '@package-broker/core/identity/policy'; #1",
         "db-sqlite/src/kysely.ts:opaque dependency: import { isValidProviderId } from '@package-broker/core/identity/port'; #1",
@@ -3440,7 +3707,7 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/repositories/access.ts:opaque dependency: import {\n  parseScopeLevel,\n  parseScopesJson,\n  tokenEffectivePermissions,\n  type ScopeLevel,\n  type TokenProjectMode,\n} from '@package-broker/core/authz/scope'; #1",
         "db-sqlite/src/repositories/actor-authority.ts:opaque dependency: import { SESSION_IDLE_MS } from '@package-broker/core/auth/session'; #1",
         "db-sqlite/src/repositories/audit-pending.ts:opaque dependency: import { isUlid } from '@package-broker/core/ids'; #1",
-        "db-sqlite/src/repositories/blob.ts:opaque dependency: import {\n  BLOB_MEDIA_TYPES,\n  BlobBusyError,\n  BlobConflictError,\n  BlobValidationError,\n  blobStorageKey,\n  parseSha256,\n  type BlobInfo,\n  type BlobMetadataPort,\n  type PurgeGeneration,\n  type Sha256,\n} from '@package-broker/core/platform/blob'; #1",
+        "db-sqlite/src/repositories/blob.ts:opaque dependency: import {\n  BLOB_MEDIA_TYPES,\n  BlobBusyError,\n  BlobConflictError,\n  BlobValidationError,\n  blobStorageKey,\n  stagedStorageKey,\n  parseSha256,\n  type BlobInfo,\n  type BlobMetadataPort,\n  type PurgeGeneration,\n  type Sha256,\n} from '@package-broker/core/platform/blob'; #1",
         "db-sqlite/src/repositories/catalogue-list.ts:opaque dependency: import {\n  CATALOGUE_PAGE_MAX,\n  CATALOGUE_SEARCH_MAX,\n  validateLimit,\n  type CatalogueReader,\n  type ListedPackage,\n  type VisibleListing,\n} from '@package-broker/core/db/catalogue'; #1",
         "db-sqlite/src/repositories/catalogue-predicates.ts:opaque dependency: import {\n  MAX_PATTERN_BYTES,\n  MAX_PATTERN_WILDCARDS,\n  MAX_PATTERNS_PER_RULE,\n} from '@package-broker/core/catalogue/patterns'; #1",
         "db-sqlite/src/repositories/catalogue-read.ts:opaque dependency: import {\n  CATALOGUE_PAGE_MAX,\n  validateLimit,\n  type CatalogueReader,\n  type CatalogueVersion,\n  type DistType,\n  type PackageResolution,\n  type PageChanged,\n  type ResolveVersionsQuery,\n} from '@package-broker/core/db/catalogue'; #1",
@@ -3500,6 +3767,8 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { ACCESS_MUTATION_GUARD_CONSTRAINT } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { mutationFence } from '@package-broker/core/authz/fence'; #1",
         "db-sqlite/src/testing/mutation-table/fixtures.ts:opaque dependency: import { normalizeVersionMetadata } from '@package-broker/core/catalogue/metadata'; #1",
+        "db-sqlite/src/testing/sql-snapshot.ts:opaque dependency: import {\n  D1_STATEMENTS_PER_BATCH,\n  type ScalarSqlValue,\n  type SqlExecutor,\n  type Statement,\n} from '@package-broker/core/db/port'; #1",
+        "db-sqlite/src/testing/sql-snapshot.ts:opaque dependency: import { assertBatchStatementCount } from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/node-sqlite-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
         "runtime-cloudflare/src/db/d1-executor.ts:opaque dependency: import {\n  DbError,\n  assertBatchStatementCount,\n  classifySqliteError,\n} from '@package-broker/core/db/errors'; #1",
         "db-sqlite/src/testing/catalogue-fixture.ts:opaque dependency: import {\n  D1_STATEMENTS_PER_BATCH,\n  D1_STATEMENTS_PER_INVOCATION,\n  type ScalarSqlExecutor,\n  type ScalarStatement,\n} from '@package-broker/core/db/port'; #1",
@@ -3582,6 +3851,133 @@ const REVIEWED_UNCERTAIN: Readonly<Record<string, string>> = Object.fromEntries(
         'Audit condition embeds only the compiled organization-scoped operation marker and session effect guards with bound parameters; no D1 changes() read.',
       sites: [
         'db-sqlite/src/repositories/local-login-success.ts:SQL input: sql: `(${when.sql}) = 1` #1',
+      ],
+    },
+
+    {
+      reason:
+        'Claim builders import the npm name limit and Kysely expression types; these dependencies add no result-count reads or writes.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-predicates.ts:opaque dependency: import { MAX_NPM_NAME_LENGTH } from '@package-broker/core/catalogue/names'; #1",
+      ],
+    },
+    {
+      reason:
+        'Claim coverage uses bounded ASCII equality and scope prefixes; legacy GLOB stays behind its pattern validator, with no writes or count reads.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(${ecosystem} = 'npm'\n    and length(${pattern}) between 1 and ${sql.lit(MAX_NPM_NAME_LENGTH)}\n    and length(cast(${pattern} as blob)) = length(${pattern})\n    and ${pattern} not glob '*[^a-z0-9._~@!/*-]*'\n    and (instr(${pattern}, '*') = 0 or\n      (substr(${pattern}, 1, 1) = '@' and substr(${pattern}, -2) = '/*' and instr(${pattern}, '*') = length(${pattern})))\n    and (${key} = ${pattern} or (substr(${pattern}, -2) = '/*'\n      and substr(${key}, 1, length(${pattern}) - 1) = substr(${pattern}, 1, length(${pattern}) - 1))))` #1",
+        "db-sqlite/src/repositories/catalogue-predicates.ts:SQL template: sql<SqlBool>`(\n    ${at(pkg.source, 'type')} not in ${PROXY_TYPES}\n    or (\n      not exists (\n        select 1 from package as ${sql.id(a.q)} indexed by package_by_name\n        join source as ${sql.id(a.qs)} on ${at(a.qs, 'id')} = ${at(a.q, 'source_id')}\n          and ${at(a.qs, 'org_id')} = ${p('org_id')}\n        where ${at(a.q, 'org_id')} = ${p('org_id')}\n          and ${at(a.q, 'ecosystem')} = ${p('ecosystem')}\n          and ${at(a.q, 'name')} = ${p('name')}\n          and ${at(a.qs, 'type')} not in ${PROXY_TYPES}\n      )\n      and not exists (\n        select 1 from registered_name as ${sql.id(a.r)}\n        where ${at(a.r, 'org_id')} = ${p('org_id')}\n          and ${at(a.r, 'ecosystem')} = ${p('ecosystem')}\n          and (case when ${at(a.r, 'ecosystem')} = 'npm' and length(${at(a.r, 'pattern')}) > ${sql.lit(MAX_PATTERN_BYTES)} and ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), at(a.r, 'pattern'))}\n            then ${npmClaimCover(at(a.r, 'ecosystem'), at(a.r, 'pattern'), p('name'))}\n            when ${invalidPattern(at(a.r, 'pattern'))} then 1 else ${p('name')} glob ${at(a.r, 'pattern')} end)\n      )\n    )\n  )` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name coverage delegates npm exact/scope claims to the shared helper and keeps legacy glob validation bounded before matching.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as rn_cov\n    where rn_cov.org_id = ${ctx.orgId} and rn_cov.source_id = ${sourceId}\n      and rn_cov.ecosystem = ${ecosystem}\n      and (${npmClaimCover(sql.ref('rn_cov.ecosystem'), sql.ref('rn_cov.pattern'), sql`${key}`)}\n      or (case when rn_cov.pattern not glob '*[^a-z0-9._~@!/*-]*'\n      and length(cast(rn_cov.pattern as blob)) = length(rn_cov.pattern)\n      and length(rn_cov.pattern) between 1 and ${sql.lit(MAX_PATTERN_BYTES)}\n      and length(rn_cov.pattern) - length(replace(rn_cov.pattern, '*', ''))\n        <= ${sql.lit(MAX_PATTERN_WILDCARDS)}\n        then ${key} glob rn_cov.pattern else 0 end)))` #1",
+      ],
+    },
+    {
+      reason:
+        'Upstream verification reads any organization npmjs_proxy, independently of attachments; the source organization fence remains required.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as claim_proxy\n      where claim_proxy.org_id = ${ctx.orgId} and claim_proxy.type = 'npmjs_proxy'\n        ${id === undefined ? sql`` : sql`and claim_proxy.id = ${id}`})` #1",
+      ],
+    },
+    {
+      reason:
+        'Hosted admission checks cached public packages only on other sources in the same organization; this read neither mutates rows nor reads counts.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (\n        select 1 from package as claim_package join source as claim_source\n          on claim_source.id = claim_package.source_id and claim_source.org_id = ${ctx.orgId}\n        where claim_package.org_id = ${ctx.orgId} and claim_package.ecosystem = 'npm'\n          and claim_package.source_id <> ${input.sourceId}\n          and claim_source.type in ('npmjs_proxy', 'npm_registry')\n          and (claim_package.name = ${input.pattern}\n            ${input.pattern.endsWith('/*') ? sql`or substr(claim_package.name, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))` #1",
+      ],
+    },
+    {
+      reason:
+        'Claim verification composes organization-scoped read predicates only; no mutation, D1 changes read or FK effect is introduced.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`not ${organizationProxy(ctx)}` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`1` #2',
+      ],
+    },
+    {
+      reason:
+        'Replacement refuses to uncover any destination package covered by the old claim; both package and claim are scoped by organization and source inside the write batch.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`not exists (\n        select 1 from package as owned_package join registered_name as old_claim\n          on old_claim.org_id = ${ctx.orgId} and old_claim.id = ${input.id} and old_claim.source_id = ${input.sourceId}\n        where owned_package.org_id = ${ctx.orgId} and owned_package.source_id = ${input.sourceId}\n          and ${npmClaimCover(sql.lit('npm'), sql.ref('old_claim.pattern'), sql.ref('owned_package.name'))}\n          and not ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('owned_package.name'))}\n      )` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name batch rechecks organization, authority, stored-package overlap, public-name verification, replacement coverage and audit snapshot before one fenced insert/update; it never reads a D1 result count.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:builder variable: const outcome = await runOrgFenced(\n        executor,\n        ctx,\n        fence,\n        assertGuard(allOf([held, sourceUnchanged]), ctx),\n        [\n          ...assertCheck(visible),\n          ...assertCheck(sql<SqlBool>`not ${otherSource}`),\n          ...assertCheck(sql<SqlBool>`not ${storedOverlap}`),\n          ...assertCheck(sql<SqlBool>`not ${cachedPublic}`),\n          ...assertCheck(verified),\n          ...assertCheck(retainsPackages),\n          ...(input.previousPattern === undefined\n            ? []\n            : assertCheck(\n                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId} and pattern = ${input.previousPattern})`,\n              )),\n          ...(input.replace\n            ? assertCheck(\n                sql<SqlBool>`exists (select 1 from registered_name where org_id = ${ctx.orgId} and id = ${input.id} and source_id = ${input.sourceId})`,\n              )\n            : []),\n          insert,\n          auditPendingStatement(ctx, input.audit),\n          ...(input.idempotency === undefined\n            ? []\n            : [idempotencyInsertStatement(ctx, input.idempotency)]),\n        ],\n        {\n          authority: probe(held, true),\n          conflict: probe(\n            sql<SqlBool>`(${liveIdempotencyCollision(ctx, input.idempotency)} or ${otherSource})`,\n            false,\n          ),\n          collision: probe(sameSource, false),\n        },\n      ); #1',
+      ],
+    },
+    {
+      reason:
+        'Claim validation imports a pure npm grammar helper without SQL mutations or result-count reads.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:opaque dependency: import { isNpmClaim } from '@package-broker/core/sources/claim-admission'; #1",
+      ],
+    },
+    {
+      reason:
+        'Claim admission composes organization-scoped read predicates; source identity and ownership are rechecked without reading mutation counts.',
+      sites: [
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId}\n          and ${input.replace ? sql`existing.id <> ${input.id} and` : sql``} (existing.id = ${input.id}\n            or (existing.source_id = ${input.sourceId} and existing.ecosystem = ${source.ecosystem}\n              and existing.pattern = ${input.pattern})))` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name\n        where org_id = ${ctx.orgId} and ecosystem = ${source.ecosystem}\n          and source_id <> ${input.sourceId} and pattern = ${input.pattern})` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from package as stored_package\n          join source as stored_source on stored_source.id = stored_package.source_id\n            and stored_source.org_id = ${ctx.orgId}\n          where stored_package.org_id = ${ctx.orgId} and stored_package.ecosystem = 'npm'\n            and stored_package.source_id <> ${input.sourceId}\n            and stored_source.type not in (${sql.join(PROXY_TYPES)})\n            and ${npmClaimCover(sql.lit('npm'), sql`${input.pattern}`, sql.ref('stored_package.name'))})` #1",
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`0` #2',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`0` #1',
+        'db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`1` #1',
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from source as owner\n        where owner.id = ${input.sourceId} and owner.org_id = ${ctx.orgId}\n          and owner.ecosystem = ${source.ecosystem}\n          and owner.type = ${source.type}\n          and (owner.type <> 'hosted' or owner.project_id is null))` #1",
+      ],
+    },
+    {
+      reason:
+        'Registered-name insertion or replacement changes only the claim row under organization and source fences; no referenced key or D1 result-count dependency changes.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:builder variable: const insert = input.replace\n        ? compile(\n            db\n              .updateTable('registered_name')\n              .set({ pattern: input.pattern })\n              .where('org_id', '=', ctx.orgId)\n              .where('id', '=', input.id)\n              .where('source_id', '=', input.sourceId),\n          )\n        : compile(\n            db.insertInto('registered_name').values({\n              id: input.id,\n              org_id: ctx.orgId,\n              source_id: input.sourceId,\n              ecosystem: source.ecosystem,\n              pattern: input.pattern,\n            }),\n          ); #1",
+      ],
+    },
+    {
+      reason:
+        'Overlap checks organization-scoped registrations, comparing bounded legacy globs and compatible literal prefixes conservatively; destination registrations are excluded.',
+      sites: [
+        "db-sqlite/src/repositories/registered-name.ts:SQL template: sql<SqlBool>`exists (select 1 from registered_name as existing\n        where existing.org_id = ${ctx.orgId} and existing.ecosystem = ${source.ecosystem}\n          and existing.source_id <> ${input.sourceId}\n          and (existing.pattern = ${input.pattern}\n            ${\n              source.ecosystem !== 'npm'\n                ? sql``\n                : sql`or\n              ((${source.type} in ('hosted', 'vcs') or exists (select 1 from source as overlap_participant where overlap_participant.org_id = ${ctx.orgId} and overlap_participant.id = existing.source_id and overlap_participant.type in ('hosted', 'vcs'))) and (\n              (${input.pattern.includes('*') ? 1 : 0} = 1\n                and substr(existing.pattern, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})) = substr(${input.pattern}, 1, min(case when instr(existing.pattern, '*') > 0 then instr(existing.pattern, '*') - 1 else length(existing.pattern) end, ${input.pattern.split('*')[0]!.length})))\n              or\n              (case when length(existing.pattern) <= ${sql.lit(MAX_PATTERN_BYTES)} then ${input.pattern} glob existing.pattern else 0 end)\n              or (substr(existing.pattern, -2) = '/*' and instr(existing.pattern, '*') = length(existing.pattern)\n                and substr(${input.pattern}, 1, length(existing.pattern) - 1) = substr(existing.pattern, 1, length(existing.pattern) - 1))\n              ${input.pattern.endsWith('/*') ? sql`or substr(existing.pattern, 1, ${input.pattern.length - 1}) = ${input.pattern.slice(0, -1)}` : sql``}))`\n            }))` #1",
+      ],
+    },
+    {
+      reason:
+        'The VCS attachment CAS stores a boolean truncation marker in existing metadata; no D1 changes count is used.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const attach = db\n    .updateTable('version')\n    .set({\n      blob_id: liveBlob,\n      last_op_id: opId,\n      ...(request.readmeTruncated === undefined\n        ? {}\n        : {\n            metadata_json: sql<string>`json_set(metadata_json, '$.readmeTruncated', json(${request.readmeTruncated ? 'true' : 'false'}))`,\n          }),\n      ...(npmIntegrity === undefined ? {} : { npm_integrity: npmIntegrity }),\n    })\n    .where('version.id', '=', versionId)\n    .where('version.org_id', '=', ctx.orgId)\n    .where('version.revision', '=', revision)\n    .where('version.status', '<>', 'tombstoned')\n    .where(sql<SqlBool>`${liveBlob} IS NOT NULL`)\n    .where('version.blob_id', 'is', null)\n    .$if(npmIntegrity !== undefined, (q) =>\n      q.where(sql<SqlBool>`EXISTS (\n      SELECT 1 FROM package p JOIN source s ON s.id=p.source_id AND s.org_id=p.org_id\n      WHERE p.id=version.package_id AND p.org_id=${ctx.orgId} AND p.ecosystem='npm' AND s.type='vcs')`),\n    ); #1",
+      ],
+    },
+    {
+      reason: 'The pack refusal codes are a closed constant list with no database dependency.',
+      sites: [
+        "db-sqlite/src/repositories/source.ts:opaque dependency: import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes'; #1",
+      ],
+    },
+    {
+      reason:
+        'Extracted explicit membership upsert sets origin without reading a changes result; its organization predicate is mutation-tested.',
+      sites: [
+        "db-sqlite/src/repositories/visibility-subset.ts:conflict action: db\n      .insertInto('project_package')\n      .columns(['org_id', 'project_id', 'package_id', 'origin', 'ecosystem', 'name'])\n      .expression(\n        db\n          .selectFrom('package')\n          .select([\n            'org_id',\n            sql<string>`${projectId}`.as('project_id'),\n            'id',\n            sql<'explicit'>`'explicit'`.as('origin'),\n            'ecosystem',\n            'name',\n          ])\n          .where('id', '=', packageId)\n          .where('org_id', '=', ctx.orgId),\n      )\n      .onConflict((conflict) =>\n        conflict\n          .columns(['project_id', 'package_id'])\n          .doUpdateSet({ origin: 'explicit' })\n          .where('project_package.origin', '<>', 'explicit'),\n      ) #1",
+      ],
+    },
+    {
+      reason:
+        'Mutation fixture indexes a fixed array of contract cases; this access does not read SQL changes counts.',
+      sites: [
+        'db-sqlite/src/testing/mutation-table/npm-vcs-build.ts:unresolved computed access: cases[index] #1',
+      ],
+    },
+    {
+      reason:
+        'README INSERT SELECT runs only for this attachment operation; doNothing preserves existing README bytes and has no REPLACE or FK side effects.',
+      sites: [
+        "db-sqlite/src/repositories/catalogue-write-dist.ts:builder variable: const readmeStatements =\n    readme == null\n      ? []\n      : [\n          compile(\n            db\n              .insertInto('version_readme')\n              .columns(['version_id', 'org_id', 'filename', 'body'])\n              .expression(\n                sql`SELECT ${versionId}, ${ctx.orgId}, ${readme.filename}, ${readme.body}\n        WHERE EXISTS (SELECT 1 FROM version WHERE id=${versionId} AND org_id=${ctx.orgId} AND last_op_id=${opId})`,\n              )\n              .onConflict((conflict) => conflict.column('version_id').doNothing()),\n          ),\n        ]; #1",
       ],
     },
   ].flatMap(({ reason, sites }) => sites.map((site) => [site, reason])),

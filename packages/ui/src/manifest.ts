@@ -21,3 +21,66 @@ export function checkBudget(total: number, budget: number): { ok: boolean; limit
   const limit = Math.floor((budget * (100 + BUDGET_GROWTH_PERCENT)) / 100);
   return { ok: total <= limit, limit };
 }
+
+interface OutputGraph {
+  readonly [path: string]: { readonly imports: readonly { path: string; kind: string }[] };
+}
+
+export function measureInitialLoad(
+  outputs: OutputGraph,
+  entry: string,
+  gzipSizes: Readonly<Record<string, number>>,
+  fixedBytes: number,
+): {
+  initialGzipBytes: number;
+  chunkGzipBytes: number;
+  totalGzipBytes: number;
+  initialFiles: string[];
+} {
+  const initial = new Set<string>();
+  function visit(path: string) {
+    if (initial.has(path)) return;
+    initial.add(path);
+    for (const imported of outputs[path]!.imports) {
+      if (imported.kind !== 'dynamic-import') visit(imported.path);
+    }
+  }
+  visit(entry);
+  return {
+    initialGzipBytes: fixedBytes + [...initial].reduce((sum, path) => sum + gzipSizes[path]!, 0),
+    initialFiles: [...initial],
+    totalGzipBytes: fixedBytes + Object.values(gzipSizes).reduce((sum, bytes) => sum + bytes, 0),
+    chunkGzipBytes: Math.max(
+      0,
+      ...Object.entries(gzipSizes)
+        .filter(([path]) => !initial.has(path))
+        .map(([, bytes]) => bytes),
+    ),
+  };
+}
+
+export function checkLoadBudgets(
+  sizes: { initialGzipBytes: number; chunkGzipBytes: number; totalGzipBytes: number },
+  budget: Record<string, unknown>,
+) {
+  const keys = ['initialGzipBytes', 'chunkGzipBytes', 'totalGzipBytes'] as const;
+  for (const key of Object.keys(budget)) {
+    if (!keys.some((known) => known === key)) throw new Error(`Unknown bundle budget key: ${key}`);
+  }
+  for (const key of keys) {
+    if (!Object.hasOwn(budget, key)) throw new Error(`Missing bundle budget key: ${key}`);
+    if (
+      !Number.isSafeInteger(budget[key]) ||
+      (budget[key] as number) < (key === 'chunkGzipBytes' ? 0 : 1)
+    ) {
+      throw new Error(
+        'Bundle budget values must be positive safe integers (chunkGzipBytes may be zero)',
+      );
+    }
+  }
+  return {
+    initial: checkBudget(sizes.initialGzipBytes, budget.initialGzipBytes as number),
+    chunk: checkBudget(sizes.chunkGzipBytes, budget.chunkGzipBytes as number),
+    total: checkBudget(sizes.totalGzipBytes, budget.totalGzipBytes as number),
+  };
+}

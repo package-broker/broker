@@ -16,7 +16,7 @@ import {
 } from '@package-broker/core/import/run-service';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
-import type { BlobStore } from '@package-broker/core/platform/blob';
+import type { CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { blobEligibleCondition } from './blob-references.js';
 import { createImportRunStore } from './import-run.js';
@@ -49,6 +49,18 @@ describe.each([false, true])('import runs (D1 limits %s)', (d1PatternLimit) => {
   let publish: boolean;
   let uploads: number;
   const blobStore: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     async put(_ctx, key, body, info) {
       uploads += 1;
       await new Response(body).arrayBuffer();

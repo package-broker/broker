@@ -19,7 +19,7 @@ import {
   type ImportRunWrite,
   type ImportRunWriteOutcome,
 } from '@package-broker/core/import/run-service';
-import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
+import { parseSha256, type CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import {
   assertCheck,
   assertGuard,

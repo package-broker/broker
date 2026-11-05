@@ -6,7 +6,7 @@ import {
   createBlobStore,
   createBlobUploadAdmission,
   parseSha256,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
 } from '@package-broker/core/platform/blob';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createBlobRepository } from './blob.js';
@@ -71,6 +71,21 @@ for (const writer of ['attach', 'replace'] as const) {
       guard = createCatalogueWriteGuard(org, { id: 'J', owner: 'owner', fence: 1 });
       store = createBlobStore(
         {
+          async putStaged() {
+            throw new Error('not_implemented');
+          },
+          async openStaged() {
+            throw new Error('not_implemented');
+          },
+          async promote() {
+            throw new Error('not_implemented');
+          },
+          async discardStaged() {
+            throw new Error('not_implemented');
+          },
+          async listStaged() {
+            throw new Error('not_implemented');
+          },
           async putVerified(_key, body, input) {
             const chunks: number[] = [];
             for await (const chunk of body) chunks.push(...chunk);

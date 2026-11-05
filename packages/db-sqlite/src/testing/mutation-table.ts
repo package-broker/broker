@@ -11,6 +11,32 @@ import { entries as auditTrailServicesEntries } from './mutation-table/audit-tra
 import { entries as auditFailureEntries } from './mutation-table/audit-failure.js';
 import { entries as auditExportEntries } from './mutation-table/audit-export.js';
 import { entries as auditSinkEntries } from './mutation-table/audit-sink.js';
+import { entries as discoveryConnectionsEntries } from './mutation-table/discovery-connections.js';
+import { entries as discoveryRuleEntries } from './mutation-table/discovery-rules.js';
+import { entries as npmTokensEntries } from './mutation-table/npm-tokens.js';
+import { entries as npmDistTagEntries } from './mutation-table/npm-dist-tags.js';
+import { entries as npmUnpublishEntries } from './mutation-table/npm-unpublish.js';
+import { entries as npmDeprecateEntries } from './mutation-table/npm-deprecate.js';
+import { entries as discoveryEntries } from './mutation-table/discovery.js';
+import { entries as trustedPublisherEntries } from './mutation-table/trusted-publishers.js';
+import { entries as registryPolicyReadEntries } from './mutation-table/registry-policy-read.js';
+import { entries as registryPolicyCreateEntries } from './mutation-table/registry-policy-create.js';
+import { entries as registryPolicyUpdateEntries } from './mutation-table/registry-policy-update.js';
+import { entries as registryPolicyMembersEntries } from './mutation-table/registry-policy-members.js';
+import { entries as registryPolicyManageEntries } from './mutation-table/registry-policy-manage.js';
+import { entries as workloadTokenEntries } from './mutation-table/workload-token.js';
+import { entries as npmVcsBuildEntries } from './mutation-table/npm-vcs-build.js';
+import { entries as packageDetailEntries } from './mutation-table/package-detail.js';
+import { entries as policyVersionFactsEntries } from './mutation-table/policy-version-facts.js';
+import { entries as npmLoginEntries } from './mutation-table/npm-login.js';
+import { entries as oidcEntries } from './mutation-table/oidc.js';
+import { entries as proxyClaimsEntries } from './mutation-table/proxy-claims.js';
+import { entries as registeredNameClaimProxyEntries } from './mutation-table/registered-name-claim-proxy.js';
+import { entries as publishGuardEntries } from './mutation-table/catalogue-publish-guard.js';
+import { entries as publishesEntries } from './mutation-table/publishes.js';
+import { entries as readmeEntries } from './mutation-table/package-readme.js';
+import { entries as accessRequestsEntries } from './mutation-table/package-access-requests.js';
+import { entries as explicitPackageEntries } from './mutation-table/visibility-explicit-package.js';
 import { entries as sourcePackageRequestEntries } from './mutation-table/source-package-request.js';
 import { entries as npmAuditSnapshotEntries } from './mutation-table/npm-audit-snapshot.js';
 import { entries as apiServicesEntries } from './mutation-table/api-services.js';
@@ -119,6 +145,16 @@ import { entries as webhookDeliveryEntries } from './mutation-table/webhook-deli
 import { entries as sourceSyncReadsEntries } from './mutation-table/source-sync-reads.js';
 import { entries as sourceSyncCountsEntries } from './mutation-table/source-sync-counts.js';
 import { entries as sourceRemovalEntries } from './mutation-table/source-removal.js';
+import { entries as notificationReadEntries } from './mutation-table/notification-read.js';
+import { entries as notificationWriteEntries } from './mutation-table/notification-write.js';
+import {
+  entries as notificationCaptureEntries,
+  overflowEntries as notificationOverflowEntries,
+} from './mutation-table/notification-capture.js';
+import { entries as notificationDispatchEntries } from './mutation-table/notification-dispatch.js';
+import { entries as notificationAttemptEntries } from './mutation-table/notification-attempt.js';
+import { entries as notificationRetentionEntries } from './mutation-table/notification-retention.js';
+import { entries as notificationPrepareEntries } from './mutation-table/notification-prepare.js';
 import {
   checkCompleteness as checkInventory,
   builderAllowlist,
@@ -133,6 +169,25 @@ const registeredEntries: readonly MutationEntry[] = [
   ...auditCutoverEntries,
   ...auditNoneEntries,
   ...auditPruneEntries,
+  ...registryPolicyReadEntries,
+  ...registryPolicyCreateEntries,
+  ...registryPolicyUpdateEntries,
+  ...registryPolicyMembersEntries,
+  ...registryPolicyManageEntries,
+  ...trustedPublisherEntries,
+  ...npmLoginEntries,
+  ...npmTokensEntries,
+  ...npmVcsBuildEntries,
+  ...discoveryEntries,
+  ...discoveryConnectionsEntries,
+  ...discoveryRuleEntries,
+  ...publishGuardEntries,
+  ...publishesEntries,
+  ...readmeEntries,
+  ...packageDetailEntries,
+  ...policyVersionFactsEntries,
+  ...accessRequestsEntries,
+  ...explicitPackageEntries,
   ...sourceAttachmentCountsEntries,
   ...sourceSelectionRevisionEntries,
   ...sourceVisibleEntries,
@@ -151,6 +206,8 @@ const registeredEntries: readonly MutationEntry[] = [
   ...localLoginSetupEntries,
   ...visibilitySubsetEntries,
   ...visibilityAttachFactoryEntries,
+  ...proxyClaimsEntries,
+  ...registeredNameClaimProxyEntries,
   ...registeredNameFactoryEntries,
   ...importCredentialEntries,
   ...importAuthorityEntries,
@@ -217,6 +274,9 @@ const registeredEntries: readonly MutationEntry[] = [
   ...catalogueWriteVersionUpdateEntries,
   ...cacheEpochEntries,
   ...catalogueEpochEntries,
+  ...npmDistTagEntries,
+  ...npmUnpublishEntries,
+  ...npmDeprecateEntries,
   ...sourceEntries,
   ...attachedProxyEntries,
   ...projectSourceReadEntries,
@@ -250,9 +310,39 @@ const registeredEntries: readonly MutationEntry[] = [
   ...sourceSyncReadsEntries,
   ...sourceSelectionEntries,
   ...selectedKeysEntries,
+  ...oidcEntries,
+  ...workloadTokenEntries,
+  ...notificationReadEntries,
+  ...notificationWriteEntries,
+  ...notificationCaptureEntries,
+  ...notificationOverflowEntries,
+  ...notificationDispatchEntries,
+  ...notificationAttemptEntries,
+  ...notificationRetentionEntries,
+  ...notificationPrepareEntries,
 ];
 
 const stagingBuilders = new Set([
+  'createRegistryPolicyStore',
+  'createRegistryPolicyUpdater',
+  'createRegistryPolicyMembers',
+  'createRegistryPolicyExpiry',
+  'createPolicyReadAuditSink',
+  'createDiscoveryRuleRepository',
+  'createDistTagStore',
+  'createUnpublishStore',
+  'createAuditHealthRepository',
+  'disableTrustedPublisherStatements',
+  'createNotificationWriteRepository',
+  'notificationCaptureStatements',
+  'sourceOverflowStatements',
+  'createNotificationAttemptRepository',
+  'createNotificationSettlement',
+  'createNotificationRetentionRepository',
+  'createNotificationPrepareRepository',
+  'failureStreakStatements',
+  'createPackageDetailRepository',
+  'createDeprecationStore',
   'createApiRoutes',
   'createAuditApiExportStore',
   'createAuditCutoverRepository',

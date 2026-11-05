@@ -1,3 +1,8 @@
+import * as sourceDiscovery from '@package-broker/core/api/routes/source-discovery-schemas';
+import * as trustedPublishers from '@package-broker/core/api/routes/trusted-publishers-schemas';
+import * as notifications from '@package-broker/core/api/routes/notifications-schemas';
+import * as packageDetail from '@package-broker/core/api/routes/package-detail-schemas';
+import * as packageAccessRequests from '@package-broker/core/api/routes/package-access-requests-schemas';
 import { createApiModule, type ApiModuleDeps } from '@package-broker/core/api/module';
 import { AUTH_API } from '@package-broker/core/api/auth-schemas';
 import type { ApiRouteSpec } from '@package-broker/core/api/route';
@@ -11,6 +16,8 @@ import * as servicePrincipals from '@package-broker/core/api/routes/service-prin
 import * as sourceAttachments from '@package-broker/core/api/routes/source-attachment-schemas';
 import * as sourceNames from '@package-broker/core/api/routes/source-names-schemas';
 import * as sources from '@package-broker/core/api/routes/sources-schemas';
+import * as publishes from '@package-broker/core/api/routes/publishes-schemas';
+import * as policies from '@package-broker/core/api/routes/policies-schemas';
 import * as tokens from '@package-broker/core/api/routes/tokens-schemas';
 import type { ApiSlot } from '@package-broker/core/plugin';
 
@@ -21,6 +28,12 @@ const MISSING = /^API module requires dependency: dependencies\.(.+)$/;
 function stubDependencies(): ApiModuleDeps {
   const deps: Record<string, unknown> = {
     imports: {},
+    sourceDiscovery: { discovery: {}, savedRules: {}, ids: {}, clock: {} },
+    trustedPublishers: {},
+    notifications: {},
+    packageAccessRequests: {},
+    packageDetail: {},
+    registryPolicy: {},
     sources: { service: { acceptRemoval: () => undefined } },
   };
   for (let round = 0; round < MAX_STUB_ROUNDS; round += 1) {
@@ -52,16 +65,23 @@ function declaredSpecs(): Map<string, ApiRouteSpec> {
   };
   for (const module of [
     access,
+    trustedPublishers,
+    notifications,
     imports,
     organization,
     packages,
+    packageDetail,
+    packageAccessRequests,
     projectAccess,
     projects,
     servicePrincipals,
     sourceAttachments,
     sourceNames,
+    sourceDiscovery,
     sources,
     tokens,
+    publishes,
+    policies,
   ]) {
     Object.values(module).forEach(collect);
   }

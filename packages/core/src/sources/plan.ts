@@ -2,7 +2,10 @@ export type SkipReason =
   | 'archived'
   | 'no_manifest'
   | 'invalid_name'
-  | 'npm_from_vcs_unsupported'
+  | 'fork'
+  | 'name_public'
+  | 'name_public_unverified'
+  | 'claim_overlap'
   | 'filtered_out'
   | 'error_451'
   | 'error_404';

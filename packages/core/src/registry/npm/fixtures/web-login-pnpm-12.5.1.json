@@ -1,0 +1,11 @@
+{
+  "client": "pnpm",
+  "version": "12.5.1",
+  "transport": "Real CLI argument parser; refused before any registry HTTP request. Runtime HTTP capture awaits the Linux gate host.",
+  "command": ["pnpm", "login", "--auth-type=web"],
+  "exitCode": 2,
+  "status": "refused",
+  "reason": "client_does_not_support_web_login_option",
+  "output": "error: unexpected argument '--auth-type' found\n\nUsage: pnpm login [OPTIONS]\n\nFor more information, try '--help'.\n",
+  "requests": []
+}

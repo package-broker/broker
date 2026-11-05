@@ -27,9 +27,61 @@ WHERE ecosystem IS NOT (SELECT s.ecosystem FROM source AS s WHERE s.id = package
   expect(statements.every((statement) => Buffer.byteLength(statement) <= 100_000)).toBe(true);
 });
 
+it('npm_publish fits D1 migration statement and parameter limits', async () => {
+  const source = (await discoveredMigrations())[1]!;
+  expect(source.id).toBe('core:0002_npm_publish');
+  expect(source.phase).toBe('expand');
+  const statements = splitStatements(source.sql);
+  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(3);
+  expect(statements.filter((sql) => sql.startsWith('ALTER TABLE '))).toHaveLength(3);
+  expect(statements.length + 3).toBeLessThanOrEqual(200);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((s) => s.kind === 'code')
+        .every((s) => !/[?:@$]/.test(s.text)),
+    ),
+  ).toBe(true);
+});
+it('npm_identity fits D1 migration statement and parameter limits', async () => {
+  const source = (await discoveredMigrations())[2]!;
+  expect(source.id).toBe('core:0003_npm_identity');
+  expect(source.phase).toBe('expand');
+  const statements = splitStatements(source.sql);
+  expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(3);
+  expect(statements.filter((sql) => sql.startsWith('ALTER TABLE '))).toHaveLength(2);
+  expect(statements.length + 3).toBeLessThanOrEqual(200);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((s) => s.kind === 'code')
+        .every((s) => !/[?:@$]/.test(s.text)),
+    ),
+  ).toBe(true);
+});
+
+it('npm_login_handoff fits D1 migration statement and parameter limits', async () => {
+  const source = (await discoveredMigrations()).find(
+    (source) => source.id === 'core:0006_npm_login_handoff',
+  )!;
+  expect(source.phase).toBe('contract');
+  const statements = splitStatements(source.sql);
+  expect(statements.length + 3).toBeLessThanOrEqual(200);
+  expect(statements.every((sql) => Buffer.byteLength(sql) <= 100_000)).toBe(true);
+  expect(
+    statements.every((sql) =>
+      scanSql(sql)
+        .filter((part) => part.kind === 'code')
+        .every((part) => !/[?:@$]/.test(part.text)),
+    ),
+  ).toBe(true);
+});
+
 it('the audit migration back-fill fits D1 statement, parameter and atomic batch limits', async () => {
-  const audit = (await discoveredMigrations())[1]!;
-  expect(audit.id).toBe('core:0002_audit');
+  const audit = (await discoveredMigrations()).find((source) => source.id === 'core:0011_audit')!;
+  expect(audit.id).toBe('core:0011_audit');
   expect(audit.phase).toBe('expand');
   const statements = splitStatements(audit.sql);
   expect(statements.filter((sql) => sql.startsWith('CREATE TABLE '))).toHaveLength(4);

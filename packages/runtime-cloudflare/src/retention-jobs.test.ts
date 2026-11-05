@@ -84,6 +84,8 @@ async function boot() {
   cleanup.push(async () => {
     spy.mockRestore();
   });
+  const records: unknown[] = [];
+  const list = vi.fn(async () => ({ objects: [], truncated: false }));
   const worker = createWorker([auditTrail()], {
     audit: {},
     platformPorts: {
@@ -92,7 +94,7 @@ async function boot() {
       jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
       observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
     },
-    console: { log: () => undefined, error: () => undefined },
+    console: { log: (record) => records.push(record), error: (record) => records.push(record) },
     cacheStorage: {
       open: async () => ({
         match: async () => undefined,
@@ -104,6 +106,7 @@ async function boot() {
   const env: Env = {
     DB: db,
     STORAGE: {
+      list,
       head: async () => null,
       get: async () => null,
       put: async () => null,
@@ -236,6 +239,8 @@ async function boot() {
     rows,
     claim,
     exec,
+    records,
+    list,
     cancels: () => writes.filter((sql) => CANCEL_PURGE.test(sql)).length,
     beforeBatch: (hook: typeof beforeBatch) => {
       beforeBatch = hook;
@@ -259,7 +264,7 @@ describe('Worker retention jobs', () => {
       await h.publish();
       if (name === 'blob-purge') await h.due();
       await h.consume(name);
-      expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(h.a.orgId, SHA));
+      expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
       expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
     },
   );
@@ -288,7 +293,7 @@ describe('Worker retention jobs', () => {
     await h.publish(h.b);
     const foreign = await h.rows(h.b);
     await (await h.claim('retention-scan')).run();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(h.a.orgId, SHA));
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
     expect((await h.rows())[1]).toMatchObject({ deleted_at: null, purge_after: null });
     expect(await h.rows(h.b)).toEqual(foreign);
@@ -309,7 +314,7 @@ describe('Worker retention jobs', () => {
     await h.released();
     await h.due();
     await (await h.claim('blob-purge')).run();
-    expect(h.remove).toHaveBeenCalledExactlyOnceWith(blobStorageKey(h.a.orgId, SHA));
+    expect(h.remove.mock.calls).toEqual([[blobStorageKey(h.a.orgId, SHA)]]);
     expect((await h.rows())[0]).toMatchObject({ deleted_at: expect.any(String) });
   });
 
@@ -554,4 +559,13 @@ describe('Worker retention jobs', () => {
       h.afterBatch(undefined);
     }
   }, 45_000);
+});
+
+it('Round 4 real Worker observability emits a staged sweep failure', async () => {
+  const h = await boot();
+  h.list.mockRejectedValueOnce(new Error('listing failed'));
+  await (await h.claim('blob-purge')).run();
+  expect(h.records).toContainEqual(
+    expect.objectContaining({ level: 'warn', event: 'staged_blob_sweep_failed' }),
+  );
 });

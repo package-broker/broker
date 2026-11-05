@@ -1,4 +1,4 @@
-<!-- Pull requests target `main` and are squash-merged; the pull request title becomes the commit message, so it must follow Conventional Commits with the package directory as scope. -->
+<!-- Pull requests target `main`, never another pull request's branch, and are squash-merged; the pull request title becomes the commit message, so it must follow Conventional Commits with the package directory as scope. -->
 
 ## Summary
 
@@ -7,6 +7,21 @@ What this change does and why.
 ## Changes
 
 -
+
+## Screenshots
+
+<!-- Required when the change touches the UI: one Before and one After screenshot per changed screen, inside this section. Otherwise tick "No visible UI change". -->
+
+<details>
+<summary>Before | After</summary>
+
+| Before | After |
+| ------ | ----- |
+|        |       |
+
+</details>
+
+- [ ] No visible UI change
 
 ## Test plan
 

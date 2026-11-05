@@ -21,13 +21,13 @@ describe('sessionMetaOf with clientIpOf', () => {
     expect(meta.ip).toBe('203.0.113.7');
   });
 
-  it('takes the first x-forwarded-for entry', async () => {
+  it('ignores untrusted x-forwarded-for', async () => {
     const meta = await sessionMetaOf(
       requestWith(null, { 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9, 192.0.2.10' }),
       'test-request-id',
       clientIpOf,
     );
-    expect(meta.ip).toBe('198.51.100.1');
+    expect(meta.ip).toBeNull();
   });
 
   it('returns null ip when no header gives an address', async () => {
@@ -127,14 +127,14 @@ describe('clientIpOf', () => {
   it.each(cases)('returns only audit-compatible literals for case %#', (value, expected) => {
     for (const header of ['cf-connecting-ip', 'x-forwarded-for']) {
       const result = clientIpOf(requestWith(null, { [header]: value }));
-      expect(result).toBe(expected);
+      expect(result).toBe(header === 'cf-connecting-ip' ? expected : null);
       if (result !== null) expect(isIpLiteral(result)).toBe(true);
     }
   });
 
   it.each([
     [{ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '203.0.113.7'],
-    [{ 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9' }, '198.51.100.1'],
+    [{ 'x-forwarded-for': ' 198.51.100.1 , 192.0.2.9' }, null],
     [{ 'cf-connecting-ip': 'unknown', 'x-forwarded-for': '198.51.100.1' }, null],
     [{ 'x-forwarded-for': 'unknown' }, null],
     [{}, null],

@@ -1,7 +1,8 @@
+import type { NpmPackSkipCode } from '../sources/source-error-codes.js';
 import type { SOURCE_ERROR_CODES } from '../sources/source-error-codes.js';
 import type { IdempotencyRecord } from '../api/idempotency.js';
 import type { AuditEvent } from '../audit/actions.js';
-import type { MutationFence } from '../authz/fence.js';
+import type { SourceMutationFence } from '../authz/fence.js';
 import type { JobGuard } from '../platform/job-repository.js';
 import type { OrgContext, Statement } from './port.js';
 
@@ -44,6 +45,8 @@ export interface SourceSyncStatus {
 }
 
 export interface SourceRecord {
+  readonly revision: number;
+  readonly requirePublishApproval: boolean;
   readonly sync?: SourceSyncStatus;
   readonly id: string;
   readonly projectId: string | null;
@@ -73,6 +76,8 @@ export interface SourceRecord {
 }
 
 export interface NewSource {
+  readonly requirePublishApproval?: boolean;
+  readonly verifiedClaims?: readonly string[];
   readonly id: string;
   /** Null for an organization-level source. */
   readonly projectId: string | null;
@@ -103,6 +108,7 @@ export interface NewSource {
 }
 
 export interface SourceChanges {
+  readonly requirePublishApproval?: boolean;
   readonly url?: string | null;
   readonly configJson?: string;
   readonly credentialId?: string | null;
@@ -141,6 +147,7 @@ export interface SourceAttachmentCountQuery {
 }
 
 export interface SourceUpdate extends SourceTarget {
+  readonly expectedRevision?: number;
   readonly changes: SourceChanges;
   /** Inserted atomically with the update; its id must match changes.credentialId. */
   readonly preparedCredential?: { readonly id: string; readonly statement: Statement };
@@ -176,7 +183,7 @@ export type PollOutcome =
 export interface SourceRepository {
   syncNow(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
   ): Promise<
     'requested' | 'source_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
@@ -184,7 +191,7 @@ export interface SourceRepository {
 
   acceptRemoval(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly refusal: RemovalRefusal; readonly audit: AuditEvent },
   ): Promise<'accepted' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
 
@@ -210,7 +217,7 @@ export interface SourceRepository {
   ): Promise<ReadonlyMap<string, number>>;
   pause(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent; readonly idempotency?: IdempotencyRecord },
   ): Promise<'paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'>;
   /**
@@ -221,7 +228,7 @@ export interface SourceRepository {
    */
   create(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: NewSource,
   ): Promise<
     | 'created'
@@ -233,7 +240,7 @@ export interface SourceRepository {
   >;
   update(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceUpdate,
   ): Promise<
     | 'updated'
@@ -250,7 +257,7 @@ export interface SourceRepository {
    */
   resume(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget & { readonly audit: AuditEvent },
   ): Promise<
     | 'resumed'
@@ -263,7 +270,7 @@ export interface SourceRepository {
   /** `has_packages` while a package references the source, `has_history` while webhook deliveries do. */
   delete(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: SourceTarget,
   ): Promise<
     | 'deleted'
@@ -299,6 +306,15 @@ export interface SourceRepository {
    * poll timers alone.
    */
   markCredentialUnavailable(ctx: OrgContext, id: string): Promise<void>;
+  /** Sets `last_error` only, never counts as a poll failure, and requires the live lease of a package-sync or build job for this source. */
+  reportCandidateSkipped(
+    ctx: OrgContext,
+    guard: JobGuard,
+    input: {
+      readonly id: string;
+      readonly error: 'name_mismatch' | 'version_mismatch' | 'invalid_manifest' | NpmPackSkipCode;
+    },
+  ): Promise<void>;
   /** `stale` when the job guard no longer holds; nothing is written then. */
   pollState(
     ctx: OrgContext,
@@ -308,6 +324,10 @@ export interface SourceRepository {
 }
 
 export interface NewRegisteredName {
+  readonly replace?: boolean;
+  /** Supplied only after a definitive upstream 404; the batch rechecks this proxy's attachment. */
+  readonly previousPattern?: string;
+  readonly claimProbe?: { readonly proxyId: string };
   readonly audit: AuditEvent;
   readonly idempotency?: IdempotencyRecord;
   readonly id: string;
@@ -348,6 +368,8 @@ export interface RegisteredNamePage {
  * `indeterminate`: the response was lost and the write may have committed; re-read.
  */
 export interface RegisteredNameRepository {
+  get(ctx: OrgContext, id: string): Promise<RegisteredNameRecord | null>;
+  claimProxy(ctx: OrgContext): Promise<string | null>;
   /** Id-ordered page within the organization and source; limit is an integer from 1 to 100. */
   list(ctx: OrgContext, input: RegisteredNameListQuery): Promise<RegisteredNamePage>;
   owner(
@@ -356,13 +378,17 @@ export interface RegisteredNameRepository {
   ): Promise<{ readonly sourceId: string; readonly projectId: string | null } | null>;
   add(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: NewRegisteredName,
   ): Promise<
     | 'added'
     | 'invalid_pattern'
     | 'proxy_source'
     | 'pattern_taken'
+    | 'claim_overlap'
+    | 'claim_in_use'
+    | 'name_public'
+    | 'name_public_unverified'
     | 'duplicate'
     | 'not_found'
     | 'forbidden'
@@ -372,7 +398,7 @@ export interface RegisteredNameRepository {
   /** An active non-proxy source left without coverage is paused in the same batch. */
   remove(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: RegisteredNameTarget & { readonly pauseAudit: AuditEvent },
   ): Promise<
     'removed' | 'removed_and_paused' | 'not_found' | 'forbidden' | 'conflict' | 'indeterminate'
@@ -384,7 +410,7 @@ export interface RegisteredNameRepository {
    */
   enable(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     input: RegisteredNameTarget,
   ): Promise<
     | 'enabled'

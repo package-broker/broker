@@ -1673,3 +1673,23 @@ describe('git provider capability discovery', () => {
     expect(gets(fetch)).toBe(2);
   });
 });
+
+describe('npm git metadata adapter', () => {
+  it('reads package.json and emits npm tags with configured-name mismatch reports', async () => {
+    const src = { ...source({ packageName: '@scope/a' }), ecosystem: 'npm' as const };
+    manifests({
+      'refs/tags/v1.0.0': { name: '@scope/a', version: '1.0.0' },
+      'refs/tags/v1.1.0': { name: '@scope/b', version: '1.1.0' },
+      'refs/tags/v2.0.0-beta1': { name: '@scope/a', version: '2.0.0-beta1' },
+    });
+    const result = await members(createGitProvider({ runtime: 'docker' }), src, '@scope/a');
+    expect(result.members.map(({ form, version }) => [form, version])).toEqual([
+      ['npm-vcs', '2.0.0-beta1'],
+      ['npm-vcs', '1.0.0'],
+    ]);
+    expect(result.description.skippedMembers).toEqual([
+      { version: '1.1.0', reason: 'name_mismatch' },
+    ]);
+    expect(readFileAtRefs.mock.calls[0]![3]).toBe('package.json');
+  });
+});

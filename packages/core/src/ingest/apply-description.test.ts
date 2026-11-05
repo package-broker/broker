@@ -110,7 +110,12 @@ function fixture(): Fixture {
     deps: undefined as never,
   };
   const writer: CatalogueWriter = {
+    async publishVersion() {
+      throw new Error('not_implemented');
+    },
+
     statementBudget: {
+      publishVersion: 40,
       syncPackage: 500,
       attachDist: 4,
       openListing: 3,
@@ -383,6 +388,41 @@ describe('applyChunk', () => {
     expect(f.calls).toContain('quarantine:ver-1:digest_mismatch');
     expect(f.marked).toEqual(['1.0.0']);
   });
+
+  it.each([
+    ['vcs', true, true],
+    ['vcs', undefined, false],
+    ['npm_registry', true, false],
+  ] as const)(
+    'resyncs an unchanged active %s version only when the writer queues builds (%s)',
+    async (type, resync, expected) => {
+      const f = fixture();
+      f.existing = [
+        {
+          versionNormalized: '1.0.0',
+          id: 'ver-1',
+          revision: 1,
+          status: 'active',
+          npmIntegrity: INTEGRITY_A,
+          composerShasum: null,
+          metadataJson: normalizeVersionMetadata('npm', JSON.parse(manifest('1.0.0'))).json,
+        },
+      ];
+      const deps = {
+        ...f.deps,
+        writer: {
+          ...f.deps.writer,
+          ...(resync === undefined ? {} : { resyncsUnchangedNpmVcs: resync }),
+        },
+      };
+      await applyChunk(ctx, deps, {
+        ...input(handle(), description(['1.0.0'])),
+        source: { id: 'source-1', key: KEY, type, ecosystem: 'npm', covered: true },
+      });
+      expect(f.calls.includes('sync:1.0.0')).toBe(expected);
+      expect(f.marked).toEqual(['1.0.0']);
+    },
+  );
 
   it('refuses a name outside the registered names before any write', async () => {
     const f = fixture();
@@ -1262,4 +1302,19 @@ it('budgets incoming and stored metadata together when retaining a comparison wi
   const { attempted } = JSON.parse(outcome.cursor!) as { attempted: number };
   expect(attempted).toBe(Math.floor(APPLY_WINDOW_BYTES / perMember));
   expect(outcome.status).toBe('progress');
+});
+
+it('returns skipped candidates in a progress chunk and in its continuation', async () => {
+  const f = fixture();
+  const versions = Array.from({ length: 100 }, (_, i) => `1.0.${i}`);
+  const skipped = [{ version: '0.1.0', reason: 'invalid_manifest' as const }];
+  const first = await applyChunk(ctx, f.deps, input(handle(), description(versions, { skipped })));
+  expect(first.status).toBe('progress');
+  expect(first.skipped).toEqual(skipped);
+  const second = await applyChunk(
+    ctx,
+    f.deps,
+    input(first.session, description(versions, { skipped })),
+  );
+  expect(second.skipped).toEqual(skipped);
 });

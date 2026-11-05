@@ -1,5 +1,92 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.4...ui-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+* **ui:** discovery rules on the Sources page ([#1049](https://github.com/package-broker/broker/issues/1049)) ([3be59e4](https://github.com/package-broker/broker/commit/3be59e46f6f41c5937efe36529fa51207e75413b))
+* **ui:** GitHub organization picker for npm and Composer packages ([#1046](https://github.com/package-broker/broker/issues/1046)) ([196ac80](https://github.com/package-broker/broker/commit/196ac80d9c1579c0817806d9f07bc2a07f8be9a8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.3...ui-v2.0.0-rc.4) (2026-11-03)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **api:** publish approval setting for hosted npm sources ([#1029](https://github.com/package-broker/broker/issues/1029)) ([7aae24f](https://github.com/package-broker/broker/commit/7aae24fd06e9d4d6f77ebcfe1cdf8dd5bc6d072b))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **auth:** hide SSO confirmation when the provider cannot prove a fresh sign-in ([#987](https://github.com/package-broker/broker/issues/987)) ([1f1ccca](https://github.com/package-broker/broker/commit/1f1cccaa65fcecea157010d606aacde91976f429)), closes [#964](https://github.com/package-broker/broker/issues/964)
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **core:** deny-only registry policy path with version filters, plugin read hook and management API (off by default) ([#1042](https://github.com/package-broker/broker/issues/1042)) ([a6d747a](https://github.com/package-broker/broker/commit/a6d747a2e8eca881b370ae73cb2f0fb8c8b369bb))
+* **core:** signed publish webhooks per project with delivery history and admin pages (off by default) ([#1044](https://github.com/package-broker/broker/issues/1044)) ([c1e1f8d](https://github.com/package-broker/broker/commit/c1e1f8d099db2f0b658b96d225bbe76776e6c9c2))
+* **registry:** npm publishing with scan gate, trusted publishing and integration gate ([#1022](https://github.com/package-broker/broker/issues/1022)) ([cbd6e80](https://github.com/package-broker/broker/commit/cbd6e80418b26b01f27d61252437967d1067ead7))
+* **registry:** npm unpublish, deprecate and dist-tag writes for hosted packages ([#1038](https://github.com/package-broker/broker/issues/1038)) ([d60e6db](https://github.com/package-broker/broker/commit/d60e6db21fecba89c09b6437c1070207366b0e18))
+* **registry:** npm web login with browser approval ([#1012](https://github.com/package-broker/broker/issues/1012)) ([f39fa8e](https://github.com/package-broker/broker/commit/f39fa8e2ac7673a4685de1b4e0aa308cb0b2d71a))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** hosted claims follow-ups and copy before publishing ([#1006](https://github.com/package-broker/broker/issues/1006)) ([c72ca04](https://github.com/package-broker/broker/commit/c72ca04d047143465a9f74bc8bc435c7c47b1143))
+* **sources:** hosted npm sources with claim admission ([#997](https://github.com/package-broker/broker/issues/997)) ([6af51fb](https://github.com/package-broker/broker/commit/6af51fb3c53de6a0b0c76dfabe35a622581589d8))
+* **sources:** npm packages from GitHub repositories with claim admission ([#1013](https://github.com/package-broker/broker/issues/1013)) ([a712143](https://github.com/package-broker/broker/commit/a7121436e0ef57595561a7fd31192cba28f0ef88))
+* **ui:** pending publishes, access requests and package detail page ([#1018](https://github.com/package-broker/broker/issues/1018)) ([8a55f55](https://github.com/package-broker/broker/commit/8a55f55a5d868c82ef765dc95b38924f110e161b))
+
+
+### Bug Fixes
+
+* **core:** one npm build identity, no permanent busy answer and gated resync ([#1041](https://github.com/package-broker/broker/issues/1041)) ([88326f0](https://github.com/package-broker/broker/commit/88326f029ea8fa0471d5c6a87639f7af985b17f4))
+* **core:** scoped package detail reads and settings revisions ([#1037](https://github.com/package-broker/broker/issues/1037)) ([46b85d4](https://github.com/package-broker/broker/commit/46b85d48ba6d252d05adbe3e53c451f6a8ea6261))
+* **core:** trusted publisher audit, paging and shared constants ([#1027](https://github.com/package-broker/broker/issues/1027)) ([0fd7f0c](https://github.com/package-broker/broker/commit/0fd7f0ce9961b2906844caf158b5a76caea9a916))
+* **registry:** tombstone reason in the UI, complete unpublish audit and npm-compatible dist-tag ranges ([#1043](https://github.com/package-broker/broker/issues/1043)) ([7e45075](https://github.com/package-broker/broker/commit/7e450757c139ca96011124abe4ec537f48c51d5c))
+* **ui:** actionable scan holds with rescan and audited disposal ([#1028](https://github.com/package-broker/broker/issues/1028)) ([60832bf](https://github.com/package-broker/broker/commit/60832bfb87092d3f5e07e254b4b811bc5030d572))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.2...ui-v2.0.0-rc.3) (2026-10-28)
+
+
+### Features
+
+* **core:** grant lists show subjects to grant readers ([#954](https://github.com/package-broker/broker/issues/954)) ([eabb6fa](https://github.com/package-broker/broker/commit/eabb6facf4a463cf018d0802deb8b9187857f94b))
+* **ui:** add packages and sync from a source on the Packages page ([#958](https://github.com/package-broker/broker/issues/958)) ([cadb091](https://github.com/package-broker/broker/commit/cadb091f624bbed275c0c253595bd9db088c4a3c))
+* **ui:** guided token issuance and service identities on the Tokens page ([#959](https://github.com/package-broker/broker/issues/959)) ([0c33030](https://github.com/package-broker/broker/commit/0c33030c91abf4f4908494fe81ac1b1bb2affa26))
+* **ui:** load admin pages on demand ([#960](https://github.com/package-broker/broker/issues/960)) ([cf0d187](https://github.com/package-broker/broker/commit/cf0d1877f43fc5661f3c143173a34748e726dcd6))
+* **ui:** new grant form a first-time admin can fill ([#952](https://github.com/package-broker/broker/issues/952)) ([599a4ae](https://github.com/package-broker/broker/commit/599a4ae3a32a1918a6b8aafbf0e1d795caee8c94))
+* **ui:** new project form that explains the access policy ([#948](https://github.com/package-broker/broker/issues/948)) ([b426d4a](https://github.com/package-broker/broker/commit/b426d4a4b9faa2325f8c54969294cb62af58fe13))
+* **ui:** product footer on admin pages and sign-in screens ([#963](https://github.com/package-broker/broker/issues/963)) ([05f52e1](https://github.com/package-broker/broker/commit/05f52e1f7b16e9fc7f339ba49d2800c1ba4af089))
+* **ui:** separate Audit and Import from everyday navigation ([#955](https://github.com/package-broker/broker/issues/955)) ([4dc1dc7](https://github.com/package-broker/broker/commit/4dc1dc7af99b9d2b71f46b9605bac37c1ea3a103))
+* **ui:** two-column project forms on wide screens ([#953](https://github.com/package-broker/broker/issues/953)) ([df688f5](https://github.com/package-broker/broker/commit/df688f5c46ec07fcc325d0289c392ff908ebefa6))
+
+
+### Bug Fixes
+
+* **ui:** generic example names in form placeholders and UI tests ([#962](https://github.com/package-broker/broker/issues/962)) ([c65ed5b](https://github.com/package-broker/broker/commit/c65ed5b90b99da8621f478509298a023f6e80ebe))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+  * peerDependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/ui-v2.0.0-rc.1...ui-v2.0.0-rc.2) (2026-10-28)
 
 

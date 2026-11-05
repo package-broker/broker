@@ -760,6 +760,8 @@ describe('source project visibility', () => {
       credentials: { prepare: vi.fn() },
       credentialRepository: { get: vi.fn() },
       registeredNames: {
+        get: async () => null,
+        claimProxy: async () => null,
         list: vi.fn(),
         owner: vi.fn(),
         add: vi.fn(),

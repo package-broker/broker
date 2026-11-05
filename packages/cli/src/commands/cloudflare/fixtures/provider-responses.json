@@ -142,6 +142,14 @@
     "success": true,
     "result": []
   },
+  "workerDomainDeleteProvenance": {
+    "status": "TD945 packet-derived candidate responses; live shape requires confirmation on a real account"
+  },
+  "workerDomainDeleteResponses": [
+    { "name": "empty body", "status": 200, "body": "" },
+    { "name": "success without result", "status": 200, "body": "{\"success\":true}" },
+    { "name": "null result", "status": 200, "body": "{\"success\":true,\"result\":null}" }
+  ],
   "workerNameOnly": {
     "success": true,
     "result": [

@@ -20,7 +20,7 @@ corepack enable && pnpm install --frozen-lockfile && pnpm --filter @package-brok
 
 ## Gates
 
-A pull request must pass the checks CI runs. The last two rows are not part of pull request CI; run them when you change packaging, the prebuilt distributions or the Docker image.
+A pull request must pass the checks CI runs. Pull request CI runs the checks for the packages a change touches and the packages that depend on them; the release pull request runs the complete suite end to end ([ADR-028](docs/decisions/release-and-versioning.md#adr-028-pull-requests-test-only-what-they-change-the-release-tests-everything-end-to-end)). The last two rows are not part of pull request CI; run them when you change packaging, the prebuilt distributions or the Docker image.
 
 | Command                                    | What it checks                                                                                                                                                                                                               |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -36,6 +36,8 @@ A pull request must pass the checks CI runs. The last two rows are not part of p
 | `pnpm client-matrix`                       | Installs through one package manager client; set `CLIENT` and `CLIENT_VERSION` as CI does (composer, npm, pnpm, yarn)                                                                                                        |
 | `pnpm smoke:prebuilt`                      | The packed prebuilt distributions install into a scratch project and start; needs `pnpm build`, `pnpm bundle`, `pnpm stage:prebuilt --write-cli-expected` and network access for `npm install`. The release workflow runs it |
 | `pnpm smoke:docker --functional`           | Builds the Docker image with the smoke fixture config and installs a fixture package through it with Composer; needs a Docker host, `openssl` and network access. See `fixtures/docker-smoke/README.md`                      |
+
+Following [ADR-028](docs/decisions/release-and-versioning.md#adr-028-pull-requests-test-only-what-they-change-the-release-tests-everything-end-to-end), CI always runs lint/format, DCO and title checks on pull requests, selects package checks and their transitive dependents plus integration checks whose inputs changed, and runs everything for shared inputs or a Release Please pull request.
 
 CI also checks the `Signed-off-by` trailer on every commit and the pull request title format (see below).
 
@@ -53,7 +55,7 @@ Contributions are accepted under the repository licence (AGPL-3.0-only). Every c
 
 ## Branches and pull requests
 
-Branch from `main` and open the pull request against `main`. Keep a pull request to one logical change. Pull requests are squash-merged, and the pull request title becomes the commit message, so it must follow [Conventional Commits](https://www.conventionalcommits.org/) with the package directory as scope, for example `feat(core): add plugin hook` or `fix(runtime-node)!: change health route`. Fill in the pull request template, describe the problem and the approach, and add or update tests for the behaviour you change.
+Branch from `main` and open the pull request against `main`. Keep a pull request to one logical change. Stacked pull requests are not accepted: a pull request never targets another pull request's branch and never depends on one that has not merged. A feature lands either as a series of atomic pull requests, each merged on its own with unfinished behaviour behind a feature flag that is off by default, or as one pull request whose commits together form the complete feature ([ADR-027](docs/decisions/release-and-versioning.md#adr-027-no-stacked-pull-requests-a-feature-lands-as-atomic-pull-requests-behind-a-flag-or-as-one-complete-pull-request)). With the flag off, both runtimes behave as before, and a test proves it. Pull requests are squash-merged, and the pull request title becomes the commit message, so it must follow [Conventional Commits](https://www.conventionalcommits.org/) with the package directory as scope, for example `feat(core): add plugin hook` or `fix(runtime-node)!: change health route`. Fill in the pull request template, describe the problem and the approach, and add or update tests for the behaviour you change. A pull request that changes the admin UI (`packages/ui/src`) shows one Before and one After screenshot per changed screen in the collapsed Screenshots section of the template; the `ui screenshots` check fails without them unless the description ticks "No visible UI change".
 
 Read the [UI guidelines](docs/contributing/ui-guidelines.md) before changing the admin UI.
 

@@ -254,11 +254,21 @@ function validSshRepository(text: string, policy: OutboundPolicy): boolean {
   );
 }
 
+function validNpmName(name: string): boolean {
+  try {
+    return packageKey(name, { ecosystem: 'npm' }) === name;
+  } catch (error) {
+    if (error instanceof PackageNameError) return false;
+    throw error;
+  }
+}
+
 function parseVcs(
   c: Collector,
   obj: Obj,
   runtime: string,
   policy: OutboundPolicy,
+  ecosystem: SourceEcosystem,
 ): VcsConfig | null {
   rejectUnknown(c, obj, ['provider', 'repository', 'installationId', 'packageName', 'refs']);
   const provider = obj.provider;
@@ -293,10 +303,18 @@ function parseVcs(
   }
   let packageName: string | undefined;
   if (obj.packageName !== undefined) {
-    if (typeof obj.packageName !== 'string' || !validComposerName(obj.packageName)) {
-      c.add('packageName', 'must be vendor/name');
+    if (
+      typeof obj.packageName !== 'string' ||
+      !(ecosystem === 'composer'
+        ? validComposerName(obj.packageName)
+        : validNpmName(obj.packageName))
+    ) {
+      c.add(
+        'packageName',
+        ecosystem === 'composer' ? 'must be vendor/name' : 'must be a lowercase npm package name',
+      );
     } else {
-      packageName = packageKey(obj.packageName, { ecosystem: 'composer' });
+      packageName = packageKey(obj.packageName, { ecosystem });
     }
   }
   let tags = true;
@@ -417,11 +435,11 @@ export function parseSourceConfig(
   const fail = (): SourceConfigResult => ({ ok: false, problems: c.problems });
   const { policy } = options;
 
-  if (type === 'hosted') {
-    c.add('type', 'hosted sources are not supported');
+  if (type === 'hosted' && ecosystem !== 'npm') {
+    c.add('type', 'hosted Composer sources are not supported');
     return fail();
   }
-  if (!Object.hasOwn(ECOSYSTEM_OF, type)) {
+  if (type !== 'hosted' && !Object.hasOwn(ECOSYSTEM_OF, type)) {
     c.add('type', 'unknown source type');
     return fail();
   }
@@ -429,7 +447,7 @@ export function parseSourceConfig(
     c.add('ecosystem', 'must be composer or npm');
     return fail();
   }
-  if (ECOSYSTEM_OF[type] !== ecosystem)
+  if (type !== 'hosted' && type !== 'vcs' && ECOSYSTEM_OF[type] !== ecosystem)
     c.add('ecosystem', `must be ${ECOSYSTEM_OF[type]} for ${type}`);
 
   if (configJson.length > MAX_CONFIG_LENGTH) {
@@ -450,9 +468,15 @@ export function parseSourceConfig(
 
   const hasUrl = url !== null && url !== undefined;
   switch (type) {
+    case 'hosted': {
+      if (hasUrl) c.add('url', 'must be empty for hosted');
+      if (options.hasCredential) c.add('credential', 'hosted takes no credential');
+      rejectUnknown(c, parsed, []);
+      return c.problems.length > 0 ? fail() : { ok: true, config: {} };
+    }
     case 'vcs': {
       if (hasUrl) c.add('url', 'must be empty for vcs');
-      const config = parseVcs(c, parsed, options.runtime, policy);
+      const config = parseVcs(c, parsed, options.runtime, policy, ecosystem);
       return c.problems.length > 0 || config === null ? fail() : { ok: true, config };
     }
     case 'composer_repository': {

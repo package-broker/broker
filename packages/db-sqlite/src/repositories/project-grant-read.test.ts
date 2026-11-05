@@ -43,7 +43,7 @@ it('paginates grants with principals, role and permissions', async () => {
   expect(first.items).toEqual([
     expect.objectContaining({
       id: 'G1',
-      principal: { kind: 'user', id: 'U', displayName: 'Member' },
+      principal: { kind: 'user', id: 'U', displayName: 'Member', visibility: 'redacted' },
       role: { id: 'R', name: 'Developer', permissions: ['project:read'] },
     }),
   ]);
@@ -54,12 +54,12 @@ it('paginates grants with principals, role and permissions', async () => {
   });
   expect(second.next).toBeNull();
   expect(second.items.map((item) => item.principal)).toEqual([
-    { kind: 'group', id: 'G2', provider: 'oidc', displayName: 'team' },
-    { kind: 'email', id: 'G3', displayName: 'Pending user' },
+    { kind: 'group', id: 'G2', provider: 'oidc', displayName: 'Group', visibility: 'redacted' },
+    { kind: 'email', id: 'G3', displayName: 'Pending user', visibility: 'redacted' },
   ]);
 });
 
-it('never exposes e-mail through pending users, display names or group names to non-admins', async () => {
+it('never exposes e-mail or group values through pending users, display names or group names when redacted', async () => {
   await database.executor.batch([
     stmt("UPDATE user_account SET display_name = email WHERE id = 'U'"),
     stmt("UPDATE access_grant SET subject_value = 'team@example.test' WHERE id = 'G2'"),
@@ -68,6 +68,7 @@ it('never exposes e-mail through pending users, display names or group names to 
   const page = await reader.list(database.orgs!.a, { projectId: 'P', limit: 100 });
   expect(page.items).toHaveLength(3);
   expect(JSON.stringify(page)).not.toContain('@');
+  expect(JSON.stringify(page)).not.toContain('team');
   expect(page.items.map((item) => item.principal.displayName)).toEqual([
     'User',
     'Group',
@@ -75,15 +76,47 @@ it('never exposes e-mail through pending users, display names or group names to 
   ]);
 });
 
-it('allows account e-mail only when explicitly requested for an organization admin', async () => {
+it('returns the e-mail or group value each grant names only when asked to reveal subjects', async () => {
+  await database.executor.batch([
+    stmt("UPDATE access_grant SET subject_value = 'team@example.test' WHERE id = 'G2'"),
+  ]);
   const reader = createProjectGrantReader(database.executor);
   const page = await reader.list(database.orgs!.a, {
     projectId: 'P',
     limit: 100,
-    includeEmail: true,
+    revealSubjects: true,
   });
-  expect(page.items[0]!.principal.email).toBe('member@example.test');
-  expect(page.items[2]!.principal.email).toBe('pending@example.test');
+  expect(page.items.map((item) => item.principal)).toEqual([
+    {
+      kind: 'user',
+      id: 'U',
+      displayName: 'Member',
+      email: 'member@example.test',
+      visibility: 'visible',
+    },
+    {
+      kind: 'group',
+      id: 'G2',
+      displayName: 'team@example.test',
+      provider: 'oidc',
+      groupValue: 'team@example.test',
+      visibility: 'visible',
+    },
+    {
+      kind: 'email',
+      id: 'G3',
+      displayName: 'Pending user',
+      email: 'pending@example.test',
+      visibility: 'visible',
+    },
+  ]);
+  const redacted = await reader.list(database.orgs!.a, {
+    projectId: 'P',
+    limit: 100,
+    revealSubjects: false,
+  });
+  expect(JSON.stringify(redacted)).not.toContain('@');
+  expect(redacted.items.every((item) => item.principal.visibility === 'redacted')).toBe(true);
 });
 
 it('isolates organizations and projects and omits archived projects', async () => {

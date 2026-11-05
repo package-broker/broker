@@ -96,3 +96,15 @@ it('includes optional accept-removal and excludes unmounted rebuild when constru
   expect(paths).toContain('/_pb/sources/:source/accept-removal');
   expect(paths).not.toContain('/_pb/packages/:package/versions/:version/rebuild');
 });
+
+it('includes all five package access operations in the served catalog', () => {
+  expect(servedApiSpecs().map((spec) => spec.api.operationId)).toEqual(
+    expect.arrayContaining([
+      'requestPackageAccess',
+      'listPackageAccessRequests',
+      'approvePackageAccessRequest',
+      'rejectPackageAccessRequest',
+      'listRequestablePackages',
+    ]),
+  );
+});

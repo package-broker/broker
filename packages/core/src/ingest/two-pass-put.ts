@@ -4,7 +4,7 @@ import {
   DEFAULT_MAX_BLOB_BYTES,
   parseSha256,
   type BlobInfo,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
 } from '../platform/blob.js';
 import type { Codecs } from '../platform/codec.js';
 import type { Counter } from '../platform/metrics.js';

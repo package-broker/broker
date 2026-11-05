@@ -1,7 +1,10 @@
+import { npmVcsBuildRetryStatement } from './npm-vcs-build.js';
+import { NPM_PACK_SKIP_CODES } from '@package-broker/core/sources/source-error-codes';
+import { proxyClaimsVerified } from './proxy-claims.js';
 import type { VcsConfig } from '@package-broker/core/sources/config';
 import { SOURCE_ERROR_CODES } from '@package-broker/core/sources/source-error-codes';
 import { sql, type SqlBool } from 'kysely';
-import type { FailureProbes, MutationFence } from '@package-broker/core/authz/fence';
+import type { FailureProbes, SourceMutationFence } from '@package-broker/core/authz/fence';
 import { DbError } from '@package-broker/core/db/errors';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import type {
@@ -26,7 +29,7 @@ import {
 import { sourceAttachmentCountsStatement } from './source-attachment-counts.js';
 import { acceptRemovalStatement } from './source-removal.js';
 import { holdsPermission, permissionRows } from './access.js';
-import { actorHolds } from './actor-authority.js';
+import { sourceAuthority, discoverySourceOwned } from './discovery-rule-authority.js';
 import { jobLeaseGuard } from './job-lease-guard.js';
 import { auditPendingStatement } from './audit-pending.js';
 import { idempotencyInsertStatement, liveIdempotencyCollision } from './idempotency.js';
@@ -55,6 +58,7 @@ const CHANGE_KEYS: ReadonlySet<string> = new Set([
   'removalPolicy',
   'retentionDaysOverride',
   'defaultVisibleToNewProjects',
+  'requirePublishApproval',
 ]);
 
 function positiveInteger(field: string, value: unknown): number {
@@ -117,11 +121,11 @@ function allOf(conditions: readonly Guard[]): Guard {
 
 function authority(
   ctx: OrgContext,
-  fence: MutationFence,
+  fence: SourceMutationFence,
   ownerProjectId: string | null,
   providerAnchors: readonly ProtectedHolderProvider[],
 ): Guard {
-  return actorHolds(ctx, fence, {
+  return sourceAuthority(ctx, fence, {
     permission: ownerProjectId === null ? 'org:sources:write' : 'project:sources:write',
     projectId: ownerProjectId,
     providerAnchors,
@@ -139,6 +143,8 @@ function credentialOwnedBy(ctx: OrgContext, id: string, ownerProjectId: string |
 }
 
 interface SourceRow {
+  readonly revision: number;
+  readonly require_publish_approval: number;
   readonly id: string;
   readonly project_id: string | null;
   readonly name: string;
@@ -240,6 +246,8 @@ export function runtimeConfigJson(row: Pick<SourceRow, 'type' | 'config_json'>):
 
 function toRecord(row: SourceRow): SourceRecord {
   return {
+    revision: row.revision,
+    requirePublishApproval: row.require_publish_approval === 1,
     id: row.id,
     projectId: row.project_id,
     name: row.name,
@@ -274,6 +282,8 @@ function toRecord(row: SourceRow): SourceRecord {
 }
 
 const SOURCE_COLUMNS = [
+  'source.revision as revision',
+  'source.require_publish_approval as require_publish_approval',
   'id',
   'project_id',
   'name',
@@ -336,6 +346,7 @@ export function dueStatement(ctx: OrgContext, limit: number): Statement {
       .select([...SOURCE_COLUMNS])
       .where('org_id', '=', ctx.orgId)
       .where('status', '<>', sql.lit('paused'))
+      .where('type', '<>', sql.lit('hosted'))
       .where('next_poll_at', '<=', DB_NOW)
       .orderBy('next_poll_at')
       .orderBy('id')
@@ -482,6 +493,7 @@ export function deferPollStatement(
       .where('org_id', '=', ctx.orgId)
       .where('id', '=', id)
       .where('status', '<>', sql.lit('paused'))
+      .where('type', '<>', sql.lit('hosted'))
       .where('next_poll_at', '=', expectedNextPollAt),
   );
 }
@@ -524,7 +536,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
 
   async function holdsRight(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     owner: string | null,
     anchors: readonly ProtectedHolderProvider[],
   ): Promise<boolean> {
@@ -536,7 +548,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
 
   async function locate(
     ctx: OrgContext,
-    fence: MutationFence,
+    fence: SourceMutationFence,
     id: string,
     anchors: readonly ProtectedHolderProvider[],
   ): Promise<SourceRecord | 'forbidden' | 'not_found'> {
@@ -559,6 +571,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
 
   return {
     async syncNow(ctx, fence, input) {
+      if ('ruleId' in fence) return 'forbidden';
       const current = await locate(ctx, fence, input.id, input.providerAnchors);
       if (typeof current === 'string') return current;
       if (current.status === 'paused') return 'source_paused';
@@ -582,6 +595,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
               .where('id', '=', input.id)
               .where('status', '!=', 'paused'),
           ),
+          npmVcsBuildRetryStatement(ctx, input.id),
           auditPendingStatement(ctx, input.audit),
           ...(input.idempotency === undefined
             ? []
@@ -597,6 +611,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       return after.status === 'paused' ? 'source_paused' : 'conflict';
     },
     async acceptRemoval(ctx, fence, input) {
+      if (!('userId' in fence)) return 'forbidden';
       const held = authority(ctx, fence, null, input.providerAnchors);
       const localAdmin = sql<SqlBool>`EXISTS (SELECT 1 FROM session
         WHERE org_id = ${ctx.orgId} AND id = ${fence.sessionId} AND identity_id IS NULL)`;
@@ -652,6 +667,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
       return new Map(rows.map((row) => [row.sourceId, row.count]));
     },
     async pause(ctx, fence, input) {
+      if ('ruleId' in fence) return 'forbidden';
       const current = await locate(ctx, fence, input.id, input.providerAnchors);
       if (typeof current === 'string') return current;
       const collision = liveIdempotencyCollision(ctx, input.idempotency);
@@ -692,7 +708,23 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         input.retentionDaysOverride === undefined
           ? undefined
           : retentionDays(input.retentionDaysOverride);
+      if ('ruleId' in fence) {
+        const config = JSON.parse(jsonConfig) as Record<string, unknown>;
+        if (
+          input.projectId !== null ||
+          input.type !== 'vcs' ||
+          input.credential?.id !== fence.credentialId ||
+          'statement' in input.credential ||
+          config.provider !== 'github' ||
+          config.installationId !== fence.installationId
+        )
+          return 'forbidden';
+      }
       const allowed = authority(ctx, fence, input.projectId, input.providerAnchors);
+      const claimsVerified =
+        input.type === 'npmjs_proxy'
+          ? proxyClaimsVerified(ctx, input.verifiedClaims)
+          : sql<SqlBool>`1`;
       if (
         input.credential !== null &&
         'statement' in input.credential &&
@@ -719,6 +751,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           url: input.url,
           credential_id: input.credential?.id ?? null,
           config_json: jsonConfig,
+          require_publish_approval: input.requirePublishApproval ? 1 : 0,
           user_agent: input.userAgent ?? null,
           status: isProxy(input.type) ? 'active' : 'paused',
           ...(interval === undefined ? {} : { poll_interval_seconds: interval }),
@@ -752,7 +785,19 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
             ? [input.credential.statement]
             : []),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
+          ...assertCheck(claimsVerified),
           insert,
+          ...('ruleId' in fence
+            ? [
+                compile({
+                  compile: () =>
+                    sql`insert into source_discovery_admission(org_id,source_id,rule_id,run_started_at)
+            select ${ctx.orgId},${input.id},${fence.ruleId},last_run_at from source_discovery_rule where org_id=${ctx.orgId} and id=${fence.ruleId}`.compile(
+                      db,
+                    ),
+                }),
+              ]
+            : []),
           auditPendingStatement(ctx, input.audit, { sql: 'changes() > 0', params: [] }),
         ],
         probes,
@@ -765,11 +810,19 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     },
 
     async update(ctx, fence, input) {
+      if ('ruleId' in fence) return 'forbidden';
       const keys = Object.keys(input.changes);
       if (keys.length === 0 || keys.some((key) => !CHANGE_KEYS.has(key))) {
         throw new TypeError('changes must name one or more updatable source fields');
       }
       const changes = input.changes;
+      if (
+        changes.requirePublishApproval !== undefined &&
+        typeof changes.requirePublishApproval !== 'boolean'
+      )
+        throw new TypeError('requirePublishApproval must be a boolean');
+      if (input.expectedRevision !== undefined)
+        positiveInteger('expectedRevision', input.expectedRevision);
       if (
         input.preparedCredential !== undefined &&
         input.preparedCredential.id !== changes.credentialId
@@ -777,6 +830,8 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         return 'credential_scope_mismatch';
       }
       const set: Record<string, string | number | null> = {};
+      if (changes.requirePublishApproval !== undefined)
+        set.require_publish_approval = changes.requirePublishApproval ? 1 : 0;
       if (changes.url !== undefined) set.url = nullableText('url', changes.url);
       if (changes.configJson !== undefined) set.config_json = jsonText(changes.configJson);
       if (changes.credentialId !== undefined) {
@@ -809,6 +864,13 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         typeof set.credential_id === 'string'
           ? credentialOwnedBy(ctx, set.credential_id, current.projectId)
           : null;
+      const revisionOk = sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId}
+        and id = ${input.id} and revision = ${input.expectedRevision ?? current.revision})`;
+      const approvalOk =
+        changes.requirePublishApproval === undefined
+          ? sql<SqlBool>`1`
+          : sql<SqlBool>`exists (select 1 from source where org_id = ${ctx.orgId} and id = ${input.id}
+            and type = 'hosted' and ecosystem = 'npm')`;
       const touchesCoverage =
         !isProxy(current.type) && (changes.configJson !== undefined || changes.url !== undefined);
       const statusBefore = compile(
@@ -823,6 +885,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
           .updateTable('source')
           .set({
             ...set,
+            revision: sql<number>`revision + 1`,
             ...(touchesCoverage
               ? {
                   status: sql<SourceStatus>`case when status <> 'paused' then 'paused' else status end`,
@@ -839,6 +902,8 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
         fence,
         assertGuard(allowed, ctx),
         [
+          ...assertCheck(revisionOk),
+          ...assertCheck(approvalOk),
           ...(input.preparedCredential === undefined ? [] : [input.preparedCredential.statement]),
           ...(credentialOk === null ? [] : assertCheck(credentialOk)),
           statusBefore,
@@ -867,6 +932,7 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     },
 
     async resume(ctx, fence, input) {
+      if ('ruleId' in fence) return 'forbidden';
       const current = await locate(ctx, fence, input.id, input.providerAnchors);
       if (typeof current === 'string') return current;
       if (!isProxy(current.type)) return 'activation_requires_registered_names';
@@ -907,9 +973,29 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
     },
 
     async delete(ctx, fence, input) {
+      if ('ruleId' in fence) {
+        const candidate = await read(ctx, input.id);
+        if (
+          candidate === null ||
+          candidate.projectId !== null ||
+          candidate.type !== 'vcs' ||
+          candidate.status !== 'paused' ||
+          candidate.credentialId !== fence.credentialId ||
+          (JSON.parse(candidate.configJson) as Record<string, unknown>).installationId !==
+            fence.installationId
+        )
+          return 'forbidden';
+      }
       const current = await locate(ctx, fence, input.id, input.providerAnchors);
       if (typeof current === 'string') return current;
-      const held = authority(ctx, fence, current.projectId, input.providerAnchors);
+      const authorized = authority(ctx, fence, current.projectId, input.providerAnchors);
+      const held =
+        'ruleId' in fence
+          ? sql<SqlBool>`(${authorized} and ${discoverySourceOwned(ctx, fence, input.id)} and exists(select 1 from source ds
+        where ds.org_id=${ctx.orgId} and ds.id=${input.id} and ds.status='paused'
+          and ds.project_id is null and ds.type='vcs' and ds.credential_id=${fence.credentialId}
+          and json_extract(ds.config_json,'$.installationId')=${fence.installationId}))`
+          : authorized;
       const allowed = allOf([held, sourceOwnedBy(ctx, input.id, current.projectId)]);
       const packages = sql<SqlBool>`exists (select 1 from package as referencing
         where referencing.source_id = ${input.id})`;
@@ -976,6 +1062,29 @@ export function createSourceRepository(executor: SqlExecutor): SourceRepository 
                 eb('last_error', 'in', [...CREDENTIAL_REPLACEABLE_ERRORS]),
               ]),
             ),
+        ),
+      ]);
+    },
+
+    async reportCandidateSkipped(ctx, guard, input) {
+      const pack = (NPM_PACK_SKIP_CODES as readonly string[]).includes(input.error);
+      if (!pack && !['name_mismatch', 'version_mismatch', 'invalid_manifest'].includes(input.error))
+        throw new TypeError('invalid_candidate_report');
+      await executor.batch([
+        ...jobLeaseGuard(ctx, guard),
+        ...assertCheck(sql<boolean>`EXISTS (SELECT 1 FROM job
+          WHERE id=${guard.id} AND org_id=${ctx.orgId}
+          AND type=${pack ? 'core:npm-vcs-build:v1' : 'core:package-sync:v1'} AND json_extract(payload_json, '$.sourceId')=${input.id})`),
+        compile(
+          db
+            .updateTable('source')
+            .set({
+              last_error: input.error,
+            })
+            .where('org_id', '=', ctx.orgId)
+            .where('id', '=', input.id)
+            .where('type', '=', 'vcs')
+            .where('ecosystem', '=', 'npm'),
         ),
       ]);
     },

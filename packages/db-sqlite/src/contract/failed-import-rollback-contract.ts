@@ -30,6 +30,143 @@ export function describeFailedImportRollbackContract(
   open: () => Promise<OpenedCatalogueWriteDatabase>,
 ): void {
   describe(`failed import rollback: ${name}`, () => {
+    it.each([
+      ['npm', 'vcs'],
+      ['npm', 'hosted'],
+      ['composer', 'vcs'],
+    ] as const)('checks existing %s %s source before importing a name', async (ecosystem, type) => {
+      const database = await open();
+      const { executor } = database;
+      try {
+        const { a: ctx } = await seedTwoOrganizations(executor);
+        const manifest: Manifest = {
+          version: 1,
+          source_system: 'test',
+          widening: [],
+          items: [
+            {
+              type: 'name',
+              external_ref: 'n1',
+              ecosystem,
+              pattern: ecosystem === 'npm' ? 'lod*' : 'acme/*',
+              source: { existing: { project: null, name: 'source' } },
+            },
+          ],
+        };
+        const parsed = parseManifest(manifest);
+        if (!parsed.ok) throw new Error('invalid manifest fixture');
+        const manifestHash = parseSha256(await planHash(parsed.data));
+        await executor.batch([
+          stmt(
+            "INSERT INTO identity_provider_binding (org_id, provider, anchor) VALUES (?, 'oidc', 'test')",
+            ctx.orgId,
+          ),
+          stmt(
+            "INSERT INTO role (id, org_id, key, name, scope) VALUES ('importer', ?, 'importer', 'Importer', 'organization')",
+            ctx.orgId,
+          ),
+          stmt(
+            "INSERT INTO role_permission (org_id, role_id, permission) VALUES (?, 'importer', 'org:import:approve')",
+            ctx.orgId,
+          ),
+          ...['actor', 'requester'].flatMap((user) => [
+            stmt(
+              'INSERT INTO user_account (id, org_id, email) VALUES (?, ?, ?)',
+              user,
+              ctx.orgId,
+              `${user}@example.test`,
+            ),
+            stmt(
+              "INSERT INTO identity (id, org_id, user_id, provider, subject, email, email_verified, validated_at) VALUES (?, ?, ?, 'oidc', ?, ?, 1, ?)",
+              `identity-${user}`,
+              ctx.orgId,
+              user,
+              user,
+              `${user}@example.test`,
+              NOW,
+            ),
+            stmt(
+              "INSERT INTO access_grant (id, org_id, subject_type, subject_value, scope, role_id) VALUES (?, ?, 'email', ?, 'organization', 'importer')",
+              `grant-${user}`,
+              ctx.orgId,
+              `${user}@example.test`,
+            ),
+          ]),
+          stmt(
+            "INSERT INTO import_run (id, org_id, source_system, state, approved_by_user_id, approved_at, manifest_blob_sha256, plan_hash) VALUES (?, ?, 'test', 'applying', 'actor', ?, ?, ?)",
+            RUN,
+            ctx.orgId,
+            NOW,
+            manifestHash,
+            manifestHash,
+          ),
+          stmt(
+            "INSERT INTO job (id, org_id, type, payload_json, resource_key, state, lease_owner, lease_until, fence) VALUES ('import-job', ?, ?, ?, ?, 'running', 'worker', '2999-01-01T00:00:00.000Z', 1)",
+            ctx.orgId,
+            IMPORT_RUN_JOB.apply,
+            JSON.stringify({ runId: RUN }),
+            IMPORT_RUN_JOB.resourceKey(RUN),
+          ),
+          stmt(
+            "INSERT INTO source (id, org_id, name, ecosystem, type) VALUES ('source', ?, 'source', ?, ?)",
+            ctx.orgId,
+            ecosystem,
+            type,
+          ),
+        ]);
+        const fences = (user: string, runId: string, expected: Readonly<Record<string, number>>) =>
+          delegatedMutationFence(
+            user,
+            runId,
+            { id: 'import-job', owner: 'worker', fence: 1 },
+            expected,
+          );
+        const journal = createImportJournalStore({ executor, providerAnchors: anchors });
+        expect(
+          await runImportApply(
+            {
+              store: journal,
+              clock: fixedClock(NOW),
+              ids: { ulid },
+              blobs: {
+                get: async () => ({
+                  info: {
+                    generation: '',
+                    sha256: manifestHash,
+                    size: JSON.stringify(manifest).length,
+                    mediaType: 'application/json',
+                    purgeAfter: null,
+                  },
+                  body: new Response(JSON.stringify(manifest)).body!,
+                }),
+              },
+            },
+            ctx,
+            { runId: RUN },
+            fences,
+          ),
+        ).toEqual(
+          ecosystem === 'npm' ? { status: 'failed', reason: 'conflict' } : { status: 'applied' },
+        );
+
+        expect(
+          await executor.all(
+            stmt('SELECT pattern FROM registered_name WHERE org_id = ?', ctx.orgId),
+          ),
+        ).toEqual(ecosystem === 'npm' ? [] : [{ pattern: 'acme/*' }]);
+        expect(await journal.appliedRefs(ctx, RUN)).toHaveLength(ecosystem === 'npm' ? 0 : 1);
+        expect(
+          await executor.all(
+            stmt(
+              "SELECT id FROM audit_pending WHERE org_id = ? AND action = 'registered_name.add'",
+              ctx.orgId,
+            ),
+          ),
+        ).toHaveLength(ecosystem === 'npm' ? 0 : 1);
+      } finally {
+        await database.close();
+      }
+    });
     it.each([0, 1, 2])('rolls back after %i committed apply chunks', async (chunks) => {
       const database = await open();
       const { executor } = database;

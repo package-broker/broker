@@ -41,6 +41,7 @@ const NINE_ROUTES = [
 ];
 
 const ROLE_IDS: Readonly<Record<DefaultRoleKey, string>> = {
+  organization_publisher: '01J0ROLEPUBLS00000000000R1',
   organization_admin: '01J0ROLEADMIN00000000000R1',
   organization_auditor: '01J0ROLEORGAUDITOR00000R2',
   project_owner: '01J0ROLEPROJOWNER00000000R3',

@@ -1,3 +1,5 @@
+import { npmManagementIssuance } from '@package-broker/core/authz/npm-management';
+import { createWorkloadTokenStore } from './workload-token.js';
 import type { AuditEvent } from '@package-broker/core/audit/actions';
 import type { IdempotencyRecord } from '@package-broker/core/api/idempotency';
 import { auditPendingStatement, auditReserveStatements } from './audit-pending.js';
@@ -23,6 +25,7 @@ import type {
   ServiceTokenStoreInput,
   ServiceTokenRotationStore,
   ServiceTokenRecord,
+  WorkloadTokenStore,
 } from '@package-broker/core/authz/service-token-service';
 import {
   adminEligibility,
@@ -115,7 +118,7 @@ export type RevokeTokenResult =
   | { readonly status: 'refused'; readonly reason: FailureReason }
   | { readonly status: 'indeterminate' };
 
-export interface TokenRepository extends ServiceTokenRotationStore {
+export interface TokenRepository extends ServiceTokenRotationStore, WorkloadTokenStore {
   /**
    * Inserts the token and its bindings in one guarded batch; `mint` is called again for a fresh
    * pair after a selector collision, at most three times in all. The plaintext of the stored
@@ -570,7 +573,7 @@ function validateServiceInput(input: IssueServiceTokenInput): void {
   if (new Set(covers).size !== covers.length) {
     throw new TypeError('covered permissions must be distinct');
   }
-  const mask = new Set(scopeMask(input));
+  const mask = new Set(issuanceCoverage(input));
   if (!covers.every((name) => mask.has(name))) {
     throw new TypeError('covered permissions must fit the scope at the principal boundary');
   }
@@ -584,6 +587,11 @@ function scopeMask(input: IssueServiceTokenInput): string[] {
   );
 }
 
+/** The scope mask plus the permissions the npm management issuance check adds to coverage. */
+function issuanceCoverage(input: IssueServiceTokenInput): string[] {
+  return [...scopeMask(input), ...npmManagementIssuance(input.scope, ['project:packages:manage'])];
+}
+
 function serviceIssuance(
   ctx: OrgContext,
   fence: MutationFence,
@@ -595,7 +603,7 @@ function serviceIssuance(
     with ip(org_id, session_id, user_id, principal_id, project_id, expires_at, read_only, covers, mask) as (
       select ${ctx.orgId}, ${fence.sessionId}, ${fence.userId}, ${input.servicePrincipalId},
         ${input.projectId}, ${input.expiresAt}, ${input.readOnly ? 1 : 0},
-        ${JSON.stringify(input.authority.covers)}, ${JSON.stringify(scopeMask(input))}
+        ${JSON.stringify(input.authority.covers)}, ${JSON.stringify(issuanceCoverage(input))}
     )
     select 1 from ip
     join session as issuing_session
@@ -725,6 +733,7 @@ export function createTokenRepository(
 ): TokenRepository {
   const idleSeconds = requireIdleSeconds(options.idleSeconds ?? DEFAULT_IDLE_SECONDS);
   const repository = {
+    ...createWorkloadTokenStore(executor),
     async issuePersonal(ctx, fence, input, mint) {
       validateInput(input);
       const selection: Selection = {
@@ -825,7 +834,9 @@ export function createTokenRepository(
             ])
             .where('org_id', '=', ctx.orgId)
             .where('id', '=', tokenId)
-            .where('kind', '=', 'svc'),
+            .where('kind', '=', 'svc')
+            .where('package_name', 'is', null)
+            .where('trusted_publisher_id', 'is', null),
         ),
       );
       const row = rows[0];
@@ -868,7 +879,7 @@ export function createTokenRepository(
         input.projectId === null ? sql`project_id is null` : sql`project_id = ${input.projectId}`;
       const oldLive = sql<boolean>`exists (select 1 from token where org_id = ${ctx.orgId}
         and id = ${input.tokenId} and kind = 'svc' and service_principal_id = ${input.servicePrincipalId}
-        and ${bound} and revoked_at is null
+        and ${bound} and revoked_at is null and package_name is null and trusted_publisher_id is null
         and unixepoch(expires_at, 'subsec') > unixepoch('now', 'subsec')
         and scopes_json = ${JSON.stringify([input.scope])} and read_only = ${input.readOnly ? 1 : 0})`;
       for (let attempt = 1; attempt <= MAX_SELECTOR_ATTEMPTS; attempt += 1) {

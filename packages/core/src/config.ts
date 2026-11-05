@@ -35,6 +35,8 @@ export interface BrokerConfig {
   readonly vulnerability?: { readonly enabled?: boolean };
   /** Read-only MCP endpoint for `read` tokens; requires the Rate Limiting binding on Workers. */
   readonly mcp?: { readonly enabled?: boolean };
+  /** Outbound npm publish notifications; off unless `enabled` is exactly true. */
+  readonly notifications?: { readonly enabled?: boolean };
 }
 
 export function brokerAssetsProblems(config: BrokerConfig): string[] {
@@ -126,4 +128,23 @@ export function brokerVulnerabilityProblems(config: BrokerConfig): string[] {
 export function vulnerabilityEnabled(config: BrokerConfig): boolean {
   if (brokerVulnerabilityProblems(config).length) return false;
   return config.vulnerability?.enabled !== false;
+}
+
+export function brokerNotificationsProblems(config: BrokerConfig): string[] {
+  const value: unknown = config.notifications;
+  if (value === undefined) return [];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return ['notifications: must be an object'];
+  }
+  const problems: string[] = [];
+  for (const [key, entry] of Object.entries(value)) {
+    if (key !== 'enabled') problems.push('notifications: contains an unknown key');
+    else if (typeof entry !== 'boolean') problems.push('notifications.enabled: must be a boolean');
+  }
+  return problems;
+}
+
+export function notificationsEnabled(config: BrokerConfig): boolean {
+  if (brokerNotificationsProblems(config).length) return false;
+  return config.notifications?.enabled === true;
 }

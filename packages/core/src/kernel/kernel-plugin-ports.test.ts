@@ -10,7 +10,7 @@ import {
   type RequestContext,
   type RouteDefinition,
 } from '../plugin.js';
-import type { BlobStore } from '../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../platform/blob.js';
 import type { Cache } from '../platform/cache.js';
 import type { JobEnqueue } from '../platform/job-repository.js';
 import { JobError, jobErrorCode, type JobDefinition } from '../platform/jobs.js';
@@ -62,7 +62,12 @@ function memoryStore(): JobStore & { readonly rows: JobEnqueue[] } {
 
 function services(store: JobStore = memoryStore()): PlatformServices {
   return {
-    blob: { kind: 'fake-blob' } as unknown as BlobStore,
+    blob: {
+      kind: 'fake-blob',
+      stage: async () => {
+        throw new Error('not_implemented');
+      },
+    } as unknown as BlobStore,
     cache: { kind: 'fake-cache' } as unknown as Cache,
     jobStore: store,
   };
@@ -169,6 +174,9 @@ describe('kernel plugin ports: init and routes', () => {
     expect(await tryEnqueue(seenB.init!, 'b:x:v1')).toBe('ok');
     expect(await tryEnqueue(seenB.init!, 'a:x:v1')).toBe('invalid_name');
 
+    expect(seenA.init!.platform!.blob).not.toHaveProperty('stage');
+    expect(seenA.init!.platform!.jobs).not.toHaveProperty('enqueueStatements');
+
     const initLogs = logs().filter((entry) => entry['event'] === 'http.error');
     expect(initLogs.map((entry) => [entry['plugin'], entry['request_id']])).toEqual([
       ['a', null],
@@ -233,7 +241,7 @@ describe('kernel plugin ports: init and routes', () => {
     expect(store.rows[0]).toMatchObject({ projectId: null, initiatorTokenId: null });
   });
 
-  it('passes the exact blob and cache objects and freezes every bound port', async () => {
+  it('narrows blob capabilities, preserves the cache and freezes every bound port', async () => {
     const seen: Seen = {};
     const platform = services();
     await createKernel(options([jobPlugin('a', seen)], { platformServices: platform })).then(
@@ -243,7 +251,9 @@ describe('kernel plugin ports: init and routes', () => {
     for (const bound of [seen.init!, seen.route!.ports]) {
       expect(Object.isFrozen(bound)).toBe(true);
       expect(Object.isFrozen(bound.platform)).toBe(true);
-      expect(bound.platform!.blob).toBe(platform.blob);
+      expect(Object.keys(bound.platform!.blob).sort()).toEqual(['get', 'head', 'put']);
+      expect(Object.isFrozen(bound.platform!.blob)).toBe(true);
+      expect(Object.keys(bound.platform!.jobs).sort()).toEqual(['enqueue', 'get', 'notify']);
       expect(bound.platform!.cache).toBe(platform.cache);
       expect(bound.organizations).toBe(ports.organizations);
       expect(bound.clock).toBe(ports.clock);

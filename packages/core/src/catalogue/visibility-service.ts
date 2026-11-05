@@ -110,6 +110,7 @@ function outcome(answer: VisibilityWriteResult): VisibilityResult {
   switch (reason) {
     case 'authority':
       return { ok: false, error: 'forbidden' };
+    case 'publish_gate':
     case 'conflict':
       return { ok: false, error: 'conflict' };
     case 'collision':
@@ -190,7 +191,7 @@ export function createVisibilityService(deps: {
       removePattern: 'source.update',
     } as const;
     const extraFields = {
-      attachSource: ['precedence'],
+      attachSource: ['precedence', 'verifiedClaims'],
       detachSource: [],
       setPrecedence: ['precedence'],
       setOrder: ['sourceIds'],

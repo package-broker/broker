@@ -1,3 +1,4 @@
+import { sha256Hex } from '../auth/primitives.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { ApiCall } from '../api/idempotency.js';
 import type { AuthenticatedSession } from '../auth/session.js';
@@ -109,6 +110,14 @@ function event(
 }
 
 describe('package version management', () => {
+  for (const action of ['release', 'quarantine', 'tombstone'] as const) {
+    it(`refuses ${action} of a publish-gated version before writing`, async () => {
+      const { call, store } = setup(Object.assign({}, managed, { publishGate: true }));
+      expect(await call({ ...input, action })).toEqual({ ok: false, error: 'publish_gate' });
+      noWrites(store);
+    });
+  }
+
   it('tombstones an organization version with a fenced audit and idempotency record', async () => {
     const { call, reader, store, sessions, log } = setup();
     const idempotency = {
@@ -380,4 +389,63 @@ describe('package version management', () => {
     expect(await call()).toEqual({ ok: true, value: { versionId, status: 'quarantined' } });
     expect(store.quarantineVersion).toHaveBeenCalledTimes(1);
   });
+});
+
+it('requires a reason and organization authority for hosted npm tombstones', async () => {
+  const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
+  expect(await call({ ...input, action: 'tombstone' })).toEqual({
+    ok: false,
+    error: 'invalid_input',
+  });
+  expect(
+    await call({
+      ...input,
+      action: 'tombstone',
+      reason: 'retired',
+      scope: { kind: 'project', projectId },
+    }),
+  ).toEqual({ ok: false, error: 'forbidden' });
+  expect(store.tombstoneVersion).not.toHaveBeenCalled();
+  expect((await call({ ...input, action: 'tombstone', reason: 'retired' })).ok).toBe(true);
+  expect(store.tombstoneVersion).toHaveBeenCalledWith(
+    ctx,
+    fence,
+    expect.objectContaining({ expectedRevision: 3, tombstoneReason: 'retired' }),
+  );
+});
+
+it.each(['r'.repeat(201), 'r'.repeat(1000), 'é'.repeat(500)])(
+  'accepts a hosted tombstone reason within 1000 UTF-8 bytes',
+  async (reason) => {
+    const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
+    expect(await call({ ...input, action: 'tombstone', reason })).toMatchObject({ ok: true });
+    expect(
+      JSON.parse(store.tombstoneVersion.mock.calls[0]![2].audit.payloadJson).changes.reason_sha256
+        .new,
+    ).toBe(await sha256Hex(reason));
+  },
+);
+it.each(['r'.repeat(1001), 'é'.repeat(501), '', '   '])(
+  'refuses invalid hosted tombstone reasons without writing',
+  async (reason) => {
+    const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
+    expect(await call({ ...input, action: 'tombstone', reason })).toEqual({
+      ok: false,
+      error: 'invalid_input',
+    });
+    noWrites(store);
+  },
+);
+
+it.each([
+  'see https://tracker.example/issue/12?token=abc',
+  'leaked ghp_' + 'a'.repeat(36),
+  'AKIAIOSFODNN7EXAMPLE rotated',
+])('refuses credential-looking tombstone reasons without writing: %s', async (reason) => {
+  const { call, store } = setup({ ...managed, hostedNpm: true, revision: 3 });
+  expect(await call({ ...input, action: 'tombstone', reason })).toEqual({
+    ok: false,
+    error: 'invalid_input',
+  });
+  noWrites(store);
 });

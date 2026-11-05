@@ -966,3 +966,73 @@ describe('hidden configuration keys', () => {
     expect(oidcProblems(config({ policy }))).toContain('policy: unsupported key "groups"');
   });
 });
+
+describe('discovery reauthentication capability', () => {
+  it.each([
+    [{}, true],
+    [{ claims_supported: ['sub', 'auth_time'] }, true],
+    [{ claims_supported: ['sub'] }, false],
+    [{ claims_supported: [] }, false],
+  ])('resolves discovery %j to %s and shares the discovery cache', async (metadata, expected) => {
+    const h = harness(() => jsonResponse(doc(metadata)));
+    const p = provider(h);
+    expect(await p.reauthCapability!()).toBe(expected);
+    expect(await p.reauthCapability!()).toBe(expected);
+    await start(p);
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it.each(['enabled', 'disabled'] as const)(
+    'honors the %s override without discovery',
+    async (reauth) => {
+      const h = harness(() => {
+        throw new Error('offline');
+      });
+      const p = provider(h, { reauth });
+      expect(p.supportsReauth).toBe(reauth === 'enabled');
+      expect(await p.reauthCapability!()).toBe(reauth === 'enabled');
+      expect(h.requests).toHaveLength(0);
+    },
+  );
+
+  it('rejects invalid operator settings without returning their values', () => {
+    expect(oidcProblems(config({ reauth: 'secret' as 'auto' }))).toEqual([
+      'reauth must be auto, enabled or disabled',
+    ]);
+  });
+
+  it('coalesces discovery, backs off failures and retries after the failure TTL', async () => {
+    const h = harness(() => new Response(null, { status: 503 }));
+    const p = provider(h);
+    await Promise.all([
+      expect(p.reauthCapability!()).rejects.toThrow(OidcProviderError),
+      expect(p.reauthCapability!()).rejects.toThrow(OidcProviderError),
+    ]);
+    await expect(p.reauthCapability!()).rejects.toThrow(OidcProviderError);
+    expect(h.requests).toHaveLength(1);
+    h.now += 30_000;
+    h.handler = () => jsonResponse(doc({ claims_supported: ['sub'] }));
+    expect(await p.reauthCapability!()).toBe(false);
+    expect(h.requests).toHaveLength(2);
+  });
+
+  it('bounds capability discovery even when fetch ignores abort', async () => {
+    vi.useFakeTimers();
+    const h = harness(() => new Promise<Response>(() => undefined));
+    const result = expect(provider(h).reauthCapability!()).rejects.toMatchObject({
+      detail: 'discovery_timeout',
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    await result;
+  });
+
+  it.each([null, 'auth_time', [1]])(
+    'rejects malformed claims_supported %j',
+    async (claims_supported) => {
+      const h = harness(() => jsonResponse(doc({ claims_supported })));
+      await expect(provider(h).reauthCapability!()).rejects.toMatchObject({
+        detail: 'discovery_invalid',
+      });
+    },
+  );
+});

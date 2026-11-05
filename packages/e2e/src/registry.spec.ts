@@ -444,6 +444,10 @@ async function gitHttpBackend(
     stdio: ['pipe', 'pipe', 'ignore'],
   });
   const exited = once(child, 'close');
+  // git http-backend may exit without draining stdin; its exit code below decides the outcome.
+  child.stdin.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EPIPE') throw error;
+  });
   child.stdin.end(request.body);
   const chunks: Buffer[] = [];
   for await (const chunk of child.stdout) chunks.push(Buffer.from(chunk));
@@ -594,8 +598,20 @@ export async function registryScenario(
     stage = 'admin-session';
     const admin = await session(local);
     stage = 'session-seeding';
-    const api = async (path: string, body: unknown, expected = 204, method = 'POST') =>
-      status(await admin.request(path, body, method), expected, path);
+    const api = async (path: string, body: unknown, expected = 204, method = 'POST') => {
+      const headers: Record<string, string> = {};
+      if (method === 'PATCH') {
+        const listed = await status(
+          await admin.request('/_pb/sources', undefined, 'GET'),
+          200,
+          'source-revision',
+        );
+        const { items } = (await listed.json()) as { items: { id: string; revision: number }[] };
+        headers['If-Match'] =
+          `"r${items.find((item) => path === `/_pb/sources/${item.id}`)!.revision}"`;
+      }
+      return status(await admin.request(path, body, method, headers), expected, path);
+    };
     const project = await api('/_pb/projects', { slug: 'alpha', name: 'Alpha' }, 201);
     const { id: projectId } = (await project.json()) as { id: string };
     const betaProject = await api('/_pb/projects', { slug: 'beta', name: 'Beta' }, 201);

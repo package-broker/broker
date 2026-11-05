@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   describeMigrationContract,
+  describeNpmPublishMigrationContract,
+  describeNpmIdentityMigrationContract,
   describeVulnerabilityMigrationContract,
 } from '@package-broker/db-sqlite/contract/migration-contract';
 import { describeMigrationLockContract } from '@package-broker/db-sqlite/contract/migration-lock-contract';
@@ -49,3 +51,7 @@ describeMigrationContract('better-sqlite3', openPair, firstCoreMigration);
 describeMigrationLockContract('better-sqlite3', openPair, firstCoreMigration);
 
 describeVulnerabilityMigrationContract('better-sqlite3', openPair);
+
+describeNpmPublishMigrationContract('better-sqlite3', openPair);
+
+describeNpmIdentityMigrationContract('better-sqlite3', openPair);

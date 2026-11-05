@@ -5,6 +5,24 @@ import { isUlid } from '@package-broker/core/ids';
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const RESERVE_ACTIONS = new Set([
   'setup.complete',
+  'role.create',
+  'package.unpublish',
+  'publish.reject',
+  'publish.expire',
+  'trusted_publisher.disable',
+  'discovery_rule.delete',
+  'registry_policy.create',
+  'registry_policy.update',
+  'registry_policy.disable',
+  'registry_policy.release',
+  'registry_policy.members_replace',
+  'registry_policy.expire',
+  'notification.disable',
+  'notification.delete',
+  'notification.credential_set',
+  'notification.auto_disable',
+  'notification.delivery_finished',
+  'notification.delivery_cancelled',
   'identity.block',
   'user.suspend',
   'token.revoke',
@@ -22,21 +40,8 @@ const INSERT = `INSERT INTO audit_pending
   (id, org_id, created_at, actor_type, actor_id, token_selector, source_ip,
    action, target_type, target_id, project_id, payload_json)`;
 
-/** The optional condition is trusted repository SQL, never request input. */
-export function auditPendingStatement(
-  ctx: OrgContext,
-  event: AuditEvent,
-  when?: { sql: string; params: readonly SqlValue[] },
-): Statement {
-  return pendingStatement(ctx, event, when, false);
-}
-
-function pendingStatement(
-  ctx: OrgContext,
-  event: AuditEvent,
-  when: { sql: string; params: readonly SqlValue[] } | undefined,
-  companion: boolean,
-): Statement {
+/** Refuses malformed pending inputs, including bulk callers. */
+export function assertAuditPendingEvent(event: AuditEvent): void {
   if (typeof event.id !== 'string' || !isUlid(event.id)) {
     throw new TypeError('id must be a ULID');
   }
@@ -55,6 +60,28 @@ function pendingStatement(
   ) {
     throw new TypeError('payloadJson must be at most 4096 bytes');
   }
+}
+
+/** The optional condition is trusted repository SQL, never request input. */
+export function auditPendingStatement(
+  ctx: OrgContext,
+  event: AuditEvent,
+  when?: { sql: string; params: readonly SqlValue[] },
+  patch?: { readonly path: string; readonly value: Statement },
+): Statement {
+  return pendingStatement(ctx, event, when, false, patch);
+}
+
+function pendingStatement(
+  ctx: OrgContext,
+  event: AuditEvent,
+  when: { sql: string; params: readonly SqlValue[] } | undefined,
+  companion: boolean,
+  patch?: { readonly path: string; readonly value: Statement },
+): Statement {
+  assertAuditPendingEvent(event);
+  // Pre-plugin companion options never grant reserve access.
+  if (patch !== undefined && !('value' in patch)) patch = undefined;
   const params: SqlValue[] = [
     event.id,
     ctx.orgId,
@@ -68,6 +95,7 @@ function pendingStatement(
     event.target.id,
     event.projectId,
     event.payloadJson,
+    ...(patch === undefined ? [] : [patch.path, ...patch.value.params]),
     ...(when?.params ?? []),
   ];
   if (params.length > 100) throw new TypeError('audit insert must bind at most 100 parameters');
@@ -83,6 +111,7 @@ function pendingStatement(
           AND policy = 'required' AND capacity_state = 'refusing'
       )${companion ? ' AND changes() != 1' : ''} THEN NULL ELSE pending_created_at END`;
 
+  const payload = patch === undefined ? '?' : `json_set(?, ?, (${patch.value.sql}))`;
   return {
     sql: `${INSERT}
     SELECT pending_id, pending_org_id, ${createdAt}, pending_actor_type, pending_actor_id, pending_token_selector, pending_source_ip,
@@ -90,7 +119,7 @@ function pendingStatement(
     FROM (
       SELECT ? AS pending_id, ? AS pending_org_id, ? AS pending_created_at, ? AS pending_actor_type, ? AS pending_actor_id,
         ? AS pending_token_selector, ? AS pending_source_ip, ? AS pending_action, ? AS pending_target_type,
-        ? AS pending_target_id, ? AS pending_project_id, ? AS pending_payload_json
+        ? AS pending_target_id, ? AS pending_project_id, ${payload} AS pending_payload_json
     ) AS input${when === undefined ? '' : ` WHERE ${when.sql}`}`,
     params,
   };

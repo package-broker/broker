@@ -113,9 +113,15 @@ function wrap(
   policy: DomainPolicy,
   start: IdentityProvider['start'],
   finish: IdentityProvider['finish'],
+  reauthCapability: IdentityProvider['reauthCapability'],
 ): IdentityProvider {
   return Object.freeze({
     ...fields,
+    ...(reauthCapability === undefined
+      ? {}
+      : {
+          reauthCapability: () => Reflect.apply(reauthCapability, source, []) as Promise<boolean>,
+        }),
     policy: Object.freeze({
       verifiedDomains: Object.freeze(policy.verifiedDomains.slice()),
       emailAuthoritativeDomains: Object.freeze((policy.emailAuthoritativeDomains ?? []).slice()),
@@ -196,6 +202,7 @@ export function buildIdentityProviders(
       const supportsReauth: unknown = source.supportsReauth;
       const start: unknown = source.start;
       const finish: unknown = source.finish;
+      const reauthCapability: unknown = source.reauthCapability;
       const { policy, byField } = providerFieldProblems({
         id,
         kind,
@@ -230,6 +237,9 @@ export function buildIdentityProviders(
       if (typeof supportsReauth !== 'boolean') {
         problems.push(`${label} supportsReauth must be a boolean`);
       }
+      if (reauthCapability !== undefined && typeof reauthCapability !== 'function') {
+        problems.push(`${label} reauthCapability must be a function`);
+      }
       if (typeof start !== 'function') {
         problems.push(`${label} start must be a function`);
       }
@@ -251,6 +261,7 @@ export function buildIdentityProviders(
             policy,
             start as IdentityProvider['start'],
             finish as IdentityProvider['finish'],
+            reauthCapability as IdentityProvider['reauthCapability'],
           ),
         );
       }

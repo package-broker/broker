@@ -1,3 +1,6 @@
+import { checkProxyClaims } from './proxy-claims.js';
+import type { SourcePackageProbe } from '../ingest/source-package.js';
+import { isNpmClaim } from './claim-admission.js';
 import { SOURCE_ERROR_CODES } from './source-error-codes.js';
 import type { ApiCall } from '../api/idempotency.js';
 import { redactValue } from '../audit/redact.js';
@@ -9,7 +12,7 @@ import {
 } from '../audit/actions.js';
 import { isValidPattern } from '../catalogue/patterns.js';
 import type { ActorContext, AdminLog } from '../authz/administration.js';
-import type { MutationFence } from '../authz/fence.js';
+import { fenceKind, type SourceMutationFence } from '../authz/fence.js';
 import type { ProjectActor } from '../authz/project-actor.js';
 import { PackageNameError, packageKey } from '../catalogue/names.js';
 import type { CatalogueReader, WinnerCandidate } from '../db/catalogue.js';
@@ -39,7 +42,8 @@ export type SourceActor =
       readonly servicePrincipalId?: string;
       readonly restrictTo?: readonly string[];
     }
-  | { readonly kind: 'project'; readonly actor: ProjectActor };
+  | { readonly kind: 'project'; readonly actor: ProjectActor }
+  | { readonly kind: 'rule'; readonly ruleId: string };
 
 export interface SourceCredentialInput {
   readonly kind: CredentialKind;
@@ -48,13 +52,14 @@ export interface SourceCredentialInput {
 
 export type SourceCreateInput = Omit<
   NewSource,
-  'id' | 'credential' | 'providerAnchors' | 'audit'
+  'id' | 'credential' | 'providerAnchors' | 'audit' | 'verifiedClaims'
 > & {
   readonly credential?: SourceCredentialInput | null;
   readonly credentialId?: string | null;
 };
 export type SourceUpdateInput = Omit<SourceChanges, 'credentialId'> & {
   readonly credential?: SourceCredentialInput | null;
+  readonly expectedRevision?: number;
 };
 
 export type SourceError =
@@ -72,7 +77,11 @@ export type SourceError =
   | 'source_paused'
   | 'proxy_source'
   | 'pattern_taken'
-  | 'invalid_name';
+  | 'invalid_name'
+  | 'claim_overlap'
+  | 'claim_in_use'
+  | 'name_public'
+  | 'name_public_unverified';
 
 export type SourceServiceResult<T> =
   | { readonly ok: true; readonly value: T; readonly warnings?: readonly SourceConfigProblem[] }
@@ -80,13 +89,16 @@ export type SourceServiceResult<T> =
       readonly ok: false;
       readonly error: SourceError;
       readonly problems?: readonly SourceConfigProblem[];
+      readonly conflictingClaims?: readonly string[];
     };
 
-type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: MutationFence];
+type WriteArgs = [ctx: OrgContext, actor: SourceActor, fence: SourceMutationFence];
 
 export type SourceDto = Pick<
   SourceRecord,
   | 'id'
+  | 'revision'
+  | 'requirePublishApproval'
   | 'projectId'
   | 'name'
   | 'ecosystem'
@@ -159,7 +171,7 @@ export interface SourceService {
   addRegisteredName(
     ...args: [
       ...WriteArgs,
-      input: { readonly sourceId: string; readonly pattern: string },
+      input: { readonly sourceId: string; readonly pattern: string; readonly id?: string },
       call: ApiCall,
     ]
   ): Promise<SourceServiceResult<{ readonly id: string }>>;
@@ -183,6 +195,7 @@ export interface SourceService {
 }
 
 export interface SourceServiceDeps {
+  readonly claimProbe?: SourcePackageProbe;
   readonly sources: Pick<
     SourceRepository,
     | 'create'
@@ -347,6 +360,8 @@ function publicSourceConfig(source: SourceRecord) {
 function sourceDto(source: SourceRecord, editable: boolean): SourceDto {
   return {
     id: source.id,
+    revision: source.revision,
+    requirePublishApproval: source.requirePublishApproval,
     projectId: source.projectId,
     name: source.name,
     ecosystem: source.ecosystem,
@@ -405,6 +420,7 @@ function cursorAfter(ctx: OrgContext, projectId: string | null, cursor: string):
 
 export function createSourceService(deps: SourceServiceDeps): SourceService {
   function permitted(ctx: OrgContext, who: SourceActor, projectId: string | null): boolean {
+    if (who.kind === 'rule') return projectId === null;
     if (who.kind === 'org') {
       return (
         projectId === null &&
@@ -420,17 +436,23 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     );
   }
 
-  function requireFence(who: SourceActor, fence: MutationFence): void {
-    if (fence.userId !== who.actor.userId) {
+  function requireFence(who: SourceActor, fence: SourceMutationFence): void {
+    if (who.kind === 'rule') {
+      if (fenceKind(fence) !== 'discovery' || !('ruleId' in fence) || fence.ruleId !== who.ruleId)
+        throw new TypeError('the discovery fence must belong to the rule');
+      return;
+    }
+    if (!('userId' in fence) || fence.userId !== who.actor.userId) {
       throw new TypeError('the mutation fence must belong to the acting user');
     }
   }
 
   function orgOnly(who: SourceActor): boolean {
     return (
-      who.kind === 'org' &&
-      who.actor.kind === 'organization' &&
-      who.actor.permissions.has('org:sources:write')
+      who.kind === 'rule' ||
+      (who.kind === 'org' &&
+        who.actor.kind === 'organization' &&
+        who.actor.permissions.has('org:sources:write'))
     );
   }
 
@@ -440,7 +462,8 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     id: string,
   ): Promise<SourceRecord | null> {
     const source = await deps.sources.get(ctx, id);
-    return source !== null && source.projectId === (who.kind === 'org' ? null : who.actor.projectId)
+    return source !== null &&
+      source.projectId === (who.kind !== 'project' ? null : who.actor.projectId)
       ? source
       : null;
   }
@@ -485,6 +508,8 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     linkedKind?: string,
     existingKind?: string,
   ) {
+    if (input.type === 'hosted' && input.projectId !== null)
+      return invalid('type', 'hosted sources must belong to the organization');
     if (input.configJson.length > 65536)
       return invalid('config', 'is longer than 65536 characters');
     let config: unknown;
@@ -657,7 +682,10 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       id: deps.ids.ulid(),
       now: new Date().toISOString(),
       action,
-      actor: { type: 'user', id: who.actor.userId },
+      actor:
+        who.kind === 'rule'
+          ? { type: 'system', id: who.ruleId }
+          : { type: 'user', id: who.actor.userId },
       context: call.audit,
       target: { type, id },
       projectId,
@@ -675,7 +703,10 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       id: deps.ids.ulid(),
       now: new Date().toISOString(),
       action: 'source.create',
-      actor: { type: 'user', id: who.actor.userId },
+      actor:
+        who.kind === 'rule'
+          ? { type: 'system', id: who.ruleId }
+          : { type: 'user', id: who.actor.userId },
       context: call.audit,
       target: { type: 'source', id },
       projectId: input.projectId,
@@ -684,6 +715,9 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       type: { new: input.type },
       ecosystem: { new: input.ecosystem },
       project_id: { new: input.projectId },
+      ...(input.type === 'hosted'
+        ? { require_publish_approval: { new: input.requirePublishApproval ?? false } }
+        : {}),
     };
     const named = auditEvent({ ...base, changes: { name: { new: input.name }, ...fields } });
     if (named.ok) return named.event;
@@ -703,6 +737,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     const record = (field: string, value: AuditValue | undefined) => {
       if (value !== undefined) changes[field] = { new: value };
     };
+    if (input.requirePublishApproval !== undefined)
+      changes.require_publish_approval = {
+        old: source.requirePublishApproval,
+        new: input.requirePublishApproval,
+      };
     record('removal_policy', input.removalPolicy);
     record('poll_interval_seconds', input.pollIntervalSeconds);
     record('retention_days_override', input.retentionDaysOverride);
@@ -745,11 +784,13 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
 
   return {
     async syncNow(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
       const source = await owned(ctx, who, id);
       if (source === null) return fail('not_found');
+      if (source.type === 'hosted') return invalid('type', 'hosted sources have no upstream');
       const answer = await deps.sources.syncNow(ctx, fence, {
         id,
         providerAnchors: deps.providerAnchors,
@@ -800,6 +841,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'accepted' ? success(null) : fail(answer);
     },
     async listRegisteredNames(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (
         who.kind === 'org'
           ? who.actor.kind !== 'organization' || !who.actor.permissions.has('org:sources:read')
@@ -837,6 +879,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         : success(sourceDto(source, permitted(ctx, who, source.projectId)));
     },
     async list(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       const projectId = input.projectId ?? null;
       if (
         !who.actor.permissions.has(
@@ -907,6 +950,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       });
     },
     async pause(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -922,6 +966,16 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     async create(ctx, who, fence, input, call) {
       if (!permitted(ctx, who, input.projectId)) return fail('forbidden');
       requireFence(who, fence);
+      if (
+        input.requirePublishApproval !== undefined &&
+        (typeof input.requirePublishApproval !== 'boolean' ||
+          input.type !== 'hosted' ||
+          input.ecosystem !== 'npm')
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const bounds = validateBounds(input);
       if (bounds !== null) return bounds;
       const retention = await validateRetention(ctx, input);
@@ -941,6 +995,20 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       );
       if (!validated.ok) return validated;
       const id = deps.ids.ulid();
+      const verifiedClaims: string[] = [];
+      if (input.type === 'npmjs_proxy') {
+        const conflictingClaims = await checkProxyClaims(
+          deps,
+          ctx,
+          { type: 'new_npmjs_proxy', userAgent: input.userAgent ?? null },
+          verifiedClaims,
+        );
+        if (conflictingClaims === null) return fail('conflict');
+        if (conflictingClaims.length > 0)
+          return who.kind === 'org'
+            ? { ok: false, error: 'conflict', conflictingClaims }
+            : fail('conflict');
+      }
       let credential: NewSource['credential'] = null;
       if (credentialId != null) {
         credential = { id: credentialId };
@@ -965,6 +1033,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       const audit = createAudit(call, who, id, input);
       const answer = await deps.sources.create(ctx, fence, {
         ...rest,
+        ...(input.type === 'npmjs_proxy' ? { verifiedClaims } : {}),
         ...validated.value,
         id,
         credential,
@@ -974,17 +1043,38 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'created' ? success({ id }, validated.warnings) : fail(answer);
     },
     async update(ctx, who, fence, id, input, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
+      if (
+        input.requirePublishApproval !== undefined &&
+        typeof input.requirePublishApproval !== 'boolean'
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const bounds = validateBounds(input);
       if (bounds !== null) return bounds;
       const retention = await validateRetention(ctx, input);
       if (retention !== null) return retention;
       const source = await owned(ctx, who, id);
       if (source === null) return fail('not_found');
-      if (!Object.values(input).some((value) => value !== undefined))
+      if (
+        !Object.entries(input).some(
+          ([key, value]) => key !== 'expectedRevision' && value !== undefined,
+        )
+      )
         return invalid('changes', 'must name one or more updatable source fields');
+      if (
+        input.requirePublishApproval !== undefined &&
+        (source.type !== 'hosted' || source.ecosystem !== 'npm')
+      )
+        return invalid(
+          'requirePublishApproval',
+          'only hosted npm sources support publish approval',
+        );
       const merged = { ...source, ...input };
       let existingKind: string | undefined;
       if (
@@ -1028,9 +1118,11 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       }
       const changes = { ...input };
       delete changes.credential;
+      delete changes.expectedRevision;
       const audit = updateAudits(call, who, source, input);
       const answer = await deps.sources.update(ctx, fence, {
         id,
+        expectedRevision: input.expectedRevision ?? source.revision,
         changes: {
           ...changes,
           ...(input.url === undefined ? {} : { url: validated.value.url }),
@@ -1057,6 +1149,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
       return answer === 'deleted' ? success(null) : fail(answer);
     },
     async resume(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!permitted(ctx, who, who.kind === 'project' ? who.actor.projectId : null))
         return fail('forbidden');
       requireFence(who, fence);
@@ -1085,17 +1178,89 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
     async addRegisteredName(ctx, who, fence, input, call) {
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
-      if (!isValidPattern(input.pattern)) return fail('invalid_pattern');
-      const id = deps.ids.ulid();
+      const source = await deps.sources.get(ctx, input.sourceId);
+      if (source === null) return fail('not_found');
+      if (source.type === 'npmjs_proxy' || source.type === 'packagist_proxy')
+        return fail('proxy_source');
+      if (source.type === 'hosted' && source.projectId !== null) return fail('conflict');
+      if (input.id !== undefined && (source.type !== 'hosted' || source.ecosystem !== 'npm'))
+        return invalid('type', 'only hosted npm claims can be replaced');
+      if (
+        (source.type === 'hosted' || source.type === 'vcs') && source.ecosystem === 'npm'
+          ? !isNpmClaim(input.pattern)
+          : !isValidPattern(input.pattern)
+      )
+        return fail('invalid_pattern');
+      let oldPattern: string | undefined;
+      if (input.id !== undefined) {
+        const oldClaim = await deps.registeredNames.get(ctx, input.id);
+        if (oldClaim?.sourceId !== input.sourceId) return fail('not_found');
+        oldPattern = oldClaim.pattern;
+      }
+      let claimProbe: { proxyId: string } | undefined;
+      if (
+        (source.type === 'hosted' || source.type === 'vcs') &&
+        source.ecosystem === 'npm' &&
+        !input.pattern.includes('*')
+      ) {
+        const proxyId = await deps.registeredNames.claimProxy(ctx);
+        if (proxyId !== null) {
+          let answer;
+          try {
+            answer = await deps.claimProbe?.(
+              ctx,
+              proxyId,
+              input.pattern,
+              AbortSignal.timeout(5000),
+              'claim',
+            );
+          } catch {
+            return fail('name_public_unverified');
+          }
+          if (answer === 'found') return fail('name_public');
+          if (answer !== 'not_found') return fail('name_public_unverified');
+          claimProbe = { proxyId };
+        }
+      }
+      const id = input.id ?? deps.ids.ulid();
       const answer = await deps.registeredNames.add(ctx, fence, {
         ...input,
+        ...(input.id === undefined ? {} : { replace: true }),
+        ...(claimProbe === undefined ? {} : { claimProbe }),
         id,
-        ...mutationAudit(call, who, 'registered_name.add', 'registered_name', id),
+        ...mutationAudit(
+          call,
+          who,
+          input.id === undefined ? 'registered_name.add' : 'registered_name.update',
+          'registered_name',
+          id,
+          null,
+          input.id === undefined
+            ? undefined
+            : { pattern: { old: oldPattern!, new: input.pattern } },
+        ),
+        ...(oldPattern === undefined ? {} : { previousPattern: oldPattern }),
         providerAnchors: deps.providerAnchors,
       });
-      return answer === 'added' ? success({ id }) : fail(answer);
+      return answer === 'added'
+        ? success(
+            { id },
+            (source.type === 'hosted' || source.type === 'vcs') &&
+              source.ecosystem === 'npm' &&
+              input.pattern.endsWith('/*')
+              ? [
+                  {
+                    field: 'pattern',
+                    message:
+                      'This scope claim hides public packages in the scope that are not yet cached.',
+                  },
+                ]
+              : undefined,
+          )
+        : fail(answer);
     },
     async removeRegisteredName(ctx, who, fence, id, call) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (!orgOnly(who)) return fail('forbidden');
       requireFence(who, fence);
       const owner = await deps.registeredNames.owner(ctx, id);
@@ -1118,6 +1283,7 @@ export function createSourceService(deps: SourceServiceDeps): SourceService {
         : fail(answer);
     },
     async preview(ctx, who, input) {
+      if (who.kind === 'rule') return fail('forbidden');
       if (
         !who.actor.permissions.has('project:sources:read') ||
         (who.kind === 'org'

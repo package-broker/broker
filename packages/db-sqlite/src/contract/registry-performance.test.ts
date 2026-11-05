@@ -160,9 +160,21 @@ describe('large registry package on node:sqlite', () => {
 });
 
 describe('release migration contract', () => {
-  it('ships contiguous core migrations starting at 0001', async () => {
+  it('ships contiguous core migrations', async () => {
     const core = (await discoveredMigrations()).filter((source) => source.owner === 'core');
-    expect(core.map((source) => source.id)).toEqual(['core:0001_init', 'core:0002_audit']);
+    expect(core.map((source) => source.id)).toEqual([
+      'core:0001_init',
+      'core:0002_npm_publish',
+      'core:0003_npm_identity',
+      'core:0004_source_revision',
+      'core:0005_package_settings_revision',
+      'core:0006_npm_login_handoff',
+      'core:0007_npm_vcs_build_outcomes',
+      'core:0008_registry_policy',
+      'core:0009_npm_notifications',
+      'core:0010_source_discovery_rules',
+      'core:0011_audit',
+    ]);
     expect(core.map((source) => source.sequence)).toEqual(core.map((_, index) => index + 1));
   });
 

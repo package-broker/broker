@@ -1,0 +1,1364 @@
+[
+  {
+    "id": "defaults",
+    "manifest": {},
+    "files": {
+      "index.js": "export default 1",
+      "README.md": "readme",
+      "LICENSE": "license",
+      "COPYING.txt": "copy",
+      ".hidden": "dot",
+      ".git/config": "secret",
+      ".npmrc": "secret",
+      "npm-debug.log": "log",
+      "package-lock.json": "{}",
+      "yarn.lock": "lock",
+      "pnpm-lock.yaml": "lock",
+      "bun.lockb": "lock",
+      "npm-shrinkwrap.json": "{}",
+      "nested/.npmrc": "secret",
+      "nested/a.orig": "backup",
+      "nested/.DS_Store": "metadata",
+      "nested/a.js": "code",
+      "bad*name": "excluded"
+    },
+    "expected": [
+      ".hidden",
+      "COPYING.txt",
+      "LICENSE",
+      "README.md",
+      "index.js",
+      "nested/a.js",
+      "npm-shrinkwrap.json",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "ignore-precedence",
+    "manifest": {},
+    "files": {
+      ".gitignore": "git-only\n",
+      ".npmignore": "npm-only\n*.tmp\n!keep.tmp\n",
+      "git-only": "included",
+      "npm-only": "excluded",
+      "drop.tmp": "excluded",
+      "keep.tmp": "included",
+      "dir/.gitignore": "secret\n",
+      "dir/secret": "excluded",
+      "dir/ok": "included"
+    },
+    "expected": ["dir/ok", "git-only", "keep.tmp", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "git-fallback",
+    "manifest": {},
+    "files": {
+      ".gitignore": "ignored\n",
+      "ignored": "excluded",
+      "kept": "included",
+      "dir/.gitignore": "*.txt\n!keep.txt\n",
+      "dir/drop.txt": "excluded",
+      "dir/keep.txt": "included"
+    },
+    "expected": ["dir/keep.txt", "kept", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "files-and-required",
+    "manifest": {
+      "files": ["lib", "exact.txt"],
+      "main": "src/main.js",
+      "bin": {
+        "fixture": "bin/run"
+      },
+      "browser": "browser.js"
+    },
+    "files": {
+      ".npmignore": "*\n",
+      "lib/.npmignore": "secret\n",
+      "lib/a.js": "yes",
+      "lib/secret": "no",
+      "lib/deep/a.js": "yes",
+      "exact.txt": "yes",
+      "src/main.js": "main",
+      "src/other.js": "no",
+      "bin/run": "bin",
+      "browser.js": "browser",
+      "README.md": "yes",
+      "LICENSE": "yes",
+      "other": "no"
+    },
+    "expected": [
+      "LICENSE",
+      "README.md",
+      "bin/run",
+      "browser.js",
+      "exact.txt",
+      "lib/a.js",
+      "lib/deep/a.js",
+      "package.json",
+      "src/main.js"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "explicit-nested-file",
+    "manifest": {
+      "files": ["lib/a.js"]
+    },
+    "files": {
+      "lib/.npmignore": "*\n",
+      "lib/a.js": "yes",
+      "lib/b.js": "no",
+      "README~": "backup",
+      "README.md": "yes"
+    },
+    "expected": ["README.md", "lib/a.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "glob-rules",
+    "manifest": {
+      "files": ["lib/*", "*.{js,json}", "assets/**/icon[0-9].svg"]
+    },
+    "files": {
+      "lib/.npmignore": "*.tmp\n",
+      "lib/deep/a.js": "yes",
+      "lib/other.tmp": "no",
+      "top.js": "yes",
+      "top.ts": "no",
+      "assets/a/icon1.svg": "yes",
+      "assets/icon2.svg": "yes",
+      "assets/a/iconx.svg": "no"
+    },
+    "expected": [
+      "assets/a/icon1.svg",
+      "assets/icon2.svg",
+      "lib/deep/a.js",
+      "package.json",
+      "top.js"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "empty-files",
+    "manifest": {
+      "files": [],
+      "main": "main.js",
+      "bin": "run.js"
+    },
+    "files": {
+      "main.js": "yes",
+      "run.js": "yes",
+      "README": "yes",
+      "random": "no",
+      "nested/README": "no"
+    },
+    "expected": ["README", "main.js", "package.json", "run.js"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "pruned-directories",
+    "manifest": {},
+    "files": {
+      ".npmignore": "ignored/\n!ignored/keep\n",
+      "ignored/keep": "no",
+      "ignored/drop": "no",
+      "dir/.npmignore": "*.txt\n!keep.txt\n",
+      "dir/keep.txt": "yes",
+      "dir/drop.txt": "no",
+      "dir/deep/keep.txt": "yes",
+      "dir/deep/drop.txt": "no"
+    },
+    "expected": [
+      "dir/deep/keep.txt",
+      "dir/keep.txt",
+      "ignored/drop",
+      "ignored/keep",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "bundles",
+    "manifest": {
+      "dependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": ["dep"]
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\",\"dependencies\":{\"child\":\"1.0.0\"}}",
+      "node_modules/dep/.npmignore": "secret\n",
+      "node_modules/dep/secret": "included in installed bundle",
+      "node_modules/dep/index.js": "dep",
+      "node_modules/child/package.json": "{\"name\":\"child\",\"version\":\"1.0.0\"}",
+      "node_modules/child/index.js": "child",
+      "node_modules/unrelated/package.json": "{\"name\":\"unrelated\",\"version\":\"1.0.0\"}",
+      "node_modules/unrelated/index.js": "no"
+    },
+    "expected": [
+      "node_modules/child/index.js",
+      "node_modules/child/package.json",
+      "node_modules/dep/.npmignore",
+      "node_modules/dep/index.js",
+      "node_modules/dep/package.json",
+      "node_modules/dep/secret",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "case-and-extglobs",
+    "manifest": {},
+    "files": {
+      ".npmignore": "*.@(log|tmp)\nsecret\n",
+      "A.LOG": "no",
+      "b.tmp": "no",
+      "c.js": "yes",
+      "SECRET": "no",
+      "nested/LICENSE": "yes",
+      "nested/.gitignore": "*\n",
+      "nested/a": "no"
+    },
+    "expected": ["c.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "normalized-paths",
+    "manifest": {
+      "files": [],
+      "main": "./src/main.js",
+      "bin": {
+        "fixture": "./bin/run"
+      },
+      "browser": "./browser.js"
+    },
+    "files": {
+      "src/main.js": "yes",
+      "bin/run": "yes",
+      "browser.js": "yes",
+      "src/other.js": "no"
+    },
+    "expected": ["bin/run", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "more-globs",
+    "manifest": {
+      "files": ["**/*.{js,ts}", "assets/part{01..03}.txt", "lib/+(ab|cd).json", "data/!(*.tmp)"]
+    },
+    "files": {
+      "index.js": "yes",
+      "deep/index.ts": "yes",
+      "deep/no.txt": "no",
+      "assets/part01.txt": "yes",
+      "assets/part02.txt": "yes",
+      "assets/part04.txt": "no",
+      "lib/abcd.json": "yes",
+      "lib/ab.json": "yes",
+      "lib/no.json": "no",
+      "data/a.tmp": "no",
+      "data/a.txt": "yes"
+    },
+    "expected": [
+      "assets/part01.txt",
+      "assets/part02.txt",
+      "data/a.txt",
+      "deep/index.ts",
+      "index.js",
+      "lib/ab.json",
+      "lib/abcd.json",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "workspaces",
+    "manifest": {
+      "workspaces": ["members/*"]
+    },
+    "files": {
+      "members/a/package.json": "{\"name\":\"member-a\",\"version\":\"1.0.0\"}",
+      "members/a/index.js": "workspace",
+      "members/b/index.js": "directory",
+      "index.js": "root"
+    },
+    "expected": [
+      "index.js",
+      "members/a/index.js",
+      "members/a/package.json",
+      "members/b/index.js",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "bundled-alias-and-nesting",
+    "manifest": {
+      "dependencies": {
+        "@scope/a": "1.0.0"
+      },
+      "bundledDependencies": true
+    },
+    "files": {
+      "node_modules/@scope/a/package.json": "{\"name\":\"@scope/a\",\"version\":\"1.0.0\",\"files\":[\"lib\"],\"dependencies\":{\"inner\":\"1.0.0\"}}",
+      "node_modules/@scope/a/lib/a.js": "yes",
+      "node_modules/@scope/a/no": "no",
+      "node_modules/@scope/a/node_modules/inner/package.json": "{\"name\":\"inner\",\"version\":\"1.0.0\"}",
+      "node_modules/@scope/a/node_modules/inner/index.js": "yes"
+    },
+    "expected": [
+      "node_modules/@scope/a/lib/a.js",
+      "node_modules/@scope/a/node_modules/inner/index.js",
+      "node_modules/@scope/a/node_modules/inner/package.json",
+      "node_modules/@scope/a/package.json",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "nested-package-dir",
+    "manifest": {},
+    "files": {
+      "package/package.json": "{\"name\":\"nested\",\"version\":\"1.0.0\"}",
+      "package/a": "yes"
+    },
+    "expected": ["package.json", "package/a", "package/package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "pattern-language",
+    "manifest": {
+      "files": [
+        "code/file[[:digit:]].js",
+        "code/{a,b}{1,2}.ts",
+        "code/ab?(cd).json",
+        "code/*(ab).txt",
+        "code/\\#literal",
+        "code/!(*.tmp).data"
+      ]
+    },
+    "files": {
+      "code/file1.js": "yes",
+      "code/filea.js": "no",
+      "code/a1.ts": "yes",
+      "code/b2.ts": "yes",
+      "code/c1.ts": "no",
+      "code/ab.json": "yes",
+      "code/abcd.json": "yes",
+      "code/abx.json": "no",
+      "code/abab.txt": "yes",
+      "code/.txt": "yes",
+      "code/x.txt": "no",
+      "code/#literal": "yes",
+      "code/a.tmp.data": "no",
+      "code/a.txt.data": "yes"
+    },
+    "expected": [
+      "code/#literal",
+      "code/.txt",
+      "code/a.txt.data",
+      "code/a1.ts",
+      "code/ab.json",
+      "code/abab.txt",
+      "code/abcd.json",
+      "code/b2.ts",
+      "code/file1.js",
+      "package.json"
+    ],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "escaped-braces",
+    "manifest": {
+      "files": ["code/\\{literal\\}.js"]
+    },
+    "files": {
+      "code/{literal}.js": "yes",
+      "code/literal.js": "no"
+    },
+    "expected": ["code/{literal}.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "bundles-object",
+    "manifest": {
+      "dependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": {
+        "dep": true
+      }
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\"}",
+      "node_modules/dep/index.js": "yes"
+    },
+    "expected": ["node_modules/dep/index.js", "node_modules/dep/package.json", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "normalized-bins",
+    "manifest": {
+      "files": [],
+      "bin": {
+        "tool": "bin/../run.js"
+      },
+      "directories": {
+        "bin": "other"
+      }
+    },
+    "files": {
+      "run.js": "yes",
+      "other/script.js": "no"
+    },
+    "expected": ["package.json", "run.js"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "directory-bins",
+    "manifest": {
+      "files": [],
+      "directories": {
+        "bin": "bin"
+      }
+    },
+    "files": {
+      "bin/run.js": "yes",
+      "bin/nested/run2.js": "yes",
+      "bin/.hidden": "no",
+      "bin/nested/.hidden": "nested dot file"
+    },
+    "expected": ["bin/nested/run2.js", "bin/run.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "trailing-and-repeated-slashes",
+    "manifest": {
+      "files": ["./lib/", "assets//*.txt"]
+    },
+    "files": {
+      "lib/a.js": "yes",
+      "lib/deep/b.js": "yes",
+      "assets/a.txt": "yes",
+      "assets/a.js": "no",
+      "other.js": "no"
+    },
+    "expected": ["assets/a.txt", "lib/a.js", "lib/deep/b.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "negative-suffix",
+    "manifest": {
+      "files": ["dir/!(a|b)*", "literal/a\\{b,c\\}"]
+    },
+    "files": {
+      "dir/a": "yes",
+      "dir/abc": "no",
+      "dir/xyz": "yes",
+      "literal/a{b,c}": "yes",
+      "literal/ab": "no"
+    },
+    "expected": ["dir/a", "dir/xyz", "literal/a{b,c}", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "ancestor-refusal",
+    "manifest": {
+      "files": ["dir/**/*.js"]
+    },
+    "files": {
+      "dir/.npmignore": "!secret.txt\n",
+      "dir/a.js": "yes",
+      "dir/secret.txt": "no"
+    },
+    "expected": ["dir/a.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "unicode-posix",
+    "manifest": {
+      "files": ["code/[[:graph:]].txt", "code/[[:word:]].js", "code/[[:print:]].data"]
+    },
+    "files": {
+      "code/é.txt": "yes",
+      "code/́.txt": "yes",
+      "code/‿.js": "yes",
+      "code/a.data": "no",
+      "code/‌.data": "pinned print semantics"
+    },
+    "expected": ["code/é.txt", "code/́.txt", "code/‌.data", "code/‿.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "optional-bundle-boolean",
+    "manifest": {
+      "optionalDependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": true
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\"}",
+      "node_modules/dep/index.js": "optional"
+    },
+    "expected": ["package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "optional-bundle-explicit",
+    "manifest": {
+      "optionalDependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": ["dep"]
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\"}",
+      "node_modules/dep/index.js": "optional"
+    },
+    "expected": ["node_modules/dep/index.js", "node_modules/dep/package.json", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "files-dot-root",
+    "manifest": {
+      "files": ["./"]
+    },
+    "files": {
+      "a": "yes",
+      "lib/a": "yes",
+      ".npmignore": "a\n"
+    },
+    "expected": [".npmignore", "a", "lib/a", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "literal-selectors",
+    "manifest": {
+      "files": ["foo/../a", "lib/./a.js"]
+    },
+    "files": {
+      "a": "yes",
+      "lib/a.js": "yes",
+      "lib/b.js": "no"
+    },
+    "expected": ["a", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "escaped-comma",
+    "manifest": {
+      "files": ["dir/{a\\,b,c}"]
+    },
+    "files": {
+      "dir/a,b": "yes",
+      "dir/c": "yes",
+      "dir/a": "no",
+      "dir/b": "no"
+    },
+    "expected": ["dir/a,b", "dir/c", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "brace-relative",
+    "manifest": {
+      "files": ["{dir/a,b}"]
+    },
+    "files": {
+      "dir/a": "yes",
+      "b": "yes",
+      "other/b": "no",
+      "dir/other/a": "no"
+    },
+    "expected": ["b", "dir/a", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "astral-posix",
+    "manifest": {
+      "files": ["code/file[[:digit:]].js"]
+    },
+    "files": {
+      "code/file𝟘.js": "yes",
+      "code/file1.js": "yes",
+      "code/filex.js": "no"
+    },
+    "expected": ["code/file1.js", "code/file𝟘.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "required-one-level",
+    "manifest": {
+      "files": ["lib/deep/a.js", "one/a.js"]
+    },
+    "files": {
+      "lib/deep/.npmignore": "*\n",
+      "lib/deep/a.js": "no",
+      "one/.npmignore": "*\n",
+      "one/a.js": "yes"
+    },
+    "expected": ["one/a.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "bundle-overlap-devDependencies",
+    "manifest": {
+      "dependencies": {
+        "dep": "1.0.0"
+      },
+      "devDependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": ["dep"]
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\"}",
+      "node_modules/dep/index.js": "no"
+    },
+    "expected": ["package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "bundle-overlap-peerDependencies",
+    "manifest": {
+      "dependencies": {
+        "dep": "1.0.0"
+      },
+      "peerDependencies": {
+        "dep": "1.0.0"
+      },
+      "bundleDependencies": ["dep"]
+    },
+    "files": {
+      "node_modules/dep/package.json": "{\"name\":\"dep\",\"version\":\"1.0.0\"}",
+      "node_modules/dep/index.js": "no"
+    },
+    "expected": ["node_modules/dep/index.js", "node_modules/dep/package.json", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "selected-readme",
+    "manifest": {
+      "files": []
+    },
+    "files": {
+      "README~": "excluded backup",
+      "README.md": "selected readme"
+    },
+    "expected": ["README.md", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "trailing-globstar-ignore",
+    "manifest": {},
+    "files": {
+      ".npmignore": "a/**",
+      "a": ""
+    },
+    "expected": ["a", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "trailing-globstar-files",
+    "manifest": {
+      "files": ["lib/a/**"]
+    },
+    "files": {
+      "lib/a": ""
+    },
+    "expected": ["package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "trailing-globstar-reinclude",
+    "manifest": {},
+    "files": {
+      ".npmignore": "build/**\n!build/x.js",
+      "build/x.js": "",
+      "build/y.js": "",
+      "build/.npmignore": "!y.js"
+    },
+    "expected": ["build/x.js", "build/y.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "globstar-leading",
+    "manifest": {
+      "files": ["**/b"]
+    },
+    "files": {
+      "b": "",
+      "a/b": ""
+    },
+    "expected": ["a/b", "b", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "unclosed-bracket",
+    "manifest": {
+      "files": ["dir/[abc"]
+    },
+    "files": {
+      "dir/[abc": "",
+      "dir/a": ""
+    },
+    "expected": ["dir/[abc", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "leading-bracket-close",
+    "manifest": {
+      "files": ["dir/[]a]", "dir/[\\]b]"]
+    },
+    "files": {
+      "dir/]": "",
+      "dir/a": "",
+      "dir/b": "",
+      "dir/c": ""
+    },
+    "expected": ["dir/]", "dir/a", "dir/b", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "utf16-question",
+    "manifest": {
+      "files": ["dir/?.js"]
+    },
+    "files": {
+      "dir/𝟘.js": "",
+      "dir/a.js": ""
+    },
+    "expected": ["dir/a.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "utf16-double-question",
+    "manifest": {
+      "files": ["dir/??.js"]
+    },
+    "files": {
+      "dir/𝟘.js": "",
+      "dir/a.js": ""
+    },
+    "expected": ["dir/𝟘.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "raw-relative",
+    "manifest": {},
+    "files": {
+      ".npmignore": "x/../a/",
+      "deep/a/x": "",
+      "a/x": ""
+    },
+    "expected": ["package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "brace-nested",
+    "manifest": {
+      "files": ["dir/{a,{b,c}}"]
+    },
+    "files": {
+      "dir/a": "",
+      "dir/b": ""
+    },
+    "expected": ["dir/a", "dir/b", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "brace-range",
+    "manifest": {
+      "files": ["dir/{1..3}"]
+    },
+    "files": {
+      "dir/1": "",
+      "dir/2": ""
+    },
+    "expected": ["dir/1", "dir/2", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    },
+    "refusal": "unsupported_files_pattern"
+  },
+  {
+    "id": "ascii-class",
+    "manifest": {
+      "files": ["dir/[a-c].js"]
+    },
+    "files": {
+      "dir/a.js": "",
+      "dir/é.js": ""
+    },
+    "expected": ["dir/a.js", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "brace-sixteen",
+    "manifest": {
+      "files": ["dir/{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"]
+    },
+    "files": {
+      "dir/15": "",
+      "dir/16": ""
+    },
+    "expected": ["dir/15", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "unclosed-unicode-bracket",
+    "manifest": {
+      "files": ["dir/[é"]
+    },
+    "files": {
+      "dir/[é": "",
+      "dir/é": ""
+    },
+    "expected": ["dir/[é", "package.json"],
+    "recordedWith": {
+      "npm": "11.17.0",
+      "packlist": "10.0.4"
+    }
+  },
+  {
+    "id": "round5-pattern-0",
+    "manifest": {
+      "files": ["dir/[\\d]"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/d", "package.json"]
+  },
+  {
+    "id": "round5-pattern-1",
+    "manifest": {
+      "files": ["dir/[\\w]"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/w", "package.json"]
+  },
+  {
+    "id": "round5-pattern-2",
+    "manifest": {
+      "files": ["dir/[\\s]x"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/sx", "package.json"]
+  },
+  {
+    "id": "round5-pattern-3",
+    "manifest": {
+      "files": ["dir/[\\x41]"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/1", "dir/4", "dir/x", "package.json"]
+  },
+  {
+    "id": "round5-pattern-4",
+    "manifest": {
+      "files": ["dir/[\\b]"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/b", "package.json"]
+  },
+  {
+    "id": "round5-pattern-5",
+    "manifest": {
+      "files": ["dir/[\\^a]"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/1", "dir/4", "dir/^", "dir/b", "dir/d", "dir/w", "dir/x", "package.json"]
+  },
+  {
+    "id": "round5-pattern-6",
+    "manifest": {
+      "files": ["dir/[z-a]x"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["package.json"]
+  },
+  {
+    "id": "round5-pattern-7",
+    "manifest": {
+      "files": ["dir/{a}"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/{a}", "package.json"]
+  },
+  {
+    "id": "round5-pattern-8",
+    "manifest": {
+      "files": ["dir/{a"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/{a", "package.json"]
+  },
+  {
+    "id": "round5-pattern-9",
+    "manifest": {
+      "files": ["dir/a}"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/a}", "package.json"]
+  },
+  {
+    "id": "round5-pattern-10",
+    "manifest": {
+      "files": ["dir/a{2}"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/a{2}", "package.json"]
+  },
+  {
+    "id": "round5-pattern-11",
+    "manifest": {
+      "files": ["dir/[{]a"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/{a", "package.json"]
+  },
+  {
+    "id": "round5-pattern-12",
+    "manifest": {
+      "files": ["dir/?.js"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/İ.js", "package.json"]
+  },
+  {
+    "id": "round5-pattern-13",
+    "manifest": {
+      "files": ["dir/i?.js"]
+    },
+    "files": {
+      "dir/d": "content",
+      "dir/w": "content",
+      "dir/sx": "content",
+      "dir/ x": "content",
+      "dir/4": "content",
+      "dir/1": "content",
+      "dir/x": "content",
+      "dir/A": "content",
+      "dir/b": "content",
+      "dir/^": "content",
+      "dir/a": "content",
+      "dir/[z-a]x": "content",
+      "dir/{a}": "content",
+      "dir/{a": "content",
+      "dir/a}": "content",
+      "dir/a{2}": "content",
+      "dir/İ.js": "content",
+      "dir/iİ.js": "content"
+    },
+    "expected": ["dir/iİ.js", "package.json"]
+  },
+  {
+    "id": "round5-empty-wildcard",
+    "manifest": {},
+    "files": {
+      ".npmignore": "*/a",
+      "a/x": "content",
+      "d/a/x": "content"
+    },
+    "expected": ["a/x", "package.json"]
+  }
+]

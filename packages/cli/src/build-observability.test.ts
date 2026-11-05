@@ -79,7 +79,7 @@ it.each([
 ])('carries automatic tracing through the build manifest: %j', async (traces) => {
   const options = await fixture(undefined);
   const ports: PlatformPortConfig = {
-    blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 1024 },
+    blob: { adapter: 'r2', binding: 'STORAGE', maxBytes: 50_000_000 },
     cache: { adapter: 'cache-api' },
     jobs: { adapter: 'queues', binding: 'JOBS', maxRunning: 2 },
     observability: {

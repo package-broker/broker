@@ -85,6 +85,13 @@ const actor: ProjectActor = {
 };
 
 interface Setup {
+  requestOrigin?: string;
+  tokens?: NpmRouteDeps['tokens'];
+  management?: boolean;
+  unpublish?: NpmRouteDeps['unpublish'];
+  publisher?: 'project' | 'organization';
+  publish?: NpmRouteDeps['publish'];
+  distTagWrite?: NpmRouteDeps['distTagWrite'];
   outcome?: PackageVisibility;
   reresolved?: PackageVisibility;
   ensure?: OnDemandResult;
@@ -122,6 +129,10 @@ async function harness(setup: Setup = {}) {
       setup.outcome ?? visible({ key: packageKey(name, { ecosystem: 'npm', legacyCase: true }) }),
   );
   const deps: NpmRouteDeps = {
+    ...(setup.tokens === undefined ? {} : { tokens: setup.tokens }),
+    ...(setup.unpublish === undefined ? {} : { unpublish: setup.unpublish }),
+    ...(setup.distTagWrite === undefined ? {} : { distTagWrite: setup.distTagWrite }),
+    ...(setup.publish === undefined ? {} : { publish: setup.publish }),
     access: access as unknown as PackageAccess,
     dist: { serve },
     onDemand: { ensure },
@@ -132,7 +143,7 @@ async function harness(setup: Setup = {}) {
           defer: () => undefined,
         }),
     reresolve,
-    handleOf: () => (setup.handle === undefined ? 'alice' : setup.handle),
+    handleOf: async () => (setup.handle === undefined ? 'alice' : setup.handle),
     publicUrl: 'https://broker.test',
     codecs: { gunzip: () => new TransformStream() },
     audit: setup.audit ?? { enabled: true },
@@ -145,7 +156,12 @@ async function harness(setup: Setup = {}) {
     protectedHolder: false,
     project: { id: 'proj-1' },
     organizationPermissions: [],
-    projectPermissions: ['project:read', 'project:packages:read'],
+    projectPermissions: [
+      'project:read',
+      'project:packages:read',
+      ...(setup.management ? ['project:packages:manage'] : []),
+      ...(setup.publisher === 'project' ? ['project:packages:write'] : []),
+    ],
   };
   const token = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
   const tokenAccess = Object.defineProperty(
@@ -158,11 +174,18 @@ async function harness(setup: Setup = {}) {
         lastUsedAt: null,
         userId: 'user-1',
         servicePrincipalId: null,
+        ...(!setup.management && setup.publisher === undefined
+          ? {}
+          : {
+              bindingOk: true,
+              projectMode: 'all',
+              scope: { level: setup.management ? 'full' : 'write', readOnly: false },
+            }),
       },
       principalStatus: 'active',
       validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
       project: session.project,
-      organizationPermissions: [],
+      organizationPermissions: setup.publisher === 'organization' ? ['org:packages:publish'] : [],
       projectPermissions: session.projectPermissions,
     },
     'verifier',
@@ -202,7 +225,7 @@ async function harness(setup: Setup = {}) {
   });
   const call = (path: string, init: RequestInit = {}) =>
     kernel.fetch(
-      new Request(`https://broker.test/demo/npm${path}`, {
+      new Request(`${setup.requestOrigin ?? 'https://broker.test'}/demo/npm${path}`, {
         ...init,
         headers: { authorization: `Bearer ${token}`, ...init.headers },
       }),
@@ -316,16 +339,23 @@ describe('npm route precedence and path hygiene', () => {
     expect((await call('/x?write=true&a=%2570')).status).toBe(200);
   });
 
-  it.each(['PUT', 'POST', 'DELETE'])('answers %s on package paths with 405', async (method) => {
-    const { call, access } = await harness();
-    for (const path of ['/x', '/x/1.0.0', '/%40s%2Fn', '/x/-/x-1.0.0.tgz']) {
-      const response = await call(path, { method, body: method === 'DELETE' ? null : '{}' });
-      expect(response.status).toBe(405);
-      expect(response.headers.get('allow')).toBe('GET, HEAD');
-      expect(await response.json()).toMatchObject({ code: 'method_not_allowed' });
-    }
-    expect(access.versions).not.toHaveBeenCalled();
-  });
+  it.each(['PUT', 'POST', 'DELETE'])(
+    'checks permissions before refusing unsupported %s package writes',
+    async (method) => {
+      const { call, access } = await harness();
+      for (const path of ['/x', '/x/1.0.0', '/%40s%2Fn', '/x/-/x-1.0.0.tgz']) {
+        const response = await call(path, { method, body: method === 'DELETE' ? null : '{}' });
+        if (method === 'PUT' && !path.includes('/-/')) {
+          expect(response.status).toBe(403);
+        } else {
+          expect(response.status).toBe(405);
+          expect(response.headers.get('allow')).toBe('GET, HEAD');
+          expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+        }
+      }
+      expect(access.versions).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('npm tarballs', () => {
@@ -894,4 +924,238 @@ describe('npm tarball refusal', () => {
     expect((await h.call('/x/-/x-9.9.9.tgz')).status).toBe(404);
     expect(h.serve).not.toHaveBeenCalled();
   });
+});
+
+describe('npm publish routing', () => {
+  it.each(['project', 'organization'] as const)(
+    'passes scoped and unscoped PUT through the %s authority route',
+    async (publisher) => {
+      const publish = vi.fn(async () => new Response(null, { status: 201 }));
+      const h = await harness({ publisher, publish });
+      for (const [path, name] of [
+        ['/widget', 'widget'],
+        ['/%40s%2Fn', '@s/n'],
+        ['/@s/n', '@s/n'],
+      ]) {
+        expect((await h.call(path!, { method: 'PUT', body: '{}' })).status).toBe(201);
+        expect(publish).toHaveBeenLastCalledWith(
+          expect.objectContaining({ org, projectId: 'proj-1' }),
+          name,
+        );
+      }
+      expect(h.resolve).not.toHaveBeenCalled();
+      expect(h.ensure).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['PUT', 'POST', 'DELETE'])(
+    'denies write-only %s management requests and refuses unsupported POST',
+    async (method) => {
+      const publish = vi.fn(async () => new Response(null, { status: 201 }));
+      const h = await harness({ publisher: 'project', publish });
+      for (const path of [
+        '/widget/-rev/1',
+        '/@s/n/-rev/1',
+        '/-/package/%40s%2Fn/dist-tags/latest',
+      ]) {
+        const response = await h.call(path, { method, body: '{}' });
+        if (method !== 'POST') {
+          expect(response.status).toBe(403);
+          expect(await response.text()).not.toContain('write_unsupported');
+          continue;
+        }
+        expect(response.status).toBe(405);
+        expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+        expect(response.headers.get('allow')).toBe('GET, HEAD');
+        expect(response.headers.get('cache-control')).toBe('no-store');
+      }
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('npm token adapters', () => {
+  it('uses the public origin for token pagination behind a TLS-terminating proxy', async () => {
+    const listOwn = vi.fn(async () => ({ items: [], next: 'id/next+page' }));
+    const { call } = await harness({
+      requestOrigin: 'http://node.internal:3000',
+      tokens: { reader: { listOwn } as never, revokeOwn: vi.fn() },
+    });
+    const response = await call('/-/npm/v1/tokens?after=previous&internal=ignored');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      objects: [],
+      urls: {
+        next: 'https://broker.test/demo/npm/-/npm/v1/tokens?after=id%2Fnext%2Bpage',
+      },
+    });
+  });
+
+  it('lists active own tokens with npm pagination and safe fields', async () => {
+    const listOwn = vi.fn(async () => ({
+      items: [{ id: 'id-only', createdAt: '2026-01-01', readOnly: true }],
+      next: 'id-only',
+    }));
+    const revokeOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn } as never, revokeOwn } });
+    const response = await call('/-/npm/v1/tokens');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({
+      objects: [
+        {
+          key: 'id-only',
+          token: 'id-only',
+          created: '2026-01-01',
+          readonly: true,
+          cidr_whitelist: [],
+        },
+      ],
+      urls: { next: 'https://broker.test/demo/npm/-/npm/v1/tokens?after=id-only' },
+    });
+    expect(listOwn).toHaveBeenCalledWith(
+      org,
+      'user-1',
+      expect.objectContaining({ after: null, limit: 100, status: 'active' }),
+    );
+    await call('/-/npm/v1/tokens?after=id-only');
+    expect(listOwn).toHaveBeenLastCalledWith(
+      org,
+      'user-1',
+      expect.objectContaining({ after: 'id-only' }),
+    );
+  });
+  it('revokes by id through the caller PAT and returns a fixed missing response', async () => {
+    const revokeOwn = vi.fn(async () => false);
+    const { call } = await harness({ tokens: { reader: {} as never, revokeOwn } });
+    const response = await call('/-/npm/v1/tokens/token/other-secret', { method: 'DELETE' });
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain('other-secret');
+    expect(revokeOwn).toHaveBeenCalledWith(
+      org,
+      expect.objectContaining({
+        tokenId: 'token-1',
+        userId: 'user-1',
+        targetId: 'other-secret',
+        projectId: 'proj-1',
+        projectSlug: 'demo',
+      }),
+    );
+    revokeOwn.mockResolvedValue(true);
+    expect((await call('/-/npm/v1/tokens/token/own', { method: 'DELETE' })).status).toBe(200);
+  });
+  it('refuses creation with a fixed web login instruction', async () => {
+    const { call } = await harness();
+    const response = await call('/-/npm/v1/tokens', {
+      method: 'POST',
+      body: '{"password":"secret"}',
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get('allow')).toBe('GET');
+    expect(await response.json()).toMatchObject({
+      error: 'Use npm login --auth-type=web or the UI to create a token',
+    });
+  });
+});
+
+describe('npm token adapter refusals', () => {
+  it('refuses unauthenticated requests before reading tokens', async () => {
+    const listOwn = vi.fn();
+    const revokeOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn }, revokeOwn } });
+    expect((await call('/-/npm/v1/tokens', { headers: { authorization: '' } })).status).toBe(401);
+    expect(listOwn).not.toHaveBeenCalled();
+    expect(revokeOwn).not.toHaveBeenCalled();
+  });
+  it('refuses sessions and service principals at the adapter boundary', async () => {
+    const listOwn = vi.fn();
+    const revokeOwn = vi.fn();
+    const { deps } = await harness({ tokens: { reader: { listOwn }, revokeOwn } });
+    const route = npmRoutes(deps).find(
+      (r) => r.path === '/:project/npm/-/npm/v1/tokens' && r.method === 'GET',
+    )!;
+    for (const service of [false, true]) {
+      const ctx = {
+        org,
+        projectId: 'proj-1',
+        principal: { kind: service ? 'service' : 'user', id: 'owner' },
+        requestId: 'request',
+        request: new Request('https://broker.test/demo/npm/-/npm/v1/tokens'),
+      } as RequestContext;
+      setAccessContext(ctx, {
+        principal: ctx.principal,
+        projectId: 'proj-1',
+        boundary: 'project',
+        sessionId: service ? null : 'session',
+        actor: null,
+        token: service ? { id: 'svc', kind: 'svc', scope: 'full', readOnly: false } : null,
+        rateKey: {
+          stage: 'authenticated',
+          principalId: 'owner',
+          routeClass: 'project',
+          tokenSelector: service ? 'abcdefghijkl' : null,
+        },
+      });
+      expect((await route.handler(ctx)).status).toBe(403);
+    }
+    expect(listOwn).not.toHaveBeenCalled();
+    expect(revokeOwn).not.toHaveBeenCalled();
+  });
+  it('rejects empty and oversized cursors before reading', async () => {
+    const listOwn = vi.fn();
+    const { call } = await harness({ tokens: { reader: { listOwn }, revokeOwn: vi.fn() } });
+    for (const after of ['', 'a'.repeat(201)])
+      expect((await call(`/-/npm/v1/tokens?after=${after}`)).status).toBe(400);
+    expect(listOwn).not.toHaveBeenCalled();
+  });
+  it('terminates pagination with a null next URL', async () => {
+    const { call } = await harness({
+      tokens: {
+        reader: { listOwn: vi.fn(async () => ({ items: [], next: null })) },
+        revokeOwn: vi.fn(),
+      },
+    });
+    expect(await (await call('/-/npm/v1/tokens')).json()).toEqual({
+      objects: [],
+      urls: { next: null },
+    });
+  });
+});
+
+describe('npm dist-tag adapter dispatch', () => {
+  it.each(['PUT', 'DELETE'])('dispatches %s scoped and unscoped names', async (method) => {
+    const distTagWrite = vi.fn(async () => new Response(null, { status: 200 }));
+    const h = await harness({ distTagWrite, management: true });
+    for (const [encoded, name] of [
+      ['widget', 'widget'],
+      ['%40s%2Fn', '@s/n'],
+    ]) {
+      expect(
+        (await h.call('/-/package/' + encoded + '/dist-tags/beta', { method, body: '"1.0.0"' }))
+          .status,
+      ).toBe(200);
+      expect(distTagWrite).toHaveBeenLastCalledWith(expect.anything(), name, 'beta');
+    }
+  });
+});
+
+it('dispatches npm unpublish revision and tarball routes for encoded scoped and unscoped packages', async () => {
+  const unpublish = vi.fn(async () => new Response(null, { status: 200 }));
+  const h = await harness({ unpublish, management: true });
+  for (const [path, name, file] of [
+    ['/widget/-rev/1', 'widget', undefined],
+    ['/%40s%2Fn/-rev/1', '@s/n', undefined],
+    ['/@s/n/-rev/1', '@s/n', undefined],
+    ['/widget/-/widget-1.0.0.tgz/-rev/1', 'widget', 'widget-1.0.0.tgz'],
+    ['/@s/n/-/n-1.0.0.tgz/-rev/1', '@s/n', 'n-1.0.0.tgz'],
+  ] as const) {
+    expect((await h.call(path, { method: 'DELETE' })).status).toBe(200);
+    expect(unpublish).toHaveBeenLastCalledWith(expect.anything(), name, '1', file);
+  }
+  unpublish.mockClear();
+  for (const path of ['/widget/-/widget-1.0.0.tgz', '/@s/n/-/n-1.0.0.tgz']) {
+    const response = await h.call(path, { method: 'DELETE' });
+    expect(response.status).toBe(405);
+    expect(await response.json()).toMatchObject({ code: 'write_unsupported' });
+  }
+  expect(unpublish).not.toHaveBeenCalled();
 });

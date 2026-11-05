@@ -4,6 +4,28 @@ import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-s
 import { bindSnapshot, exportDatabase, restoreDatabase } from './sql-snapshot.test.support.js';
 
 describe('length-preserving logical text export', () => {
+  it('rejects an oversized atomic data batch before committing schema', async () => {
+    const restored = openNodeSqliteExecutor();
+    try {
+      await expect(
+        restoreDatabase(restored.executor, [
+          { sql: 'CREATE TABLE publisher_content (value TEXT)', params: [] },
+          ...Array.from({ length: 201 }, () => ({
+            sql: 'INSERT INTO publisher_content VALUES (?)',
+            params: ['value'],
+          })),
+        ]),
+      ).rejects.toMatchObject({ kind: 'too_big' });
+      expect(
+        await restored.executor.all({
+          sql: "SELECT name FROM sqlite_master WHERE name = 'publisher_content'",
+          params: [],
+        }),
+      ).toEqual([]);
+    } finally {
+      await restored.close();
+    }
+  });
   it('rolls back every restored row when a deferred foreign key fails', async () => {
     const restored = openNodeSqliteExecutor();
     try {

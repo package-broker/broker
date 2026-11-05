@@ -30,6 +30,7 @@ import { projectAccessRoutes } from './project-access.js';
 const ORIGIN = 'https://broker.test';
 const PROJECT = '01JA0000000000000000000001';
 const OTHER_PROJECT = '01JA0000000000000000000002';
+const SECOND_PROJECT = '01JA0000000000000000000005';
 const GRANT = '01JA0000000000000000000003';
 const ROLE = '01JA0000000000000000000004';
 const SECRET = 'A'.repeat(43);
@@ -37,6 +38,8 @@ const CSRF = 'B'.repeat(43);
 const EMAIL = 'alice@example.test';
 const keyring = createKeyring([{ version: 1, bytes: new Uint8Array(32).fill(7) }]);
 const bearer = formatToken('pat', 'abcdefghijkl', new Uint8Array(32).fill(9));
+const serviceBearer = formatToken('svc', 'mnopqrstuvwx', new Uint8Array(32).fill(9));
+const GROUP_VALUE = 'release-managers';
 const clock = fixedClock('2026-10-20T00:00:00.000Z');
 
 const emailBody = { subject: { type: 'email', value: EMAIL }, roleId: ROLE };
@@ -66,6 +69,9 @@ async function fixture(
     roleAbsent?: boolean;
     create?: Awaited<ReturnType<ProjectGrantStore['create']>>;
     changeRole?: Awaited<ReturnType<ProjectGrantStore['changeRole']>>;
+    tokenKind?: 'pat' | 'svc';
+    org?: string;
+    projectPermissionsBySlug?: Readonly<Record<string, readonly string[]>>;
   } = {},
 ) {
   const audits: string[] = [];
@@ -107,17 +113,48 @@ async function fixture(
     ),
   };
   const clientIp = vi.fn(() => '203.0.113.7');
-  const permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
+  let permissions = options.permissions ?? PERMISSIONS.map((p) => p.name);
+  const setPermissions = (next: readonly string[]) => {
+    permissions = next;
+  };
+  const sessionProject = (input: { projectSlug: string | null }) => {
+    const bySlug = options.projectPermissionsBySlug;
+    if (bySlug === undefined) return { id: PROJECT, permissions };
+    const slug = input.projectSlug;
+    if (slug === null || !Object.hasOwn(bySlug, slug)) return null;
+    return { id: slug === 'demo' ? PROJECT : SECOND_PROJECT, permissions: bySlug[slug]! };
+  };
+  const tokenKind = options.tokenKind ?? 'pat';
+  const presented = tokenKind === 'svc' ? serviceBearer : bearer;
   const authority = options.visible ?? true;
   const resolves = (allowArchived: boolean | undefined) =>
     authority && (options.archived !== true || allowArchived === true);
   const reader = {
     list: vi.fn<ProjectGrantReader['list']>(async (_org, input) => {
+      const reveal = input.revealSubjects === true;
+      const visibility = reveal ? ('visible' as const) : ('redacted' as const);
+      const principals: Record<string, GrantPage['items'][number]['principal']> = {
+        [OTHER_PROJECT]: {
+          kind: 'user' as const,
+          id: 'user-2',
+          displayName: 'Member',
+          ...(reveal ? { email: EMAIL } : {}),
+          visibility,
+        },
+        [GRANT]: {
+          kind: 'group' as const,
+          id: GRANT,
+          displayName: reveal ? GROUP_VALUE : 'Group',
+          provider: 'github',
+          ...(reveal ? { groupValue: GROUP_VALUE } : {}),
+          visibility,
+        },
+      };
       const all = [GRANT, OTHER_PROJECT].sort().map((id) => ({
         id,
         revision: 3,
         createdAt: '2026-10-22T00:00:00.000Z',
-        principal: { kind: 'user' as const, id: 'user-2', displayName: 'Member' },
+        principal: principals[id]!,
         role: { id: ROLE, name: 'Developer', permissions: ['project:read'] },
       }));
       const remaining = all.filter((row) => input.after === undefined || row.id > input.after);
@@ -130,53 +167,64 @@ async function fixture(
     plugins: [],
     coreRoutes: projectAccessRoutes({ projectAdministration, roles, reader, clock, ids, clientIp }),
     ports: { organizations: { get: async () => null }, clock, ids },
-    resolveOrg: async () => orgContext('org-1'),
+    resolveOrg: async () => orgContext(options.org ?? 'org-1'),
     health: async () => true,
     log: () => undefined,
     authorization: createAuthorizationEngine({
       access: {
-        lookupSession: async (_org, input) => ({
-          session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
-          user: { id: options.userId ?? 'user-1' },
-          identity: null,
-          protectedHolder: options.admin ?? false,
-          project:
-            input.boundary === 'project' && resolves(input.allowArchived) ? { id: PROJECT } : null,
-          organizationPermissions: options.organizationPermissions ?? [],
-          projectPermissions:
-            input.boundary === 'project' && resolves(input.allowArchived) ? permissions : [],
-        }),
-        lookupToken: async (_org, input) =>
-          Object.defineProperty(
-            {
-              token: {
-                id: 'token-1',
-                kind: 'pat',
-                expired: false,
-                revoked: false,
-                lastUsedAt: null,
-                userId: 'user-1',
-                servicePrincipalId: null,
-                bindingOk: true,
-                projectMode: 'all',
-                scope: {
-                  level: options.tokenScope ?? 'full',
-                  readOnly: options.tokenScope === 'read',
-                },
+        lookupSession: async (org, input) =>
+          org.orgId !== 'org-1'
+            ? null
+            : {
+                session: { id: 'session-1', csrfHash: await sha256Hex(CSRF) },
+                user: { id: options.userId ?? 'user-1' },
+                identity: null,
+                protectedHolder: options.admin ?? false,
+                ...(() => {
+                  const found =
+                    input.boundary === 'project' && resolves(input.allowArchived)
+                      ? sessionProject(input)
+                      : null;
+                  return {
+                    project: found === null ? null : { id: found.id },
+                    projectPermissions: found === null ? [] : found.permissions,
+                  };
+                })(),
+                organizationPermissions: options.organizationPermissions ?? [],
               },
-              principalStatus: 'active',
-              projectVisible: true,
-              validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
-              project:
-                input.boundary === 'project' && resolves(input.allowArchived)
-                  ? { id: PROJECT }
-                  : null,
-              organizationPermissions: [],
-              projectPermissions: permissions,
-            },
-            'verifier',
-            { value: { secretHash: await hashToken(keyring, 1, bearer), pepperVersion: 1 } },
-          ) as unknown as EngineTokenAccess,
+        lookupToken: async (org, input) =>
+          org.orgId !== 'org-1'
+            ? null
+            : (Object.defineProperty(
+                {
+                  token: {
+                    id: 'token-1',
+                    kind: tokenKind,
+                    expired: false,
+                    revoked: false,
+                    lastUsedAt: null,
+                    userId: tokenKind === 'svc' ? null : 'user-1',
+                    servicePrincipalId: tokenKind === 'svc' ? 'service-1' : null,
+                    bindingOk: true,
+                    projectMode: 'all',
+                    scope: {
+                      level: options.tokenScope ?? 'full',
+                      readOnly: options.tokenScope === 'read',
+                    },
+                  },
+                  principalStatus: 'active',
+                  projectVisible: true,
+                  validation: { kind: 'local', identityId: null, fresh: true, evidenceAt: null },
+                  project:
+                    input.boundary === 'project' && resolves(input.allowArchived)
+                      ? { id: PROJECT }
+                      : null,
+                  organizationPermissions: [],
+                  projectPermissions: permissions,
+                },
+                'verifier',
+                { value: { secretHash: await hashToken(keyring, 1, presented), pepperVersion: 1 } },
+              ) as unknown as EngineTokenAccess),
         touchSession: async () => true,
         touchToken: async () => true,
       },
@@ -203,7 +251,7 @@ async function fixture(
     } = {},
   ) => {
     const headers = new Headers({ origin: ORIGIN, 'content-type': 'application/json' });
-    if (options.auth === 'token') headers.set('authorization', `Bearer ${bearer}`);
+    if (options.auth === 'token') headers.set('authorization', `Bearer ${presented}`);
     else if (options.auth !== 'anonymous') {
       headers.set('cookie', `${SESSION_COOKIE}=${SECRET}`);
       headers.set('x-csrf-token', CSRF);
@@ -220,7 +268,18 @@ async function fixture(
       }),
     );
   };
-  return { request, store, roles, reader, audits, grant, changeRole, revoke, clientIp };
+  return {
+    request,
+    store,
+    roles,
+    reader,
+    audits,
+    grant,
+    changeRole,
+    revoke,
+    clientIp,
+    setPermissions,
+  };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -684,21 +743,149 @@ describe('GET project grants', () => {
   });
 });
 
-it.each([false, true])(
-  'project grant reads derive e-mail disclosure from organization admin authority (%s)',
-  async (admin) => {
-    const f = await fixture({ admin });
-    const response = await f.request({
-      method: 'GET',
-      path: '/_pb/projects/demo/grants',
-    } as RouteCase);
+describe('project grant list subject visibility', () => {
+  const read = { method: 'GET', path: '/_pb/projects/demo/grants' } as RouteCase;
+  const readers = ['project:read', 'project:grants:read'];
+
+  async function principals(response: Response) {
     expect(response.status).toBe(200);
+    const body = (await response.json()) as GrantPage;
+    expect(PROJECT_GRANTS_LIST_API_SPEC.api.responses[200].safeParse(body).success).toBe(true);
+    return new Map(body.items.map((item) => [item.id, item.principal]));
+  }
+
+  it.each([
+    ['project grants reader', { permissions: readers }],
+    ['organization admin who also holds a project grant', { admin: true }],
+    [
+      'organization admin with organization-scope permissions only',
+      {
+        admin: true,
+        permissions: [],
+        organizationPermissions: PERMISSIONS.map((p) => p.name),
+      },
+    ],
+    [
+      'organization-scope project:grants:read holder',
+      { permissions: ['project:read'], organizationPermissions: ['project:grants:read'] },
+    ],
+  ] as const)('returns e-mail and group values to a session of a %s', async (_name, options) => {
+    const f = await fixture(options);
+    const listed = await principals(await f.request(read));
     expect(f.reader.list).toHaveBeenCalledWith(
       orgContext('org-1'),
-      expect.objectContaining({ includeEmail: admin }),
+      expect.objectContaining({ projectId: PROJECT, revealSubjects: true }),
     );
-  },
-);
+    expect(listed.get(OTHER_PROJECT)).toMatchObject({ email: EMAIL, visibility: 'visible' });
+    expect(listed.get(GRANT)).toMatchObject({
+      groupValue: GROUP_VALUE,
+      visibility: 'visible',
+    });
+  });
+
+  it.each([
+    ['read-scope token', { tokenScope: 'read' }],
+    ['full token of an organization admin', { admin: true }],
+    ['token holding only project:grants:read', { permissions: readers }],
+    ['service token', { tokenKind: 'svc' }],
+  ] as const)('redacts every subject value for a %s', async (_name, options) => {
+    const f = await fixture(options);
+    const response = await f.request(read, { auth: 'token' });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain('@');
+    expect(text).not.toContain(GROUP_VALUE);
+    expect(f.reader.list).toHaveBeenCalledWith(
+      orgContext('org-1'),
+      expect.objectContaining({ revealSubjects: false }),
+    );
+    const body = JSON.parse(text) as GrantPage;
+    expect(body.items.every((item) => item.principal.visibility === 'redacted')).toBe(true);
+  });
+
+  it('applies project A grants-read authority to project A only', async () => {
+    const f = await fixture({
+      projectPermissionsBySlug: { demo: readers, other: ['project:read'] },
+    });
+    const listed = await principals(await f.request(read));
+    expect(listed.get(OTHER_PROJECT)).toMatchObject({ email: EMAIL, visibility: 'visible' });
+    for (const [slug, status] of [
+      ['other', 403],
+      ['third', 404],
+    ] as const) {
+      const response = await f.request(read, { path: `/_pb/projects/${slug}/grants` });
+      expect(response.status).toBe(status);
+      expect(await response.text()).not.toContain('@');
+    }
+    expect(f.reader.list).toHaveBeenCalledOnce();
+    expect(f.reader.list.mock.calls[0]![1].projectId).toBe(PROJECT);
+  });
+
+  it.each([
+    ['e-mail on a redacted person', { kind: 'user', email: EMAIL, visibility: 'redacted' }],
+    [
+      'group value on a redacted group',
+      { kind: 'group', provider: 'github', groupValue: GROUP_VALUE, visibility: 'redacted' },
+    ],
+    ['visible person without e-mail', { kind: 'email', visibility: 'visible' }],
+    ['visible group without value', { kind: 'group', provider: 'github', visibility: 'visible' }],
+    ['principal without visibility', { kind: 'user', email: EMAIL }],
+  ] as const)('rejects a list schema principal with %s', (_name, principal) => {
+    const parse = (value: object) =>
+      PROJECT_GRANTS_LIST_API_SPEC.api.responses[200].safeParse({
+        items: [
+          {
+            id: GRANT,
+            revision: 1,
+            createdAt: '2026-10-22T00:00:00.000Z',
+            principal: { id: 'user-2', displayName: 'Member', ...value },
+            role: { id: ROLE, name: 'Developer', permissions: [] },
+          },
+        ],
+        next: null,
+      }).success;
+    expect(parse({ kind: 'user', email: EMAIL, visibility: 'visible' })).toBe(true);
+    expect(parse({ kind: 'group', provider: 'github', visibility: 'redacted' })).toBe(true);
+    expect(parse(principal)).toBe(false);
+  });
+
+  it('answers 404 for a project the reader holds no grant on, without reading grants', async () => {
+    const f = await fixture({ permissions: readers, visible: false });
+    const response = await f.request(read, { path: '/_pb/projects/other/grants' });
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain('@');
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+
+  it('answers 403 to a session without project:grants:read, without reading grants', async () => {
+    const f = await fixture({ permissions: ['project:read', 'project:grants:write'] });
+    const response = await f.request(read);
+    expect(response.status).toBe(403);
+    expect(await response.text()).not.toContain('@');
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+
+  it('denies a caller of another organization before reading grants', async () => {
+    const f = await fixture({ permissions: readers, org: 'org-2' });
+    for (const auth of [undefined, 'token'] as const) {
+      const response = await f.request(read, auth === undefined ? {} : { auth });
+      expect(response.status).toBe(401);
+      expect(await response.text()).not.toContain('@');
+    }
+    expect(f.reader.list).not.toHaveBeenCalled();
+  });
+
+  it('stops returning values on the request after project:grants:read is removed', async () => {
+    const f = await fixture({ permissions: readers });
+    const first = await principals(await f.request(read));
+    expect(first.get(OTHER_PROJECT)).toMatchObject({ email: EMAIL });
+    f.setPermissions(['project:read']);
+    const second = await f.request(read);
+    expect(second.status).toBe(403);
+    expect(await second.text()).not.toContain('@');
+    expect(f.reader.list).toHaveBeenCalledOnce();
+  });
+});
 
 it('changes the grant list ETag when the returned grant revision changes', async () => {
   const f = await fixture();

@@ -6,6 +6,17 @@ import type { PackageEcosystem, RouteDefinition as PluginRouteDefinition } from 
 
 export interface RouteDefinition extends PluginRouteDefinition {
   readonly bearerOnly?: true;
+  readonly organizationAlternative?: string;
+  /**
+   * Core project routes only: a session holding any permission in the project passes the kernel
+   * gate, and the route itself decides by permission. The declared permission must be project:read.
+   */
+  readonly projectSession?: true;
+  /** Core management URLs identify packages by id. */
+  readonly corePackageName?: (
+    ctx: import('../db/port.js').OrgContext,
+    params: Readonly<Record<string, string>>,
+  ) => Promise<string | null>;
 }
 
 export const RESERVED_PATH_PREFIXES = ['/health/', '/_pb/'] as const;
@@ -112,6 +123,7 @@ export interface RouteBoundaryOptions {
   readonly allowSelf?: boolean;
   /** Only core routes may be 'authenticated'. */
   readonly allowAuthenticated?: boolean;
+  readonly allowOrganizationAlternative?: boolean;
 }
 
 interface BoundaryInput {
@@ -120,6 +132,8 @@ interface BoundaryInput {
   readonly permission: unknown;
   readonly boundary?: unknown;
   readonly bearerOnly?: unknown;
+  readonly organizationAlternative?: unknown;
+  readonly projectSession?: unknown;
   readonly allowArchived?: unknown;
   readonly needsOrg?: unknown;
   readonly package?: unknown;
@@ -210,6 +224,27 @@ export function routeBoundaryProblems(
     fail('the self boundary is not available to plugin routes');
   }
 
+  if (route.organizationAlternative !== undefined) {
+    if (options.allowOrganizationAlternative !== true)
+      fail('organizationAlternative is reserved for core routes');
+    if (boundary !== 'project') fail('organizationAlternative requires the project boundary');
+    if (
+      typeof route.organizationAlternative !== 'string' ||
+      !route.organizationAlternative.startsWith('org:') ||
+      !PERMISSIONS.some(
+        (entry) => entry.name === route.organizationAlternative && !entry.sessionOnly,
+      )
+    ) {
+      fail('organizationAlternative requires a token-eligible organization permission');
+    }
+  }
+  if (route.projectSession !== undefined) {
+    if (route.projectSession !== true) fail('projectSession must be true when set');
+    if (options.allowSelf !== true) fail('projectSession is reserved for core routes');
+    if (boundary !== 'project' || permission !== 'project:read') {
+      fail('projectSession requires the project boundary with project:read');
+    }
+  }
   const allowArchived = route.allowArchived;
   if (allowArchived !== undefined) {
     if (allowArchived !== true) fail('allowArchived must be true when set');

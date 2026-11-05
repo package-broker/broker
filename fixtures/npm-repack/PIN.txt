@@ -1,0 +1,82 @@
+Rule reference: npm-packlist 10.0.4, ignore-walk 8.0.0, minimatch 10.2.5.
+Client reference: npm 11.17.0 (the installed CLI and its bundled modules).
+
+repositories.json contains repository file maps and root manifest additions.
+The tests materialize them only under this worktree's node_modules directory.
+For each repository, npm pack --dry-run --json --ignore-scripts --offline
+must report the frozen expected file list. Supported patterns must also match
+the library file list. Unsupported-grammar fixtures retain the npm comparison and assert
+the library's explicit unsupported_files_pattern refusal. Lifecycle scripts
+deliberately fail if run. No dependency is installed and no registry connection is made.
+
+The fixture tests use the NPM5 tar builder. The output is independently read
+by npm's node-tar parser and gunzip, including GNU/pax paths and tar fields.
+
+packTarball accepts a factory reopening the same immutable uncompressed tar.
+A staged gzip archive can be reopened through codecs.gunzip on both passes.
+The caller owns the input staging, output staging, hashing and promotion.
+The output body must be consumed successfully before a build can attach it.
+Consumers cancelling that body cancel the second pass. No file is extracted.
+
+Bounds: 50,000 entries, 256 MiB uncompressed tar, 64 KiB extension bodies,
+4,096-byte paths (including the synthetic root), 256 KiB root/bundle manifests,
+4 MiB total consumed rule metadata, 512 KiB first root readme,
+50,000,000-byte gzip. Candidate metadata retained before selection is bounded
+by the 256 MiB uncompressed archive ceiling; each capture is truncated at its
+individual cap and reports overflow only if packlist reads it.
+Caller limits may lower these ceilings. DEC-NPM-O2 supports literals and backslash
+escapes, *, ? (one UTF-16 unit), whole-segment **, non-nested brace lists
+with at most 16 expanded alternatives, ASCII bracket classes, leading !,
+and leading/trailing /. Unclosed [ is literal; leading and escaped ] follow
+minimatch. A trailing ** needs at least one (possibly empty) path segment.
+Brace ranges, nested braces, POSIX classes, non-ASCII classes and extglobs
+refuse with candidate_skipped: unsupported_files_pattern. Maintainers using
+unsupported grammar must publish from CI with a service token.
+
+Paths have at most 64 segments (path_too_deep otherwise). Compiled rule text
+is capped at 4 MiB per pack, counting UTF-16 storage (two bytes per code unit)
+over expanded alternatives, before expansion or token allocation. Identical
+rules share the same compiled representation. Overflow is compiled_rule_cap.
+Patterns remain bounded at 4,096 characters; path DP cells use the shared
+work budget rather than an independent table-size refusal.
+The shared ceiling is 2,000,000,000 work units: compilation/discovery/filter
+steps, linear required-substring checks, 64 units per uncached basename-rule
+scan, 256 units per path DP cell, and 256 units per segment wildcard DP cell.
+Partial path matches incur the same DP charge. Both kinds of DP reuse two rows.
+Literals and names use ECMAScript non-Unicode ignore-case canonicalization per
+UTF-16 unit; folding cannot expand a name. Basename matching uses the last
+nonempty segment of a path with trailing slashes. Segment wildcards require a
+nonempty name; empty literal slash-anchor segments remain valid.
+ASCII class escapes quote a literal character. Descending ranges are discarded;
+a class with no surviving range poisons the glob with a never-match token.
+Regex class literals are hex-escaped, with parseClass's leading-caret behavior
+represented explicitly. Unclosed, stray and single-element braces are literals.
+Rule groups share required-substring and exclusion-prefix prefilters, plus
+basename/path result caches;
+partial fallback results are cached per rule set and base name. Caches evict
+rather than refuse. Directory contexts are reconstructed after cache eviction;
+consumed metadata remains cached and is counted once. Parent paths are computed
+during discovery and reused for each gather.
+Rule-line and byte caps apply only to metadata packlist actually reads.
+The hostile 300/2,000-line ignore regressions must return packlist_budget
+within 10 seconds in tests; the Node refusal target is under 2 seconds.
+
+The rule ordering follows the pinned packlist, including root files overriding
+root ignore files, per-directory ignore precedence, strict required files,
+and installed bundled dependencies. No lifecycle scripts run. main and browser
+keep packlist's literal path semantics; bin paths receive npm normalization.
+The library emits a deterministic archive in source order with epoch mtime,
+uid/gid zero and 0644 or 0755 modes. Long output names use local pax records.
+
+Run the row's portable fixture gate:
+pnpm vitest run --project core src/registry/npm/tarball-pack.test.ts src/registry/npm/packlist-rules.test.ts src/registry/npm/gzip-frame.test.ts
+
+Run the actual codec ports and isolate parity checks:
+pnpm vitest run --project core src/registry/npm/tarball-pack.runtime.test.ts
+
+
+Round 5 directory-heavy regressions cover 49,000 files in distinct six-deep
+directories with 200/2,000 literal and wildcard basename ignores. All 200-line
+cases must pass within ten seconds. The 2,000-line cases must pass within ten
+seconds or refuse with packlist_budget within two seconds. Repeated globstar
+path tables exercise the work refusal independently of path depth.

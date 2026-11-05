@@ -3,9 +3,13 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   LoginView,
+  ReauthView,
+  SigninFailedView,
+  ssoFailureMessage,
   ReauthConfirmContent,
   ReauthConfirm,
   SetupView,
+  SetupAvailabilityView,
   createLoginController,
   createReauthFlow,
   createSetupController,
@@ -640,6 +644,10 @@ describe('package reauth integration', () => {
       );
     },
   );
+  it('returns to the notifications page of the same project after reauthentication', () => {
+    const hash = '#/notifications?project=demo';
+    expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(hash.slice(1))}`)).toBe(hash);
+  });
   it('preserves package filters and opaque cursor through the reauth return URL', () => {
     const hash =
       '#/packages?project=web&status=active&source=01ARZ3NDEKTSV4RRFFQ69G5FAV&q=%40example&after=npm%3A%2B%2F%25%3F%3D';
@@ -684,4 +692,309 @@ describe('package reauth integration', () => {
 it('drops unknown package return filters and invalid project scopes', () => {
   const target = '/packages?project=%2F%2Foutside.invalid&redirect=https%3A%2F%2Foutside.invalid';
   expect(reauthReturnHash(`#/reauth?return=${encodeURIComponent(target)}`)).toBe('#/packages');
+});
+
+describe('sign-in availability copy', () => {
+  it.each(['loading', 'error'] as const)(
+    'hides unconfirmed login and reauth forms during %s',
+    (availability) => {
+      for (const view of [
+        createElement(LoginView, {
+          state: { status: 'idle', error: null },
+          providers: [],
+          local: true,
+          availability,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+        createElement(ReauthView, {
+          error: false,
+          busy: false,
+          providers: [],
+          local: true,
+          availability,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+      ]) {
+        const html = renderToString(view);
+        expect(html).not.toContain('<form');
+        expect(html).not.toContain('name="password"');
+        expect(html).toContain(
+          availability === 'loading' ? 'Loading sign-in options' : 'Reload the page',
+        );
+      }
+    },
+  );
+
+  it('offers help when none of the providers support reauthentication', () => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        error: false,
+        busy: false,
+        providers: [{ id: 'corp', displayName: 'Corp SSO', kind: 'oidc', supportsReauth: false }],
+        local: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).toContain('Contact your administrator for help signing in.');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('Confirm with');
+    expect(html).not.toContain('Signed in with a password?');
+  });
+
+  it.each([false, true])(
+    'shows password-session guidance only with local disabled (%s)',
+    (local) => {
+      const html = renderToString(
+        createElement(ReauthView, {
+          error: false,
+          busy: false,
+          providers: [
+            { id: 'corp', displayName: 'Corp SSO', kind: 'oidc', supportsReauth: true },
+            { id: 'other', displayName: 'Other SSO', kind: 'oidc', supportsReauth: false },
+          ],
+          local,
+          onSubmit: vi.fn(),
+          onSso: vi.fn(),
+        }),
+      ).replace(/<!-- -->/g, '');
+      const copy = 'Signed in with a password? Sign out and sign in with Corp SSO to continue.';
+      if (local) expect(html).not.toContain(copy);
+      else {
+        expect(html).toContain(copy);
+        expect(html.indexOf(copy)).toBeGreaterThan(html.indexOf('Confirm with'));
+      }
+      expect(html).not.toContain('sign in with Other SSO');
+    },
+  );
+
+  it('offers plain help when no sign-in method is listed', () => {
+    const html = renderToString(
+      createElement(LoginView, {
+        state: { status: 'idle', error: null },
+        providers: [],
+        local: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).toContain('Contact your administrator for help signing in.');
+    expect(html).not.toContain('<form');
+  });
+});
+
+describe('local policy changes after availability loads', () => {
+  it('switches login to disabled without an invalid-credentials error', async () => {
+    const { client, request } = fakeClient(fail(403, 'local_auth_disabled'));
+    const onSignedIn = vi.fn();
+    const login = createLoginController({ client, onSignedIn });
+    await login.submit({ email: 'a@example.test', password: SENTINEL, code: CODE });
+    expect(login.snapshot()).toMatchObject({ error: 'disabled' });
+    const html = renderToString(
+      createElement(LoginView, {
+        state: login.snapshot(),
+        local: true,
+        providers: [],
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('Sign-in failed');
+    expect(html).toContain('Contact your administrator');
+    expect(onSignedIn).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('distinguishes disabled reauth from invalid credentials', async () => {
+    const { client } = fakeClient(fail(403, 'local_auth_disabled'));
+    const flow = createReauthFlow({
+      client,
+      storage: memoryStorage().storage,
+      now: Date.now,
+      navigate: vi.fn(),
+    });
+    expect(await flow.submitLocal({ password: SENTINEL, code: CODE })).toBe('disabled');
+    expect(everything(flow)).not.toContain(SENTINEL);
+  });
+
+  it.each(['start', 'finish'] as const)('closes React setup when %s is disabled', async (step) => {
+    const { client, request } = fakeClient(
+      ...(step === 'finish'
+        ? [ok(200, { provisioningUri: 'otpauth://totp/test?secret=ABC', secret: 'ABC' })]
+        : []),
+      fail(403, 'local_auth_disabled'),
+    );
+    const onSignedIn = vi.fn();
+    const setup = createSetupController({ client, onSignedIn });
+    await setup.submitToken('T'.repeat(43));
+    if (step === 'finish')
+      await setup.finish({ password: SENTINEL, confirmation: SENTINEL, code: CODE });
+    expect(setup.snapshot()).toMatchObject({
+      stage: 'disabled',
+      busy: false,
+      notice: null,
+      enrollment: null,
+    });
+    const calls = request.mock.calls.length;
+    await setup.submitToken('T'.repeat(43));
+    await setup.finish({ password: SENTINEL, confirmation: SENTINEL, code: CODE });
+    expect(request).toHaveBeenCalledTimes(calls);
+    expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ready', "Sign in with your organization's account"],
+    ['error', 'Setup is unavailable'],
+  ] as const)('keeps the setup title and availability heading for %s', (availability, title) => {
+    const html = renderToString(
+      createElement(SetupAvailabilityView, { availability, local: false, providers: [] }),
+    );
+    expect(html.replace(/&#x27;/g, "'")).toContain(title);
+    expect(html).toMatch(/<h1[^>]*>First-run setup<\/h1>/);
+    expect(html).toContain('/_pb/ui/#/login');
+    expect(html).not.toContain('<form');
+  });
+
+  it('renders one password-session hint naming both eligible providers', () => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        error: false,
+        busy: false,
+        local: false,
+        providers: ['Dex', 'Okta'].map((displayName) => ({
+          id: displayName,
+          displayName,
+          kind: 'oidc',
+          supportsReauth: true,
+        })),
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    ).replace(/<!-- -->/g, '');
+    expect(html.match(/Signed in with a password\?/g)).toHaveLength(1);
+    expect(html).toContain(
+      'Signed in with a password? Sign out and sign in with Dex or Okta to continue.',
+    );
+  });
+});
+
+describe('SSO confirmation recovery', () => {
+  it.each([true, false])('hides unsupported providers and shows recovery (local=%s)', (local) => {
+    const html = renderToString(
+      createElement(ReauthView, {
+        providers: [
+          { id: 'old', displayName: 'Old Dex', kind: 'oidc', supportsReauth: false },
+          { id: 'new', displayName: 'New Dex', kind: 'oidc', supportsReauth: true },
+        ],
+        local,
+        busy: false,
+        error: false,
+        onSubmit: vi.fn(),
+        onSso: vi.fn(),
+      }),
+    );
+    expect(html).not.toContain('Old Dex');
+    expect(html.replaceAll('<!-- -->', '')).toContain('Confirm with New Dex');
+    expect(html).toContain('Sign out and sign in again');
+    expect(html).toContain('within 10 minutes');
+    expect(html.includes('local sign-in form')).toBe(local);
+  });
+  it('renders a readable callback failure and never echoes arbitrary reason data', () => {
+    const html = renderToString(
+      createElement(SigninFailedView, { reason: 'no_auth_time', signedIn: true }),
+    );
+    expect(html).toContain('did not confirm a fresh sign-in');
+    expect(html).toContain('Return to confirmation');
+    expect(ssoFailureMessage('secret@example.test')).not.toContain('secret@example.test');
+    expect(ssoFailureMessage('state_invalid')).toContain('expired');
+    expect(ssoFailureMessage('stale_auth_time')).toContain('older sign-in');
+  });
+});
+
+it.each([
+  ['/tokens?project=acme', '#/tokens?project=acme'],
+  ['/packages?project=web&status=active', '#/packages?project=web&status=active'],
+  ['//outside.invalid', '#/projects'],
+  ['/tokens?redirect=https://outside.invalid', '#/tokens'],
+])('keeps a safe retry target from callback failure: %s', async (target, expected) => {
+  const hash = `#/signin-failed?reason=no_auth_time&return=${encodeURIComponent(target)}`;
+  const html = renderToString(
+    createElement(SigninFailedView, { reason: 'no_auth_time', signedIn: true, hash }),
+  );
+  const retryHash = `#/reauth?return=${encodeURIComponent(expected.slice(1))}`;
+  expect(html).toContain(`href="${retryHash}"`);
+  const { client, request } = fakeClient(ok(200, { location: '/idp' }));
+  await startSso(client, 'corp', 'reauth', vi.fn(), retryHash);
+  const returnTo = (request.mock.calls[0]![2] as { body: { returnTo: string } }).body.returnTo;
+  expect(reauthReturnHash(returnTo.slice(returnTo.indexOf('#')))).toBe(expected);
+});
+
+it('stores discovery confirmation labels, hides rule IDs, and replays the same idempotency key', async () => {
+  const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+  const { storage } = memoryStorage();
+  const { client, request } = fakeClient();
+  const flow = createReauthFlow({ client, storage, now: Date.now, navigate: vi.fn() });
+  flow.requireReauth(
+    {
+      method: 'POST',
+      path: '/_pb/sources/discovery/rules/' + id + '/run',
+      idempotencyKey: 'discovery-key',
+      body: {},
+    },
+    {
+      credential: false,
+      secretFields: [],
+      display: {
+        label: 'Change discovery rule Acme libraries',
+        effect: 'Request a scan on the next scheduler tick.',
+        scope: 'Organization sources',
+      },
+    },
+    '#/sources',
+  );
+  flow.restore();
+  const html = renderToString(
+    createElement(ReauthConfirmContent, {
+      action: flow.snapshot().action,
+      onConfirm: vi.fn(),
+      onDecline: vi.fn(),
+    }),
+  );
+  expect(html).toContain('Change discovery rule Acme libraries');
+  expect(html).toContain('Request a scan on the next scheduler tick.');
+  expect(html).not.toContain(id);
+  await flow.confirm();
+  expect(request).toHaveBeenCalledWith(
+    'post',
+    '/_pb/sources/discovery/rules/' + id + '/run',
+    expect.objectContaining({ idempotencyKey: 'discovery-key' }),
+  );
+});
+
+it('notifies a held discovery form when confirmation is declined', () => {
+  const { storage } = memoryStorage();
+  const flow = createReauthFlow({
+    client: fakeClient().client,
+    storage,
+    now: Date.now,
+    navigate: vi.fn(),
+  });
+  const listener = vi.fn();
+  flow.subscribeReplay(listener);
+  flow.requireReauth(
+    { method: 'POST', path: '/_pb/sources/discovery/rules' },
+    { credential: false, secretFields: [] },
+    '#/sources',
+  );
+  flow.restore();
+  flow.decline();
+  expect(listener).toHaveBeenCalledWith({
+    path: '/_pb/sources/discovery/rules',
+    ok: false,
+    status: 0,
+    cancelled: true,
+  });
 });

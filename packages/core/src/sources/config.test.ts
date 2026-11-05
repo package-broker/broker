@@ -392,8 +392,8 @@ describe('round 2', () => {
     expect(problems(parse('vcs', 'pypi' as 'npm', null, github))).toEqual(['ecosystem']);
   });
 
-  it('refuses vcs for npm', () => {
-    expect(problems(parse('vcs', 'npm', null, github))).toEqual(['ecosystem']);
+  it('accepts vcs for npm', () => {
+    expect(parse('vcs', 'npm', null, github).ok).toBe(true);
   });
 
   it('classifies urls and dist hosts through the outbound policy', () => {
@@ -991,3 +991,57 @@ describe('reported VCS providers', () => {
     expect(reportedVcsProviders('cloudflare', [])).toEqual([]);
   });
 });
+
+describe('hosted npm config', () => {
+  it.each(['node', 'cloudflare'] as const)(
+    'accepts an empty hosted npm config on %s',
+    (runtime) => {
+      expect(parse('hosted', 'npm', null, {}, { runtime })).toEqual({ ok: true, config: {} });
+    },
+  );
+  it('refuses credentials, URLs, claim lists and hosted Composer', () => {
+    expect(parse('hosted', 'npm', null, {}, { hasCredential: true }).ok).toBe(false);
+    expect(parse('hosted', 'npm', 'https://registry.example.test', {}).ok).toBe(false);
+    expect(parse('hosted', 'npm', null, { claims: ['widget'] }).ok).toBe(false);
+    expect(parse('hosted', 'composer', null, {}).ok).toBe(false);
+  });
+});
+
+it.each(['widget', '@scope/widget'])('accepts npm VCS package %s', (packageName) => {
+  expect(parse('vcs', 'npm', null, { ...github, packageName }).ok).toBe(true);
+});
+
+it.each(['Vendor/widget', 'vendor/widget', 'widget*'])(
+  'refuses noncanonical npm VCS name %s',
+  (packageName) => {
+    expect(problems(parse('vcs', 'npm', null, { ...github, packageName }))).toContain(
+      'packageName',
+    );
+  },
+);
+
+it.each(['a'.repeat(214), '@scope/' + 'a'.repeat(207)])(
+  'accepts maximum length npm VCS package %s',
+  (packageName) => {
+    expect(parse('vcs', 'npm', null, { ...github, packageName }).ok).toBe(true);
+    expect(parse('vcs', 'npm', null, { ...github, packageName: packageName + 'a' }).ok).toBe(false);
+  },
+);
+
+it.each(['node', 'cloudflare'] as const)(
+  'generic Git npm sources require the Node archive runtime (%s)',
+  (runtime) => {
+    const cfg = {
+      provider: 'git',
+      repository: 'https://git.example.com/repo.git',
+      refs: { tags: true, branches: [] },
+    };
+    const result = parse('vcs', 'npm', null, cfg, { runtime });
+    expect(result.ok).toBe(runtime === 'node');
+    if (!result.ok)
+      expect(result.problems).toContainEqual({
+        field: 'provider',
+        message: 'git is not available on cloudflare: archive building requires node',
+      });
+  },
+);

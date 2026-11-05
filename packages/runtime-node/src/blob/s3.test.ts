@@ -1,17 +1,21 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AwsV4Signer } from 'aws4fetch';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BlobSizeMismatchError,
+  BlobTooLargeError,
   BlobValidationError,
   parseSha256,
+  stagedStorageKey,
 } from '@package-broker/core/platform/blob';
 import {
   S3ConfigError,
@@ -963,4 +967,210 @@ describe('createS3ByteStore round 3', () => {
     );
     expect(resolved).toBe(pathToFileURL(join(packageDir, 'dist/blob/s3.js')).href);
   });
+});
+
+it('keeps S3 staged bytes invisible to final reads until a server-side promotion', async () => {
+  const { store, calls } = setup();
+  const handle = 'staging/61/01J00000000000000000000001' as never;
+  const result = await store.putStaged(handle, chunked([body]), body.length, input.mediaType);
+  expect(result).toEqual({ sha256: input.sha256, size: body.length });
+  const key = stagedStorageKey(handle, result.sha256);
+  expect(await store.head(key)).toBeNull();
+  expect(new Uint8Array(await new Response(await store.openStaged(handle)).arrayBuffer())).toEqual(
+    body,
+  );
+  await store.promote(handle, result.sha256, result.size, input.mediaType);
+  expect(await store.head(key)).toEqual({ size: body.length, mediaType: input.mediaType });
+  expect(calls.some((call) => call.headers.has('x-amz-copy-source'))).toBe(true);
+  await store.discardStaged(handle);
+  await expect(store.openStaged(handle)).rejects.toBeInstanceOf(BlobValidationError);
+});
+
+it('lists only old staged S3 keys across continuation pages', async () => {
+  const one = 'staging/61/01J00000000000000000000001';
+  const two = 'staging/61/01J00000000000000000000002';
+  let page = 0;
+  const { store, calls } = setup({}, {}, (call) => {
+    if (!new URL(call.url).searchParams.has('list-type')) return undefined;
+    page++;
+    const key = page === 1 ? one : two;
+    const stamp = page === 1 ? '2026-01-01T00:00:00.000Z' : '2026-10-30T00:00:00.000Z';
+    return new Response(
+      `<ListBucketResult><Contents><Key>${encodeURIComponent(key)}</Key><LastModified>${stamp}</LastModified></Contents><IsTruncated>${page === 1}</IsTruncated>${page === 1 ? '<NextContinuationToken>next</NextContinuationToken>' : ''}</ListBucketResult>`,
+    );
+  });
+  expect(await store.listStaged('2026-10-20T00:00:00.000Z')).toEqual([
+    { handle: one, createdAt: '2026-01-01T00:00:00.000Z' },
+  ]);
+  expect(calls.map((call) => new URL(call.url).searchParams.get('continuation-token'))).toEqual([
+    null,
+    'next',
+  ]);
+});
+it('refuses an oversized S3 staged body and leaves no uploaded object', async () => {
+  const { store, fake } = setup();
+  const handle = 'staging/61/01J00000000000000000000001' as never;
+  await expect(
+    store.putStaged(handle, chunked([body]), body.length - 1, input.mediaType),
+  ).rejects.toBeInstanceOf(BlobTooLargeError);
+  expect(fake.keys()).toEqual([]);
+});
+
+it('bounds completed S3 staging listings to fifty objects per organization', async () => {
+  const { store, calls } = setup({}, {}, (call) => {
+    if (!new URL(call.url).searchParams.has('list-type')) return undefined;
+    const entries = Array.from(
+      { length: 51 },
+      (_, n) =>
+        `<Contents><Key>${encodeURIComponent(`staging/61/01J000000000000000000${String(n).padStart(5, '0')}`)}</Key><LastModified>2020-01-01T00:00:00.000Z</LastModified></Contents>`,
+    ).join('');
+    return new Response(
+      `<ListBucketResult>${entries}<IsTruncated>false</IsTruncated></ListBucketResult>`,
+    );
+  });
+  expect(await store.listStaged('2026-01-01T00:00:00.000Z', 'staging/61/')).toHaveLength(50);
+  expect(new URL(calls[0]!.url).searchParams.get('prefix')).toBe('staging/61/');
+});
+
+it('cancels an oversized S3 staged source before any upload', async () => {
+  const { store, fake } = setup();
+  const cancel = vi.fn();
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(c) {
+        c.enqueue(new Uint8Array(3));
+      },
+      pull(c) {
+        c.close();
+      },
+      cancel,
+    },
+    { highWaterMark: 0 },
+  );
+  await expect(
+    store.putStaged('staging/61/01J00000000000000000000001' as never, body, 2, 'application/gzip'),
+  ).rejects.toBeInstanceOf(BlobTooLargeError);
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(fake.keys()).toEqual([]);
+});
+
+it.each(['size', 'digest'])('refuses S3 staged promotion with altered %s', async (field) => {
+  const { store } = setup();
+  const handle = 'staging/61/01J00000000000000000000001' as never;
+  const staged = await store.putStaged(handle, chunked([body]), body.length, input.mediaType);
+  await expect(
+    store.promote(
+      handle,
+      field === 'digest' ? parseSha256('a'.repeat(64)) : staged.sha256,
+      field === 'size' ? staged.size + 1 : staged.size,
+      input.mediaType,
+    ),
+  ).rejects.toBeInstanceOf(field === 'size' ? BlobSizeMismatchError : S3IntegrityError);
+});
+
+it('refuses repeated S3 staging listing cursors', async () => {
+  let pages = 0;
+  const { store, calls } = setup({}, {}, (call) => {
+    if (!new URL(call.url).searchParams.has('list-type')) return undefined;
+    return new Response(
+      `<ListBucketResult><IsTruncated>${++pages < 3}</IsTruncated><NextContinuationToken>same</NextContinuationToken></ListBucketResult>`,
+    );
+  });
+  await expect(store.listStaged('2026-01-01T00:00:00.000Z')).rejects.toBeInstanceOf(
+    BlobValidationError,
+  );
+  expect(calls).toHaveLength(2);
+});
+
+it('unlinks the S3 staging spool before reading upload bytes', async () => {
+  const before = (await readdir(tmpdir())).filter((name) => name.startsWith('pb-s3-stage-')).sort();
+  const { store } = setup();
+  let inspected = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(c) {
+        const during = (await readdir(tmpdir()))
+          .filter((name) => name.startsWith('pb-s3-stage-'))
+          .sort();
+        expect(during).toEqual(before);
+        inspected = true;
+        c.enqueue(new Uint8Array([1]));
+        c.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  await store.putStaged(
+    'staging/61/01J00000000000000000000001' as never,
+    body,
+    1,
+    'application/gzip',
+  );
+  expect(inspected).toBe(true);
+});
+
+it.each([-1, 0.5, NaN])('refuses invalid s3 staged cap %s', async (cap) => {
+  const { store } = setup();
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.close();
+    },
+  });
+  await expect(
+    store.putStaged(
+      'staging/61/01J00000000000000000000001' as never,
+      body,
+      cap,
+      'application/gzip',
+    ),
+  ).rejects.toBeInstanceOf(BlobValidationError);
+});
+
+it('omits malformed S3 staging keys from completed listings', async () => {
+  const { store } = setup({}, {}, (call) => {
+    if (!new URL(call.url).searchParams.has('list-type')) return undefined;
+    return new Response(
+      '<ListBucketResult><Contents><Key>staging%2F61%2Finvalid</Key><LastModified>2020-01-01T00:00:00.000Z</LastModified></Contents><IsTruncated>false</IsTruncated></ListBucketResult>',
+    );
+  });
+  expect(await store.listStaged('2026-01-01T00:00:00.000Z')).toEqual([]);
+});
+
+it('refuses an invalid S3 staging listing cutoff before sending a request', async () => {
+  const { store, calls } = setup();
+  await expect(store.listStaged('invalid')).rejects.toBeInstanceOf(BlobValidationError);
+  expect(calls).toEqual([]);
+});
+
+it('refuses cycling S3 staging listing cursors', async () => {
+  let pages = 0;
+  const tokens = ['one', 'two', 'one'];
+  const { store, calls } = setup({}, {}, (call) => {
+    if (!new URL(call.url).searchParams.has('list-type')) return undefined;
+    const token = tokens[pages++];
+    return new Response(
+      `<ListBucketResult><IsTruncated>${token !== undefined}</IsTruncated><NextContinuationToken>${token ?? ''}</NextContinuationToken></ListBucketResult>`,
+    );
+  });
+  await expect(store.listStaged('2026-01-01T00:00:00.000Z')).rejects.toBeInstanceOf(
+    BlobValidationError,
+  );
+  expect(calls).toHaveLength(3);
+});
+
+it('Round 3 S3 promotes with the requested content type and checksum without a GET', async () => {
+  const { store, calls } = setup();
+  const handle = 'staging/61/01J00000000000000000000001' as never;
+  const bytes = encoder.encode('checksum');
+  const staged = await store.putStaged(handle, chunked([bytes]), 100, 'application/octet-stream');
+  calls.length = 0;
+  await store.promote(handle, staged.sha256, staged.size, 'application/gzip');
+  expect(calls.filter((call) => call.method === 'GET')).toHaveLength(0);
+  const copied = calls.find(isCopy)!;
+  expect(copied.headers.get('content-type')).toBe('application/gzip');
+  expect(copied.headers.get('x-amz-metadata-directive')).toBe('REPLACE');
+  expect(await store.head(stagedStorageKey(handle, staged.sha256))).toMatchObject({
+    mediaType: 'application/gzip',
+  });
+  expect(await store.head(handle)).toBeNull();
 });

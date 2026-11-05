@@ -31,6 +31,7 @@ function data(fields: Record<string, string> = {}) {
 function savedSource(type: Source['type'], config: NonNullable<Source['config']>): Source {
   return {
     id: 'saved',
+    revision: 1,
     name: 'Saved source',
     projectId: null,
     ecosystem: type === 'npm_registry' || type === 'npmjs_proxy' ? 'npm' : 'composer',
@@ -812,3 +813,115 @@ it.each(['composer_repository', 'npm_registry'] as const)(
     expect(validateSourceForm(fields, type, true, displayed)).toHaveProperty('url');
   },
 );
+
+it('offers hosted npm for the organization with claims kept outside configuration', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'hosted',
+    }),
+  );
+  expect(html).toContain('value="hosted"');
+  expect(html).not.toContain('name="url"');
+  expect(html).toContain('Reserve private npm package names and publish packages to this broker.');
+  expect(html).toContain('npm publishing is available');
+  expect(html).toContain('Register package names');
+  expect(html).toContain('even while this source is paused.');
+  expect(html).toContain('A claim immediately stops the npmjs proxy');
+  expect(html).not.toContain('enable this source to publish');
+  expect(html).toContain('not yet cached');
+  expect(sourceSubmission(data(), 'npm', 'hosted', null)).toMatchObject({
+    type: 'hosted',
+    ecosystem: 'npm',
+    config: {},
+    url: null,
+  });
+});
+
+it('omits hosted source creation in a project form', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'hosted',
+      organization: false,
+    }),
+  );
+  expect(html).not.toContain('value="hosted"');
+});
+
+it('offers npm VCS and explains root manifest naming', () => {
+  const html = renderToString(
+    createElement(SourceForm, {
+      source: null,
+      busy: false,
+      errors: {},
+      alert: null,
+      onSubmit: vi.fn(),
+      onClose: vi.fn(),
+      initialType: 'vcs',
+    }),
+  );
+  expect(html).toContain('value="vcs"');
+  const help = /<p id="source-config\/packageName-help"[^>]*>(.*?)<\/p>/.exec(html)?.[1];
+  expect(help).toBe(
+    'Leave blank to use the root manifest name (composer.json or package.json). For npm, this must match the name in package.json.',
+  );
+});
+
+it.each(['npm', 'composer'] as const)(
+  'shows an ecosystem-aware VCS placeholder for %s',
+  (ecosystem) => {
+    const source = {
+      ...savedSource('vcs', {
+        provider: 'github',
+        repository: 'acme/lib',
+        refs: { tags: true, branches: [] },
+      }),
+      ecosystem,
+    };
+    const html = renderToString(
+      createElement(SourceForm, {
+        source,
+        busy: false,
+        errors: {},
+        alert: null,
+        onSubmit: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    );
+    expect(html).toContain(
+      `placeholder="${ecosystem === 'npm' ? '@acme/payments' : 'acme/payments'}"`,
+    );
+  },
+);
+
+it('round trips hosted approval and explains existing holds', () => {
+  const source = {
+    ...savedSource('hosted', {}),
+    ecosystem: 'npm' as const,
+    requirePublishApproval: true,
+    revision: 4,
+  };
+  const fields = sourceFormData(source);
+  expect(fields.has('requirePublishApproval')).toBe(true);
+  const html = renderForm(source);
+  expect(html).toContain('Require publish approval');
+  expect(html).toContain('Versions already held remain held');
+  fields.delete('requirePublishApproval');
+  expect(sourceSubmission(fields, 'npm', 'hosted', source)).toMatchObject({
+    requirePublishApproval: false,
+  });
+  expect(renderForm(savedSource('npm_registry', {}))).not.toContain(
+    'name="requirePublishApproval"',
+  );
+});

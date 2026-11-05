@@ -543,3 +543,22 @@ it('rejects a non-array zone snapshot as a provider failure', async () => {
     code: 'provider_failure',
   });
 });
+
+it.each([10007, 10000])('retains only the confirmed Worker-not-found code (%i)', async (code) => {
+  const h = harness(
+    () =>
+      new Response(
+        JSON.stringify({ success: false, errors: [{ code, message: 'ERROR_DATA_SENTINEL' }] }),
+        {
+          status: 404,
+          headers: { 'content-type': 'application/json' },
+        },
+      ),
+  );
+  const error = await h.api
+    .request('/workers/scripts/broker/settings')
+    .catch((error: unknown) => error);
+  expect(error).toMatchObject({ status: 404, providerCode: code === 10007 ? 10007 : null });
+  expect(String(error)).not.toContain('ERROR_DATA_SENTINEL');
+  expect(h.fetch).toHaveBeenCalledTimes(1);
+});

@@ -1,3 +1,4 @@
+import { lookupRepositoryIdentity } from './repository-identity.js';
 import {
   definePlugin,
   GITHUB_API_VERSION,
@@ -112,8 +113,29 @@ export default function github() {
       return [
         {
           id: 'github',
+          async lookupRepository(ctx, source, repository) {
+            let credential = ctx.credential;
+            if (source.type !== 'vcs' || source.config.provider !== 'github') return null;
+            if (source.config.installationId !== undefined) {
+              const binding = await tokensFor(ctx, source);
+              if (binding === null) return null;
+              const token = await binding.tokens.forRepositories(binding.installationId, [
+                repository.split('/')[1]!,
+              ]);
+              credential = {
+                origins: ['https://api.github.com'],
+                queryParams: [],
+                apply(headers, url) {
+                  if (url.origin === 'https://api.github.com')
+                    headers.set('authorization', `Bearer ${token.value}`);
+                  return { headers, url };
+                },
+              };
+            }
+            return lookupRepositoryIdentity(fetchFor(ctx), credential, repository);
+          },
           sourceTypes: ['vcs'],
-          ecosystems: ['composer'],
+          ecosystems: ['composer', 'npm'],
           async listPackages(ctx, source, cursor) {
             if (cursor !== null || source.type !== 'vcs' || source.config.provider !== 'github')
               throw new DiscoveryError('invalid_request');
@@ -147,7 +169,7 @@ export default function github() {
               ]);
               const origin = 'https://api.github.com';
               const response = await fetchFor(ctx)({
-                url: `${origin}/repos/${repository}/contents/composer.json`,
+                url: `${origin}/repos/${repository}/contents/${source.ecosystem === 'npm' ? 'package.json' : 'composer.json'}`,
                 method: 'GET',
                 purpose: 'api',
                 headers: {
@@ -188,7 +210,7 @@ export default function github() {
               name = manifest.name;
             }
             try {
-              name = packageKey(name, { ecosystem: 'composer' });
+              name = packageKey(name, { ecosystem: source.ecosystem });
             } catch {
               throw new DiscoveryError('invalid_response');
             }

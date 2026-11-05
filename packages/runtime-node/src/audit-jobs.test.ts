@@ -29,6 +29,18 @@ describe('Node audit job registration', () => {
       platformServices: {
         jobStore: createJobRepository(executor),
         blob: {
+          async stage() {
+            throw new Error('not_implemented');
+          },
+          async openStaged() {
+            throw new Error('not_implemented');
+          },
+          async promote() {
+            throw new Error('not_implemented');
+          },
+          async discard() {
+            throw new Error('not_implemented');
+          },
           head: async () => null,
           get: async () => null,
           put: async () => {
@@ -53,6 +65,10 @@ describe('Node audit job registration', () => {
         ]),
       ).toEqual([
         ['core:vulnerability-sync:v1', { everySeconds: 300 }],
+        ['core:publish-scan:v1', undefined],
+        ['core:publish-scan-sweep:v1', { everySeconds: 300 }],
+        ['core:publish-approval-expire:v1', { everySeconds: 3600 }],
+        ['core:package-access-expire:v1', { everySeconds: 3600 }],
         ['core:audit-seal:v1', { everySeconds: 60 }],
         ['core:audit-verify:v1', { everySeconds: 86400, resourceKey: 'audit-verify' }],
         ['core:audit-maintain:v1', { everySeconds: 60, resourceKey: 'audit-maintain' }],

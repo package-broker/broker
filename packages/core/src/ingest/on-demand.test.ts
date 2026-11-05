@@ -1919,7 +1919,12 @@ describe('Composer fill that ends incomplete', () => {
     const actual =
       await vi.importActual<typeof import('./apply-description.js')>('./apply-description.js');
     const writer = {
+      async publishVersion() {
+        throw new Error('not_implemented');
+      },
+
       statementBudget: {
+        publishVersion: 40,
         syncPackage: 500,
         attachDist: 4,
         openListing: 3,

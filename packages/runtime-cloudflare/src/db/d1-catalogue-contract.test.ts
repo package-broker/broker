@@ -3,7 +3,7 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { describeCatalogueContract } from '@package-broker/db-sqlite/contract/catalogue-contract';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
-const bindings = Array.from({ length: 32 }, (_, i) => `CATALOGUE${i}`);
+const bindings = Array.from({ length: 512 }, (_, i) => `CATALOGUE${i}`);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,

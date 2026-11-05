@@ -5,7 +5,7 @@ import { mutationFence } from '@package-broker/core/authz/fence';
 import type { AuthenticatedActor } from '@package-broker/core/authz/fence';
 import type { Statement } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
-import type { Jobs } from '@package-broker/core/platform/jobs';
+import type { CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import {
   SUPPORTED_PLUGIN_API,
   type PluginDefinition,
@@ -21,7 +21,7 @@ import {
 } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createNodeServer, type NodeBroker } from './index.js';
 import { createJobLoop } from './jobs/loop.js';
-import { createPatJobHolder, patOffboardingRegistrations } from './token-jobs.js';
+import { createPatJobHolder, tokenJobRegistrations } from './token-jobs.js';
 
 const KEY = 'pbmk_v1_AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const ANCHOR = 'oidc:https://idp.example.test';
@@ -165,6 +165,18 @@ async function boot(): Promise<{ database: MigratedDatabase; broker: NodeBroker 
     platformServices: {
       jobStore: createJobRepository(executor),
       blob: {
+        async stage() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discard() {
+          throw new Error('not_implemented');
+        },
         head: async () => null,
         get: async () => null,
         put: async () => {
@@ -342,6 +354,9 @@ describe('Node personal-token offboarding wiring', () => {
 
 describe('personal-token job holder', () => {
   const jobs: Jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
     enqueue: async () => ({ id: ulid(), created: true }),
     get: async () => null,
   };
@@ -396,7 +411,7 @@ describe('personal-token job holder', () => {
     };
     const loop = createJobLoop({
       executor,
-      jobs: patOffboardingRegistrations(executor, createPatJobHolder(), () => undefined),
+      jobs: tokenJobRegistrations(executor, createPatJobHolder(), () => undefined),
       scope: () => ({
         ports: {
           organizations: { get: async () => null },
@@ -421,4 +436,15 @@ describe('personal-token job holder', () => {
       { timeout: 15_000, interval: 50 },
     );
   });
+});
+
+it('registers the hourly OIDC replay expiry job', () => {
+  const jobs = tokenJobRegistrations(
+    { driver: 'none', all: async () => [], batch: async () => [] },
+    createPatJobHolder(),
+    () => undefined,
+  );
+  expect(
+    jobs.find((job) => job.qualifiedName === 'core:oidc-replay-expire:v1')?.definition,
+  ).toMatchObject({ version: 1, schedule: { everySeconds: 3600 } });
 });

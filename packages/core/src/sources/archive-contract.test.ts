@@ -490,6 +490,19 @@ describe('dist body cap contract', () => {
       } as unknown as ProviderContext,
       source: { id: 's', type: 'packagist_proxy', config: {} } as unknown as ProviderSource,
       store: {
+        async stage() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discard() {
+          throw new Error('not_implemented');
+        },
+
         put: async () => {
           events.push('put');
           throw new Error('unreachable');
@@ -581,7 +594,7 @@ describe('npm audit gzip bomb contract', () => {
       dist: { serve },
       onDemand: { ensure },
       reresolve,
-      handleOf: () => null,
+      handleOf: async () => null,
       publicUrl: 'https://broker.test',
       codecs: nodeCodecs,
       audit: { enabled: true, forward },

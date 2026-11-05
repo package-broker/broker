@@ -79,6 +79,7 @@ function withA6(overrides: Partial<Record<CatalogueWriteMethod, number>> = {}): 
   return {
     sessionStatements: 3,
     statementBudget: {
+      publishVersion: 40,
       syncPackage: 120,
       attachDist: 4,
       openListing: 3,
@@ -96,6 +97,48 @@ function npmMembers(count: number, start = 0): ChunkMember[] {
     member(start + i, versionInput('npm', `1.0.${start + i}`, npmManifest(`1.0.${start + i}`))),
   );
 }
+
+describe('planChunk unchanged build retries', () => {
+  it('budgets unchanged active versions through the writer and resumes at the ceiling', () => {
+    const members = npmMembers(100);
+    const existing = members.map((m) => existingFrom(m.version));
+    const plan = planChunk(
+      members,
+      existing,
+      { ...npmSource, type: 'vcs' },
+      {
+        ...withA6(),
+        syncUnchanged: true,
+        syncCost: (versions) => 10 + 5 * versions,
+      },
+    );
+    expect(plan.unchanged).toHaveLength(85);
+    expect(plan.inserts).toEqual([]);
+    expect(plan.composerUpdates).toEqual([]);
+    expect(plan.writerCalls).toEqual([
+      { method: 'syncPackage', versions: members.slice(0, 50).map((m) => m.version) },
+      { method: 'syncPackage', versions: members.slice(50, 85).map((m) => m.version) },
+    ]);
+    expect(plan.statements).toBe(INVOCATION_BUDGET);
+    expect(plan.cursorAfter).toBe(84);
+  });
+
+  it.each(['quarantined', 'tombstoned', 'removed_upstream'])(
+    'does not resync %s versions',
+    (status) => {
+      const incoming = npmMembers(1)[0]!;
+      const plan = planChunk(
+        [incoming],
+        [{ ...existingFrom(incoming.version), status }],
+        { ...npmSource, type: 'vcs' },
+        { ...withA6(), syncUnchanged: true },
+      );
+      expect(plan.unchanged).toEqual(['1.0.0']);
+      expect(plan.writerCalls).toEqual([]);
+      expect(plan.statements).toBe(5);
+    },
+  );
+});
 
 describe('planChunk npm diff', () => {
   it('treats a version whose only difference is a new signature as unchanged', () => {

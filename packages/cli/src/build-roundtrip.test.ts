@@ -109,7 +109,7 @@ describe('build manifest round trip', () => {
 });
 
 const NODE_PORTS = {
-  blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 1024 },
+  blob: { adapter: 'filesystem', rootEnv: 'PB_BLOB_ROOT', maxBytes: 50_000_000 },
   cache: { adapter: 'lru', maxBytes: 1024 },
   jobs: { adapter: 'database', maxRunning: 2 },
   observability: { adapter: 'stdio', deploymentIdEnv: 'DEPLOYMENT_ID' },

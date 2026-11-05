@@ -1,12 +1,28 @@
 import { auditTrail } from './audit-trail.test.support.js';
+import { jobNotification } from './jobs/consumer.js';
+import type { SourceProvider } from '@package-broker/core/sources/provider';
+import type { PluginDefinition } from '@package-broker/core/plugin';
+import { gitTarball } from '@package-broker/core/ingest/vcs/git-tar';
+import { formatToken } from '@package-broker/core/secrets/token-format';
+import { hashToken } from '@package-broker/core/secrets/token-hash';
+import { createNpmHandleOf } from '@package-broker/core/registry/module';
+import type { RequestContext } from '@package-broker/core/plugin';
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
+import { execFile } from 'node:child_process';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { promisify } from 'node:util';
 import { createHash, randomBytes } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { base32Decode, totpCode } from '@package-broker/core/auth/totp';
 import { DEFAULT_ROLES, type DefaultRoleKey } from '@package-broker/core/authz/permissions';
+import type { SqlExecutor, SqlValue } from '@package-broker/core/db/port';
 import { orgContext } from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import * as kernelModule from '@package-broker/core/kernel/kernel';
@@ -16,14 +32,16 @@ import { blobStorageKey } from '@package-broker/core/platform/blob';
 import { createKeyring } from '@package-broker/core/secrets/keyring';
 import { createSecretCipher } from '@package-broker/core/secrets/cipher';
 import { createCredentialStore } from '@package-broker/core/secrets/credential-store';
-import { readMasterKeys } from '@package-broker/core/secrets/master-key';
+import { parseMasterKey, readMasterKeys } from '@package-broker/core/secrets/master-key';
 import { loadMigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
 import { migrate } from '@package-broker/db-sqlite/migrations/runner';
 import { bootstrapAdmin } from '@package-broker/db-sqlite/repositories/admin-bootstrap';
 import { createCredentialRepository } from '@package-broker/db-sqlite/repositories/credential';
+import * as vulnerabilityModule from '@package-broker/db-sqlite/repositories/vulnerability';
 import { createOrganizationBootstrap } from '@package-broker/db-sqlite/repositories/organization';
 import type { R2BucketLike } from './blob/r2.js';
+import * as d1Module from './db/d1-executor.js';
 import { createD1Executor, type D1DatabaseLike } from './db/d1-executor.js';
 import { createWorker, type Env, type ExecutionContextLike, type WorkerOptions } from './index.js';
 
@@ -44,7 +62,7 @@ const platformPorts: PlatformPortConfig = {
   observability: { adapter: 'workers', deploymentIdEnv: 'DEPLOYMENT_ID' },
 };
 
-const slots = Array.from({ length: 24 }, (_, index) => index);
+const slots = Array.from({ length: 32 }, (_, index) => index);
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     modules: true,
@@ -95,6 +113,30 @@ function memoryBucket() {
       }
       objects.set(key, { bytes, contentType: options?.httpMetadata?.contentType });
       return { size: bytes.byteLength, httpMetadata: options?.httpMetadata ?? {} };
+    },
+    async createMultipartUpload(
+      key: string,
+      options?: { httpMetadata?: { contentType?: string } },
+    ) {
+      const parts = new Map<number, Uint8Array>();
+      return {
+        uploadPart: async (partNumber: number, bytes: Uint8Array) => {
+          parts.set(partNumber, bytes.slice());
+          return { partNumber, etag: String(partNumber) };
+        },
+        complete: async (ordered: { partNumber: number }[]) => {
+          const bytes = new Uint8Array(
+            await new Blob(
+              ordered.map(({ partNumber }) => Uint8Array.from(parts.get(partNumber)!)),
+            ).arrayBuffer(),
+          );
+          objects.set(key, { bytes, contentType: options?.httpMetadata?.contentType });
+          return { key };
+        },
+        abort: async () => {
+          parts.clear();
+        },
+      };
     },
     async get(key: string, options?: { range?: { offset: number; length: number } }) {
       const object = objects.get(key);
@@ -272,6 +314,7 @@ interface SourceSeed {
 async function boot(
   options: {
     sources?: SourceSeed[];
+    vcs?: boolean;
     worker?: WorkerOptions;
     registry?: WorkerOptions['registry'];
   } = {},
@@ -420,7 +463,7 @@ async function boot(
     PB_MASTER_KEY: KEY,
     PB_PUBLIC_URL: PUBLIC_URL,
   };
-  const worker = createWorker([auditTrail()], {
+  const worker = createWorker([auditTrail(), ...(options.vcs ? [vcsPlugin] : [])], {
     audit: {},
     platformPorts,
     cacheStorage,
@@ -513,6 +556,37 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { packages: Record<string, unknown[]> };
     expect(body.packages['acme/lib']).toHaveLength(3);
+  });
+
+  it('queues an unbuilt VCS tarball and serves its integrity after building', async () => {
+    const app = await boot({
+      vcs: true,
+      worker: {
+        platformPorts: {
+          ...platformPorts,
+          blob: { ...platformPorts.blob!, maxBytes: 64 * 1024 * 1024 },
+        },
+      },
+    });
+    await checkVcsBuildHttp({
+      executor: app.executor,
+      orgId: app.orgId,
+      sourceId: 'NX1',
+      projectId: 'P1',
+      prefix: '/p1',
+      get: (path) => app.fetch(request(path, { headers: { cookie: app.cookie } })),
+      runBuild: async (id) => {
+        const ack = vi.fn();
+        const retry = vi.fn();
+        await app.worker.queue(
+          { messages: [{ body: jobNotification(orgContext(app.orgId), id), ack, retry }] },
+          app.environment,
+        );
+        expect(retry).not.toHaveBeenCalled();
+        expect(ack).toHaveBeenCalledOnce();
+      },
+      boot: async () => {},
+    });
   });
 
   it('serves an npm packument through the policy fetch and a tarball in two passes', async () => {
@@ -833,11 +907,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-1', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed, orgId } = await boot({
         sources: [
@@ -907,11 +991,21 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
       await gate;
       return { id: 'job-2', created: true };
     });
-    const spy = vi
-      .spyOn(moduleNamespace, 'createRegistryModule')
-      .mockImplementation((deps) =>
-        original({ ...deps, ports: { ...deps.ports, jobs: { enqueue, get: async () => null } } }),
-      );
+    const spy = vi.spyOn(moduleNamespace, 'createRegistryModule').mockImplementation((deps) =>
+      original({
+        ...deps,
+        ports: {
+          ...deps.ports,
+          jobs: {
+            async enqueueStatements() {
+              throw new Error('not_implemented');
+            },
+            enqueue,
+            get: async () => null,
+          },
+        },
+      }),
+    );
     try {
       const { fetch, cookie, seed } = await boot();
       const first = await fetch(request('/p1/npm/left-pad', { headers: { cookie } }));
@@ -1200,3 +1294,506 @@ describe('cloudflare registry wiring on Miniflare D1 and R2', () => {
     }
   });
 });
+
+describe('worker npm whoami', () => {
+  it('authenticates whoami with personal and service bearer tokens and refuses an invalid token', async () => {
+    const { fetch, seed, orgId, executor } = await boot();
+    await seed('UPDATE user_account SET display_name = ? WHERE org_id = ?', ['reader', orgId]);
+    const [project] = await executor.all<{ id: string }>({
+      sql: 'SELECT id FROM project WHERE org_id = ? AND slug = ?',
+      params: [orgId, 'p1'],
+    });
+    const tokens = await seedWhoamiTokens(executor, orgId, project!.id);
+    for (const { token, username } of tokens) {
+      const response = await fetch(
+        new Request(`${PUBLIC_URL}/p1/npm/-/whoami`, {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      );
+      expect(response.status, username ?? 'invalid token').toBe(username === null ? 401 : 200);
+      if (username !== null) expect(await response.json()).toEqual({ username });
+    }
+  });
+
+  it('runs npm whoami through the Worker HTTP entry', async () => {
+    await requireNpm();
+    const { fetch, seed, orgId, executor } = await boot();
+    await seed('UPDATE user_account SET display_name = ? WHERE org_id = ?', ['reader', orgId]);
+    const [project] = await executor.all<{ id: string }>({
+      sql: 'SELECT id FROM project WHERE org_id = ? AND slug = ?',
+      params: [orgId, 'p1'],
+    });
+    const tokens = await seedWhoamiTokens(executor, orgId, project!.id);
+    await npmWhoami(
+      (path, headers) => fetch(new Request(`${PUBLIC_URL}${path}`, { headers })),
+      '/p1/npm/',
+      tokens,
+    );
+  });
+
+  it('serves a safe display name and the full fallback id on D1', async () => {
+    const { fetch, seed, executor, orgId, cookie } = await boot();
+    const [user] = await executor.all<{ id: string }>({
+      sql: 'SELECT id FROM user_account WHERE org_id = ?',
+      params: [orgId],
+    });
+    for (const name of ['reader', null, '', 'reader@example.test', 'two words']) {
+      await seed('UPDATE user_account SET display_name = ? WHERE org_id = ?', [name, orgId]);
+      const response = await fetch(
+        new Request(`${PUBLIC_URL}/p1/npm/-/whoami`, { headers: { cookie } }),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        username: name === 'reader' ? name : `user-${user!.id.toLowerCase()}`,
+      });
+    }
+    expect((await fetch(new Request(`${PUBLIC_URL}/p1/npm/-/whoami`))).status).toBe(401);
+    const serviceId = ulid();
+    await seed(
+      'INSERT INTO service_principal (id, org_id, name, created_by_user_id) VALUES (?, ?, ?, ?)',
+      [serviceId, orgId, 'build-bot', user!.id],
+    );
+    const handleOf = createNpmHandleOf(
+      createUserRepository(executor),
+      createServicePrincipalRepository(executor),
+    );
+    const ctx = {
+      org: orgContext(orgId),
+      principal: { kind: 'service', id: serviceId },
+    } as RequestContext;
+    expect(await handleOf(ctx)).toBe('build-bot');
+    await seed('UPDATE service_principal SET name = ? WHERE id = ?', [
+      'bot@example.test',
+      serviceId,
+    ]);
+    expect(await handleOf(ctx)).toBe(`service-${serviceId.toLowerCase()}`);
+    expect(await handleOf({ ...ctx, org: orgContext(ulid()) })).toBeNull();
+    expect(
+      await handleOf({
+        ...ctx,
+        principal: { kind: 'user', id: user!.id },
+        org: orgContext(ulid()),
+      }),
+    ).toBeNull();
+  });
+});
+
+async function requireNpm(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  try {
+    await promisify(execFile)('npm', ['--version'], { env, timeout: 3000 });
+  } catch {
+    throw new Error('npm whoami CLI tests require npm on PATH');
+  }
+}
+
+it('reports the npm on PATH requirement immediately when missing', async () => {
+  await expect(requireNpm({ PATH: '' })).rejects.toThrow(
+    'npm whoami CLI tests require npm on PATH',
+  );
+});
+
+async function seedWhoamiTokens(executor: SqlExecutor, orgId: string, projectId: string) {
+  const run = (sql: string, params: (string | number | null)[]) =>
+    executor.batch([{ sql, params }]);
+  const [user] = await executor.all<{ id: string }>({
+    sql: 'SELECT id FROM user_account WHERE org_id = ?',
+    params: [orgId],
+  });
+  const serviceId = ulid();
+  await run(
+    'INSERT INTO service_principal (id, org_id, name, project_id, created_by_user_id) VALUES (?, ?, ?, ?, ?)',
+    [serviceId, orgId, 'build-bot', projectId, user!.id],
+  );
+  await run(
+    'INSERT INTO service_principal_permission (org_id, service_principal_id, permission) VALUES (?, ?, ?)',
+    [orgId, serviceId, 'project:read'],
+  );
+  const keyring = createKeyring([parseMasterKey(KEY, 'PB_MASTER_KEY')]);
+  const cases: { token: string; username: string | null }[] = [];
+  for (const kind of ['pat', 'svc'] as const) {
+    const selector = kind === 'pat' ? 'aaaaaaaaaaaa' : 'bbbbbbbbbbbb';
+    const token = formatToken(kind, selector, crypto.getRandomValues(new Uint8Array(32)));
+    await run(
+      `INSERT INTO token (id, org_id, kind, selector, hash, pepper_version, name, scopes_json, read_only,
+      user_id, service_principal_id, project_id, created_by_user_id, expires_at, project_mode, validation_kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ulid(),
+        orgId,
+        kind,
+        selector,
+        await hashToken(keyring, keyring.currentVersion, token),
+        keyring.currentVersion,
+        'whoami-fixture',
+        '["read"]',
+        kind === 'pat' ? user!.id : null,
+        kind === 'svc' ? serviceId : null,
+        kind === 'svc' ? projectId : null,
+        user!.id,
+        new Date(Date.now() + 3600000).toISOString(),
+        'all',
+        kind === 'pat' ? 'local' : null,
+      ],
+    );
+    cases.push({ token, username: kind === 'pat' ? 'reader' : 'build-bot' });
+  }
+  cases.push({ token: formatToken('pat', 'cccccccccccc', new Uint8Array(32)), username: null });
+  return cases;
+}
+
+async function npmWhoami(
+  call: (path: string, headers: Headers) => Promise<Response>,
+  prefix: string,
+  cases: readonly { token: string; username: string | null }[],
+): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), 'pb-npm-whoami-'));
+  const statuses: number[] = [];
+  const server = createServer((request, response) => {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers as IncomingHttpHeaders)) {
+      if (Array.isArray(value)) for (const entry of value) headers.append(name, entry);
+      else if (value !== undefined) headers.set(name, value);
+    }
+    void call(request.url ?? '/', headers)
+      .then(async (reply) => {
+        statuses.push(reply.status);
+        response.writeHead(reply.status, Object.fromEntries(reply.headers));
+        response.end(await reply.text());
+      })
+      .catch(() => response.writeHead(500).end());
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+    for (const { token, username } of cases) {
+      statuses.length = 0;
+      await writeFile(
+        join(directory, 'npmrc'),
+        `//127.0.0.1:${port}${prefix}:_authToken=${token}\n`,
+        { mode: 0o600 },
+      );
+      const result = await promisify(execFile)(
+        'npm',
+        [
+          'whoami',
+          `--registry=http://127.0.0.1:${port}${prefix}`,
+          `--userconfig=${join(directory, 'npmrc')}`,
+          `--globalconfig=${join(directory, 'global-npmrc')}`,
+          '--update-notifier=false',
+          '--fetch-retries=0',
+          '--loglevel=silent',
+        ],
+        {
+          timeout: 5000,
+          env: { ...process.env, HOME: directory, npm_config_cache: join(directory, 'cache') },
+        },
+      ).then(
+        ({ stdout }) => ({ ok: true, stdout }),
+        () => ({ ok: false, stdout: '' }),
+      );
+      expect(statuses).toEqual([username === null ? 401 : 200]);
+      expect(result.ok).toBe(username !== null);
+      expect(result.stdout.trim()).toBe(username ?? '');
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+describe('npm audit matrix', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const endpoint = '/p1/npm/-/npm/v1/security/advisories/bulk';
+  let app: Awaited<ReturnType<typeof boot>>;
+  async function audit(body: unknown) {
+    return app.fetch(
+      request(endpoint, {
+        method: 'POST',
+        headers: {
+          cookie: app.cookie,
+          origin: PUBLIC_URL,
+          'x-csrf-token': app.cookie.split('__Host-pb_csrf=')[1]!,
+          'content-type': 'application/json',
+          traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it('forwards verified public pairs and refuses disclosure after a private claim or cap', async () => {
+    const repositorySpy = vi.spyOn(vulnerabilityModule, 'createVulnerabilityRepository');
+    let failEvidence = false;
+    const originalExecutor = d1Module.createD1Executor;
+    const executorSpy = vi.spyOn(d1Module, 'createD1Executor').mockImplementation((db) => {
+      const executor = originalExecutor(db);
+      return {
+        driver: executor.driver,
+        all: (statement) => executor.all(statement),
+        batch: (statements) => {
+          if (
+            failEvidence &&
+            statements.some((statement) => statement.sql.includes('evidence_bytes'))
+          )
+            throw new Error('evidence unavailable');
+          return executor.batch(statements);
+        },
+      };
+    });
+    const sent: { body: unknown; headers: Headers }[] = [];
+    const remote = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(input)).hostname !== 'registry.npmjs.org') return realFetch(input, init);
+      const request = new Request(input, init);
+      if (request.method !== 'POST') return remote(input, init);
+      sent.push({ body: await request.json(), headers: request.headers });
+      return Response.json({ 'left-pad': [{ id: 42 }], sentinel: [{ id: 43 }] });
+    });
+    app = await boot();
+    executorSpy.mockRestore();
+    expect(repositorySpy.mock.calls.length).toBeGreaterThan(0);
+    for (const call of repositorySpy.mock.calls) expect(call[1]).toBe(systemClock);
+    repositorySpy.mockRestore();
+    expect(
+      (await app.fetch(request('/p1/npm/left-pad', { headers: { cookie: app.cookie } }))).status,
+    ).toBe(200);
+    const response = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ 'left-pad': [{ id: 42 }] });
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(sent.map(({ body }) => body)).toEqual([{ 'left-pad': ['1.0.0'] }]);
+    for (const { headers } of sent) {
+      expect(headers.has('cookie')).toBe(false);
+      expect(headers.has('authorization')).toBe(false);
+      expect(headers.has('x-csrf-token')).toBe(false);
+      expect(headers.get('user-agent')).toBe('PackageBroker/2');
+      expect(headers.has('traceparent')).toBe(false);
+    }
+    failEvidence = true;
+    sent.length = 0;
+    const unavailable = await audit({ 'left-pad': ['1.0.0'] });
+    expect(unavailable.status).toBe(502);
+    expect(await unavailable.json()).toMatchObject({ code: 'upstream_error' });
+    expect(sent).toEqual([]);
+    failEvidence = false;
+    await app.seed(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, url, config_json) VALUES ('PRIVATE', ?, 'Private', 'npm', 'npm_registry', 'https://private.test', '{\"scopes\":[\"@private\"]}')",
+      [app.orgId],
+    );
+    await app.seed(
+      "INSERT INTO package (id, org_id, source_id, ecosystem, name) VALUES ('HIDDEN', ?, 'PRIVATE', 'npm', 'left-pad')",
+      [app.orgId],
+    );
+    sent.length = 0;
+    const hiddenHolder = await audit({ 'left-pad': ['1.0.0'] });
+    expect(hiddenHolder.status).toBe(200);
+    expect(await hiddenHolder.json()).toEqual({});
+    expect(sent).toEqual([]);
+    await app.seed("UPDATE source SET status = 'paused' WHERE org_id = ? AND id = 'PRIVATE'", [
+      app.orgId,
+    ]);
+    const pausedHolder = await audit({ 'left-pad': ['1.0.0'] });
+    expect(pausedHolder.status).toBe(200);
+    expect(await pausedHolder.json()).toEqual({});
+    expect(sent).toEqual([]);
+    await app.seed("DELETE FROM package WHERE org_id = ? AND id = 'HIDDEN'", [app.orgId]);
+    await app.seed(
+      "INSERT INTO source (id, org_id, name, ecosystem, type, url) VALUES ('CLAIM', ?, 'Claim', 'npm', 'vcs', 'https://private.test/repo.git')",
+      [app.orgId],
+    );
+    await app.seed(
+      'INSERT INTO registered_name (id, org_id, source_id, ecosystem, pattern) VALUES (?, ?, ?, ?, ?)',
+      [ulid(), app.orgId, 'CLAIM', 'npm', 'left-pad'],
+    );
+    sent.length = 0;
+    const filtered = await audit({ 'left-pad': ['1.0.0'], '@private/hidden': ['1.0.0'] });
+    expect(filtered.status).toBe(200);
+    expect(await filtered.json()).toEqual({});
+    expect(sent).toEqual([]);
+    sent.length = 0;
+    const privateOnly = await audit({ '@private/hidden': ['1.0.0'] });
+    expect(privateOnly.status).toBe(200);
+    expect(await privateOnly.json()).toEqual({});
+    for (const body of [
+      Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`pkg-${i}`, ['1.0.0']])),
+      { 'left-pad': Array.from({ length: 2001 }, (_, i) => `1.0.${i}`) },
+    ]) {
+      const capped = await audit(body);
+      expect(capped.status).toBe(413);
+      expect(await capped.json()).toMatchObject({ code: 'payload_too_large' });
+    }
+    expect(sent).toEqual([]);
+    expect(JSON.stringify(app.events)).not.toMatch(/@private|admin@example|__Host-pb_session/);
+  });
+
+  it('distinguishes no attached proxy from the disabled off switch without outbound traffic', async () => {
+    const { seen } = stubUpstream();
+    app = await boot();
+    await app.seed(
+      'DELETE FROM project_source WHERE org_id = ? AND project_id = ? AND source_id = ?',
+      [app.orgId, 'P1', 'NX1'],
+    );
+    const absent = await audit({ 'left-pad': ['1.0.0'] });
+    expect(absent.status).toBe(501);
+    expect(await absent.json()).toMatchObject({
+      code: 'unsupported',
+      error: 'npm audit requires an npmjs.org proxy source in this project',
+    });
+    app = await boot({ registry: { npmAudit: { enabled: false } } });
+    const disabled = await audit({ 'left-pad': ['1.0.0'] });
+    expect(disabled.status).toBe(501);
+    expect(await disabled.json()).toMatchObject({ code: 'npm_audit_disabled' });
+    expect(seen).toEqual([]);
+  });
+});
+
+const vcsCommit = 'a'.repeat(40);
+const vcsConfig = {
+  provider: 'github',
+  repository: 'owner/repo',
+  packageName: 'fixture',
+  refs: { tags: true, branches: [] },
+};
+const vcsProvider: SourceProvider = {
+  id: 'github',
+  sourceTypes: ['vcs'],
+  ecosystems: ['npm'],
+  async describe() {
+    throw new Error('unexpected metadata fetch');
+  },
+  async openDist(context) {
+    const text = '{"name":"fixture","version":"1.0.0"}';
+    const bytes = new TextEncoder().encode(text);
+    return {
+      size: null,
+      body: await gitTarball(
+        {
+          commit: vcsCommit,
+          committedAt: '',
+          skipped: 0,
+          entries: [{ path: 'package.json', oid: vcsCommit, mode: '100644', type: 'blob' }],
+        },
+        { read: async () => ({ size: bytes.length, body: new Blob([bytes]).stream() }) },
+        context.codecs,
+        context.signal,
+      ),
+    };
+  },
+};
+const vcsPlugin: PluginDefinition = {
+  id: 'vcs-fixture',
+  package: 'vcs-fixture',
+  apiVersion: 3,
+  platforms: ['node', 'cloudflare'],
+  binds: ['source'],
+  sourceProviders: () => [vcsProvider],
+};
+
+async function checkVcsBuildHttp(input: {
+  executor: SqlExecutor;
+  orgId: string;
+  sourceId: string;
+  projectId: string;
+  prefix: string;
+  get(path: string): Promise<Response>;
+  boot(): Promise<void>;
+  runBuild(id: string, state?: 'succeeded' | 'dead'): Promise<void>;
+}) {
+  const { executor, orgId, sourceId, projectId, prefix } = input;
+  const run = (sql: string, params: SqlValue[]) => executor.batch([{ sql, params }]);
+  await run("UPDATE source SET type='vcs',url=NULL,config_json=? WHERE org_id=? AND id=?", [
+    JSON.stringify(vcsConfig),
+    orgId,
+    sourceId,
+  ]);
+  await run(
+    "INSERT INTO registered_name (id,org_id,source_id,ecosystem,pattern) VALUES ('R',?,?,'npm','fixture')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO package (id,org_id,source_id,ecosystem,name,last_synced_at) VALUES ('K',?,?,'npm','fixture','2026-01-01T00:00:00.000Z')",
+    [orgId, sourceId],
+  );
+  await run(
+    "INSERT INTO project_package (org_id,project_id,package_id,origin,ecosystem,name) VALUES (?,?,'K','subscription','npm','fixture')",
+    [orgId, projectId],
+  );
+  await run(
+    "INSERT INTO version (id,org_id,package_id,version,version_normalized,published_at,published_at_basis,metadata_json,dist_type,source_ref) VALUES ('V',?,'K','1.0.0','1.0.0','2026-01-01T00:00:00.000Z','broker',?,'tgz',?)",
+    [orgId, JSON.stringify({ name: 'fixture', version: '1.0.0', gitHead: vcsCommit }), vcsCommit],
+  );
+  await run(
+    "INSERT INTO upstream_state (org_id,package_id,form,checked_at,fresh_until) VALUES (?,'K','composer-p2','2026-01-01T00:00:00.000Z','2999-01-01T00:00:00.000Z')",
+    [orgId],
+  );
+  await input.boot();
+  const before = await input.get(`${prefix}/npm/fixture`);
+  expect(before.status, await before.clone().text()).toBe(200);
+  const metadata = (await before.json()) as {
+    versions: Record<string, { dist: { tarball: string; integrity?: string } }>;
+  };
+  const dist = metadata.versions['1.0.0']!.dist;
+  expect(dist).not.toHaveProperty('integrity');
+  const path = new URL(dist.tarball).pathname;
+  const pending = await input.get(path);
+  expect(pending.status).toBe(503);
+  expect(pending.headers.get('Retry-After')).toBe('10');
+  expect(
+    await executor.all({
+      sql: "SELECT resource_key,payload_json FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+      params: [orgId],
+    }),
+  ).toEqual([
+    expect.objectContaining({
+      resource_key: 'V',
+      payload_json: expect.stringContaining('"versionId":"V"'),
+    }),
+  ]);
+  const [queued] = await executor.all<{ id: string }>({
+    sql: "SELECT id FROM job WHERE org_id=? AND type='core:npm-vcs-build:v1'",
+    params: [orgId],
+  });
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  // Re-running after attachment exercises the plan's no-work branch.
+  await run(
+    "UPDATE job SET state='queued', run_at='2020-01-01T00:00:00.000Z' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id);
+  expect(
+    await executor.all({
+      sql: 'SELECT state FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'succeeded' }]);
+  const after = await input.get(`${prefix}/npm/fixture`);
+  expect(after.status).toBe(200);
+  const built = (await after.json()) as typeof metadata;
+  const archive = await input.get(path);
+  expect(archive.status).toBe(200);
+  const bytes = new Uint8Array(await archive.arrayBuffer());
+  expect(built.versions['1.0.0']!.dist.integrity).toBe(
+    `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+  );
+  await run(
+    "UPDATE job SET state='queued',run_at='2020-01-01T00:00:00.000Z',payload_json='{}' WHERE org_id=? AND id=?",
+    [orgId, queued!.id],
+  );
+  await input.runBuild(queued!.id, 'dead');
+  expect(
+    await executor.all({
+      sql: 'SELECT state,last_error FROM job WHERE org_id=? AND id=?',
+      params: [orgId, queued!.id],
+    }),
+  ).toEqual([{ state: 'dead', last_error: 'invalid_payload' }]);
+}

@@ -1,3 +1,5 @@
+import { DiscoveryRules } from './sources/discovery-rules-view.js';
+import { MAX_NPM_NAME_LENGTH, MAX_PATTERN_BYTES } from '../package-limits.js';
 import { mirrorOutcome, sourceSyncResponse, SYNC_REQUESTED } from './sources/sync-copy.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
 import { pollSync, syncPollResult } from './sources/sync-poll.js';
@@ -265,6 +267,14 @@ export function createSourcesModel(
           ? 'Reauthenticate, then enter the credential again.'
           : 'Reauthentication is required.',
       });
+    } else if (result.code === 'claim_overlap') {
+      set({ error: 'Another source already claims this package name or scope.' });
+    } else if (result.code === 'name_public') {
+      set({ error: 'This name is already available from a public registry.' });
+    } else if (result.code === 'name_public_unverified') {
+      set({
+        error: 'The public registry could not be checked. Try registering the name again later.',
+      });
     } else {
       set({ error: 'The request could not be saved or loaded. Refresh and try again.' });
     }
@@ -509,14 +519,21 @@ export function createSourcesModel(
             : project === null
               ? await client.request('patch', '/_pb/sources/{source}', {
                   params: { source: editor.id },
+                  headers: { 'If-Match': `"r${editor.revision}"` },
                   body,
                 })
               : await client.request('patch', '/_pb/projects/{project}/sources/{source}', {
                   params: { project, source: editor.id },
+                  headers: { 'If-Match': `"r${editor.revision}"` },
                   body,
                 });
         if (!result.ok) {
           failure(result);
+          if (result.status === 412)
+            set({
+              error:
+                'This source changed while you were editing. Reload the latest settings before saving.',
+            });
           set({ fieldErrors: sourceFieldErrors(result.details), formError: state.error });
           return;
         }
@@ -552,6 +569,7 @@ export function createSourcesModel(
       );
     },
     async replayed(result: ReplayResult) {
+      if (result.path.startsWith('/_pb/sources/discovery/')) return;
       const prefix =
         project === null ? '/_pb/sources' : `/_pb/projects/${encodeURIComponent(project)}/sources`;
       const namesChange = /^\/_pb\/sources\/[^/]+\/names(?:\/[^/]+)?$/.test(result.path);
@@ -766,14 +784,25 @@ export function createSourcesModel(
         set({ error: 'Polling interval must be a positive whole number.' });
         return Promise.resolve();
       }
+      const revision = state.items.find((item) => item.id === source)?.revision;
+      if (revision === undefined) {
+        set({ error: 'Reload sources before saving.' });
+        return Promise.resolve();
+      }
+      const headers = { 'If-Match': `"r${revision}"` };
       const body = { pollIntervalSeconds, removalPolicy };
       return mutate(
         () =>
           project === null
-            ? client.request('patch', '/_pb/sources/{source}', { params: { source }, body })
+            ? client.request('patch', '/_pb/sources/{source}', {
+                params: { source },
+                body,
+                headers,
+              })
             : client.request('patch', '/_pb/projects/{project}/sources/{source}', {
                 params: { project, source },
                 body,
+                headers,
               }),
         () => load(),
       );
@@ -920,8 +949,16 @@ export function createSourcesModel(
       );
     },
     addName(source: string, pattern: string) {
-      if (pattern.length === 0 || pattern.length > 50 || !/^[a-z0-9._~@!/*-]+$/.test(pattern)) {
-        set({ error: 'Enter a registered pattern of 1 to 50 supported characters.' });
+      const maxLength =
+        state.items.find((item) => item.id === source)?.ecosystem === 'npm'
+          ? MAX_NPM_NAME_LENGTH
+          : MAX_PATTERN_BYTES;
+      if (
+        pattern.length === 0 ||
+        pattern.length > maxLength ||
+        !/^[a-z0-9._~@!/*-]+$/.test(pattern)
+      ) {
+        set({ error: `Enter a registered pattern of 1 to ${maxLength} supported characters.` });
         return Promise.resolve();
       }
       return mutate(
@@ -948,8 +985,10 @@ export function createSourcesModel(
     async resolve(name: string) {
       const version = ++previewVersion;
       set({ preview: null, error: null });
-      if (project === null || name.length === 0 || name.length > 214) {
-        set({ error: 'Choose a project and enter a package name of 1 to 214 characters.' });
+      if (project === null || name.length === 0 || name.length > MAX_NPM_NAME_LENGTH) {
+        set({
+          error: `Choose a project and enter a package name of 1 to ${MAX_NPM_NAME_LENGTH} characters.`,
+        });
         return;
       }
       const result = await client.request('get', '/_pb/projects/{project}/resolve', {
@@ -1070,6 +1109,13 @@ export const SYNC_ERROR_LABELS: Record<(typeof SOURCE_ERROR_CODES)[number], stri
   policy_denied: 'Policy denied',
   credential_unavailable: 'Credential unavailable',
   internal: 'Internal error',
+  name_mismatch: 'Package name differs from configuration',
+  version_mismatch: 'Manifest version differs from tag',
+  invalid_manifest: 'Invalid package manifest',
+  unsupported_files_pattern: 'Unsupported package file pattern',
+  invalid_packlist: 'Package files could not be packed',
+  invalid_tarball: 'Invalid repository archive',
+  archive_changed: 'Repository archive changed during packing',
 };
 
 function SyncStatus({ source }: { source: Source }) {
@@ -1147,7 +1193,7 @@ export function SourceActions({
   const actions: RowAction[] = owned
     ? [
         { id: 'edit', label: 'Edit', disabled: busy, onSelect: () => model.openEditor(source) },
-        ...(model.snapshot().canWriteSources
+        ...(model.snapshot().canWriteSources && source.type !== 'hosted'
           ? [
               {
                 id: 'sync',
@@ -1300,6 +1346,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
       </div>
       {state.editor !== null ? (
         <SourceForm
+          organization={model.project === null}
           source={state.editor === 'create' ? null : state.editor}
           busy={state.busy}
           errors={state.fieldErrors}
@@ -1697,7 +1744,9 @@ export function SourcesView({ model }: { model: SourcesModel }) {
             <DialogHeader className="shrink-0 p-6 pr-16">
               <DialogTitle>Registered names</DialogTitle>
               <DialogDescription>
-                Manage the package patterns registered for this source.
+                Manage the package patterns registered for this source. For npm, use an exact
+                lowercase name or @scope/*. A scope claim hides public packages in that scope that
+                are not yet cached.
               </DialogDescription>
             </DialogHeader>
             <div className="grid min-h-0 gap-3 overflow-y-auto px-6 pb-6">
@@ -1736,7 +1785,6 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   if (state.busy) return;
                   const form = event.currentTarget;
                   const pattern = formValue(form, 'pattern');
-                  form.reset();
                   void model.addName(state.names!.source, pattern);
                 }}
               >
@@ -1745,7 +1793,11 @@ export function SourcesView({ model }: { model: SourcesModel }) {
                   key={`${state.names.source}:${state.names.items.map((item) => item.pattern).join(',')}`}
                   id="registered-pattern"
                   name="pattern"
-                  maxLength={50}
+                  maxLength={
+                    state.items.find((item) => item.id === state.names?.source)?.ecosystem === 'npm'
+                      ? MAX_NPM_NAME_LENGTH
+                      : MAX_PATTERN_BYTES
+                  }
                   required
                   defaultValue={scopePatterns[0] ?? ''}
                 />
@@ -1801,7 +1853,7 @@ export function SourcesView({ model }: { model: SourcesModel }) {
               }}
             >
               <Label htmlFor="resolve-name">Package name</Label>
-              <Input id="resolve-name" name="name" maxLength={214} required />
+              <Input id="resolve-name" name="name" maxLength={MAX_NPM_NAME_LENGTH} required />
               <Button type="submit" className="w-fit" disabled={state.busy}>
                 Preview
               </Button>
@@ -1866,5 +1918,10 @@ export function SourcesPage() {
       }),
     [services, model],
   );
-  return <SourcesView key={project ?? 'organization'} model={model} />;
+  return (
+    <>
+      <SourcesView key={project ?? 'organization'} model={model} />
+      {project === null ? <DiscoveryRules services={services} /> : null}
+    </>
+  );
 }

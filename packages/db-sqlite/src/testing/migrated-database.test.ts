@@ -29,10 +29,10 @@ async function withDatabase(
 }
 
 describe('openMigratedDatabase', () => {
-  it('1: applies every core migration and reports 60 user tables', async () => {
+  it('1: applies every core migration and reports 75 user tables', async () => {
     await withDatabase(undefined, async ({ executor }) => {
       const rows = await executor.all<{ n: number }>({ sql: COUNT_TABLES, params: [] });
-      expect(rows).toEqual([{ n: 60 }]);
+      expect(rows).toEqual([{ n: 75 }]);
     });
   });
 
@@ -133,6 +133,18 @@ describe('discoveredMigrations', () => {
       .sort();
     const sources = await discoveredMigrations();
     expect(sources.map((source) => `${source.id.slice('core:'.length)}.sql`)).toEqual(files);
-    expect(sources.map((source) => source.id)).toEqual(['core:0001_init', 'core:0002_audit']);
+    expect(sources.map((source) => source.id)).toEqual([
+      'core:0001_init',
+      'core:0002_npm_publish',
+      'core:0003_npm_identity',
+      'core:0004_source_revision',
+      'core:0005_package_settings_revision',
+      'core:0006_npm_login_handoff',
+      'core:0007_npm_vcs_build_outcomes',
+      'core:0008_registry_policy',
+      'core:0009_npm_notifications',
+      'core:0010_source_discovery_rules',
+      'core:0011_audit',
+    ]);
   });
 });

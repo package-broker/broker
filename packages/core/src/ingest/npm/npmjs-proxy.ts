@@ -1,6 +1,6 @@
 import { PackageNameError, packageKey } from '../../catalogue/names.js';
 import type { OrgContext } from '../../db/port.js';
-import type { BlobStore } from '../../platform/blob.js';
+import type { CoreBlobStore as BlobStore } from '../../platform/blob.js';
 import { UPSTREAM_DEFAULTS } from '../../sources/config.js';
 import { UpstreamError, type UpstreamCredential } from '../../sources/policy-fetch.js';
 import type {

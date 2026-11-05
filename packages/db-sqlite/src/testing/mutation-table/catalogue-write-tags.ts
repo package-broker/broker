@@ -23,9 +23,6 @@ import {
   NOT_NULL,
 } from './fixtures.js';
 
-const OWN_TARGET =
-  'the check of the tag that points at a version of this organization: stripping it cannot change the outcome';
-
 const ABORTED_BY_CHECK =
   'emitted after a failing check, so the batch never runs it; the sync actor scenario runs the same statements';
 
@@ -256,11 +253,10 @@ export const entries: readonly MutationEntry[] = [
         locate: ref('version', 'org_id', '\\?'),
         neutral: NOT_NULL,
         waivedCopies: {
-          0: OWN_TARGET,
+          1: ABORTED_BY_CHECK,
           2: ABORTED_BY_CHECK,
           3: ABORTED_BY_CHECK,
           4: ABORTED_BY_CHECK,
-          5: ABORTED_BY_CHECK,
         },
         caseName: tagToForeignVersion.name,
       },

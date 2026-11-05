@@ -2,7 +2,13 @@ import type {
   createFailureEvents,
   FailureEventsOptions,
 } from '@package-broker/core/audit/failure-events';
-import { createAuthModule, type AuthModule } from '@package-broker/core/auth/module';
+import { type NpmLoginDeps } from '@package-broker/core/api/routes/npm-login';
+import { createNpmLoginRepository } from './npm-login.js';
+import {
+  createAuthModule,
+  type AuthModule,
+  type LocalAuthPolicy,
+} from '@package-broker/core/auth/module';
 import type { SessionService } from '@package-broker/core/auth/session';
 import {
   createPersonalTokenService,
@@ -106,6 +112,7 @@ export interface AccessServicesOptions {
   readonly executor: SqlExecutor;
   readonly keyring: Keyring;
   readonly providers: ProviderMap;
+  readonly localAuth?: LocalAuthPolicy;
   readonly clock: Clock;
   readonly ids: { ulid(): string };
   readonly log: KernelLog;
@@ -127,6 +134,7 @@ export interface AccessAssembly {
   readonly module: AuthModule;
   readonly providerAnchors: ProviderAnchorReader;
   readonly services: AccessServices;
+  readonly npmLogin: NpmLoginDeps;
 }
 
 export function createAccessServices(options: AccessServicesOptions): AccessAssembly {
@@ -162,6 +170,7 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     ids,
     publicOrigin,
     providers,
+    ...(options.localAuth === undefined ? {} : { localAuth: options.localAuth }),
     hooks: registration.hooks,
     log,
     access: {
@@ -290,5 +299,34 @@ export function createAccessServices(options: AccessServicesOptions): AccessAsse
     }),
     tokenList: wired('token reader', createTokenReader(executor)),
   });
-  return Object.freeze({ repositories, module, providerAnchors, services, anchors: anchorList });
+  const npmLogin = createNpmLoginRepository(executor, keyring);
+  const loginDeps: NpmLoginDeps = {
+    ...common,
+    clientIp: options.clientIp,
+    publicUrl: publicOrigin,
+    store: npmLogin,
+    projects: projectRepository,
+    sessions: module.sessions,
+    personal: (selectorHash) =>
+      createPersonalTokenService({
+        tokens: {
+          issuePersonal: (ctx, fence, input, mint) =>
+            npmLogin.approveNpmLogin(ctx, fence, input, mint, selectorHash),
+        },
+        sessions: module.sessions,
+        organizations,
+        providers: providerAnchors,
+        keyring,
+        lifetime: tokens.lifetime,
+        ...common,
+      }),
+  };
+  return Object.freeze({
+    repositories,
+    module,
+    providerAnchors,
+    services,
+    anchors: anchorList,
+    npmLogin: loginDeps,
+  });
 }

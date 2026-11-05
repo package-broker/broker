@@ -72,6 +72,13 @@ const markup = (controller: ReturnType<typeof createProjectsController>) =>
 const query = { project: 'web' };
 
 describe('projects', () => {
+  it('links each project to its scoped Notifications page', async () => {
+    const f = fixture();
+    await f.controller.load({ project: null });
+    expect(markup(f.controller)).toContain('href="#/notifications?project=web"');
+    expect(markup(f.controller)).toContain('>Notifications</a>');
+  });
+
   it('round trips hash filters and replaces the cursor when filters change', () => {
     const parsed = parseProjectsHash('#/projects?status=archived&q=ab&after=p_9');
     expect(parsed).toEqual({ project: null, status: 'archived', q: 'ab', after: 'p_9' });

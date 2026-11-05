@@ -456,6 +456,12 @@ export function ProjectsView({
                       >
                         Open settings
                       </a>
+                      <a
+                        className="underline"
+                        href={buildListFilterHash('notifications', { project: item.slug })}
+                      >
+                        Notifications
+                      </a>
                       {model.transitionItems && item.etag ? (
                         item.status === 'active' ? (
                           <ConfirmAction

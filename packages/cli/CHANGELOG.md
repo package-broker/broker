@@ -1,5 +1,82 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.4...cli-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.5
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.5
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.5
+    * @package-broker/runtime-node bumped to 2.0.0-rc.5
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.5
+
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.3...cli-v2.0.0-rc.4) (2026-11-03)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **core:** deny-only registry policy path with version filters, plugin read hook and management API (off by default) ([#1042](https://github.com/package-broker/broker/issues/1042)) ([a6d747a](https://github.com/package-broker/broker/commit/a6d747a2e8eca881b370ae73cb2f0fb8c8b369bb))
+* **core:** signed publish webhooks per project with delivery history and admin pages (off by default) ([#1044](https://github.com/package-broker/broker/issues/1044)) ([c1e1f8d](https://github.com/package-broker/broker/commit/c1e1f8d099db2f0b658b96d225bbe76776e6c9c2))
+* **registry:** npm publishing with scan gate, trusted publishing and integration gate ([#1022](https://github.com/package-broker/broker/issues/1022)) ([cbd6e80](https://github.com/package-broker/broker/commit/cbd6e80418b26b01f27d61252437967d1067ead7))
+
+
+### Bug Fixes
+
+* **cli:** teardown accepts the custom domain delete response ([#966](https://github.com/package-broker/broker/issues/966)) ([f9b19b6](https://github.com/package-broker/broker/commit/f9b19b6715a6a2889e7f6814051e489461287b56))
+* **core:** one npm build identity, no permanent busy answer and gated resync ([#1041](https://github.com/package-broker/broker/issues/1041)) ([88326f0](https://github.com/package-broker/broker/commit/88326f029ea8fa0471d5c6a87639f7af985b17f4))
+
+
+### Performance Improvements
+
+* **core:** byte-level base64 decoding for npm publish and a Workers CPU limit ([#1034](https://github.com/package-broker/broker/issues/1034)) ([bc56eb1](https://github.com/package-broker/broker/commit/bc56eb1977e2256b043884289bb40e88885420cc))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.4
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.4
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.4
+    * @package-broker/runtime-node bumped to 2.0.0-rc.4
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.4
+
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.2...cli-v2.0.0-rc.3) (2026-10-28)
+
+
+### Miscellaneous Chores
+
+* **cli:** Synchronize product versions
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.3
+    * @package-broker/plugin-sso-oidc bumped to 0.1.0-rc.3
+    * @package-broker/runtime-cloudflare bumped to 2.0.0-rc.3
+    * @package-broker/runtime-node bumped to 2.0.0-rc.3
+  * optionalDependencies
+    * @package-broker/dist-cloudflare bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/cli-v2.0.0-rc.1...cli-v2.0.0-rc.2) (2026-10-28)
 
 

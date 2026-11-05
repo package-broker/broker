@@ -57,3 +57,18 @@ export interface TokenReader {
     page: TokenListPage & { readonly kind?: 'pat' | 'svc' },
   ): Promise<TokenPage>;
 }
+
+export interface NpmTokenRevokeInput {
+  readonly tokenId: string;
+  readonly selector: string;
+  readonly userId: string;
+  readonly targetId: string;
+  readonly projectId: string;
+  readonly projectSlug: string;
+  readonly requestId: string;
+}
+
+export interface NpmTokenAdapters {
+  readonly reader: Pick<TokenReader, 'listOwn'>;
+  revokeOwn(ctx: OrgContext, input: NpmTokenRevokeInput): Promise<boolean>;
+}

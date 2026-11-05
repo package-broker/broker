@@ -5,6 +5,7 @@ import {
 } from '../internal/authorization-failure.js';
 import { clearPackageActor, setPackageActor } from '../internal/package-actor.js';
 import type { ActorAccessSnapshot } from './actor.js';
+import { npmManagementPermits, npmManagementRoute } from './npm-management.js';
 import { catalogueTokenEligible } from './catalogue.js';
 import { assertCsrfToken, assertSameOrigin, UNSAFE_METHODS } from '../auth/csrf.js';
 import { SESSION_COOKIE, readCookie } from '../auth/cookies.js';
@@ -76,6 +77,7 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
   readonly protectedHolder?: boolean;
   readonly token: TokenAccessView['token'] & {
     readonly boundProjectIds?: readonly string[];
+    readonly boundProjectId?: string | null;
     readonly userId: string | null;
     readonly servicePrincipalId: string | null;
     readonly bindingOk: boolean;
@@ -87,7 +89,9 @@ export interface EngineTokenAccess extends EngineAccessCommon, TokenAccessView, 
 export type EngineBoundary = 'organization' | 'project';
 
 export interface EngineLookupInput {
+  readonly npmManagement?: true;
   readonly boundary: EngineBoundary;
+  readonly organizationAlternative?: string;
   readonly projectSlug: string | null;
   /** Set only for a project-boundary route that opted in; the port then resolves an archived project too. */
   readonly allowArchived?: true;
@@ -213,11 +217,17 @@ function tokenEffective(found: EngineTokenAccess, boundary: EngineBoundary): Set
   );
 }
 
+/** A project-session route admits any caller holding some permission in the project. */
+function projectSession(request: AuthorizationRequest, boundary: EngineBoundary): boolean {
+  return boundary === 'project' && request.route.projectSession === true;
+}
+
 function decideFrom(
   found: Authenticated,
   permission: string | null,
   boundary: EngineBoundary,
   slugValid: boolean,
+  anyProjectPermission = false,
 ): AuthorizationDecision {
   if (permission === null) return { allow: true, principal: found.principal, projectId: null };
   if (boundary === 'organization') {
@@ -229,7 +239,7 @@ function decideFrom(
   if (found.project === null || found.effective.size === 0) {
     return found.projectVisible ? FORBIDDEN : NOT_FOUND;
   }
-  return found.effective.has(permission)
+  return anyProjectPermission || found.effective.has(permission)
     ? { allow: true, principal: found.principal, projectId: found.project.id }
     : FORBIDDEN;
 }
@@ -299,6 +309,7 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       permission,
       input.boundary,
       slugValid,
+      projectSession(request, input.boundary),
     );
     if (decision.allow) {
       dispatchSafely(async () => {
@@ -391,7 +402,19 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       if (projectAccess?.project == null) return NOT_FOUND;
     }
     const effective = tokenEffective(found, input.boundary);
-    const decision = decideFrom(
+    const npmManage =
+      npmManagementPermits(request.route, permission) &&
+      input.boundary === 'project' &&
+      found.token.bindingOk &&
+      found.token.scope?.level === 'full' &&
+      !found.token.scope.readOnly &&
+      found.project !== null &&
+      (found.token.projectMode === 'all' ||
+        (found.token.projectMode === 'selected' &&
+          (found.token.boundProjectIds?.includes(found.project.id) === true ||
+            found.token.boundProjectId === found.project.id))) &&
+      effective.has('project:packages:manage');
+    let decision = decideFrom(
       {
         principal,
         project: found.project,
@@ -404,8 +427,31 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       input.boundary,
       slugValid,
     );
+    const alternative = input.organizationAlternative;
+    if (
+      !decision.allow &&
+      input.boundary === 'project' &&
+      slugValid &&
+      found.project !== null &&
+      alternative !== undefined &&
+      catalogueTokenEligible(alternative) &&
+      found.organizationPermissions.includes(alternative) &&
+      found.token.bindingOk &&
+      found.token.scope !== null &&
+      !found.token.scope.readOnly &&
+      (found.token.scope.level === 'write' || found.token.scope.level === 'full') &&
+      (found.token.projectMode === 'all' ||
+        (found.token.projectMode === 'selected' &&
+          (found.token.boundProjectIds?.includes(found.project.id) === true ||
+            found.token.boundProjectId === found.project.id)))
+    ) {
+      decision = { allow: true, principal, projectId: found.project.id };
+    }
+    if (!decision.allow && npmManage && slugValid && found.project !== null) {
+      decision = { allow: true, principal, projectId: found.project.id };
+    }
     if (!decision.allow) return decision;
-    if (permission !== null && !catalogueTokenEligible(permission)) return FORBIDDEN;
+    if (permission !== null && !catalogueTokenEligible(permission) && !npmManage) return FORBIDDEN;
     for (const run of deferred) dispatchSafely(run);
     setPackageActor(request, decision, effective, true);
     grants.set(
@@ -503,13 +549,18 @@ export function createAuthorizationEngine(deps: AuthorizationEngineDeps): Author
       ) {
         return UNAUTHORIZED;
       }
+      const alternative = request.route.organizationAlternative;
       const input: EngineLookupInput = {
+        ...(npmManagementRoute(request.route) ? { npmManagement: true as const } : {}),
         boundary,
         projectSlug: boundary === 'project' && isValidProjectSlug(slug) ? slug : null,
         ...(boundary === 'project' && request.route.allowArchived === true
           ? { allowArchived: true as const }
           : {}),
         providerAnchors: await deps.providerAnchors(request.org),
+        ...(boundary === 'project' && alternative !== undefined
+          ? { organizationAlternative: alternative }
+          : {}),
       };
       if (credential.outcome === 'token') {
         return tokenDecision(

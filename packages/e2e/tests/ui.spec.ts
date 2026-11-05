@@ -231,6 +231,13 @@ test.describe('Node management UI', () => {
     await expect(
       dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
     ).toBeVisible();
+    await expect(
+      dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
+    ).toBeDisabled();
+    await dialog.getByLabel('Reason (required)').fill('Retired release');
+    await expect(
+      dialog.getByRole('button', { name: 'Confirm tombstone', exact: true }),
+    ).toBeEnabled();
     expect(versionStatus(broker)).toBe('active');
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(dialog).toHaveCount(0);
@@ -375,12 +382,14 @@ test.describe('Node management UI', () => {
     await confirmIdentity(page, admin);
     await go(page, 'tokens');
     await page.getByRole('combobox', { name: 'Token list', exact: true }).selectOption('personal');
-    await openDetails(page, 'Issue token');
-    await page.getByLabel('Name', { exact: true }).fill('Browser show once');
+    await page.getByRole('button', { name: 'New token', exact: true }).click();
+    await page.getByRole('radio', { name: 'Me', exact: true }).check();
+    await page.getByRole('radio', { name: 'All projects I can access', exact: true }).check();
+    await page.getByLabel('Token name', { exact: true }).fill('Browser show once');
     const issued = page.waitForResponse(
       (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/_pb/me/tokens',
     );
-    await page.getByRole('button', { name: 'Issue token', exact: true }).click();
+    await page.getByRole('button', { name: /^Create token$/, exact: true }).click();
     const response = await issued;
     expect(response.status()).toBe(201);
     const tokenSecret = await readSecret(response, 'token');
@@ -391,7 +400,9 @@ test.describe('Node management UI', () => {
     const displayed = page.getByRole('region', { name: 'Token secret', exact: true });
     await expect(displayed).toBeVisible();
     expect(
-      (await displayed.locator('code').textContent()) === tokenSecret,
+      (await displayed
+        .getByRole('region', { name: 'Created token', exact: true })
+        .textContent()) === tokenSecret,
       'UI shows the issued secret',
     ).toBe(true);
     return tokenSecret;
@@ -573,7 +584,7 @@ test.describe('Node management UI', () => {
       create
         .getByRole('group', { name: 'Source type', exact: true })
         .locator('label > span > span:first-child'),
-    ).toHaveText(['npmjs proxy', 'Private npm registry']);
+    ).toHaveText(['npmjs proxy', 'Private npm registry', 'Hosted repository', 'Git repository']);
     await create.getByRole('radio', { name: 'Composer', exact: true }).check();
     await create.getByRole('radio', { name: /^Composer repository/ }).check();
     await expect(create.getByLabel('Package scopes (one per line)', { exact: true })).toHaveCount(

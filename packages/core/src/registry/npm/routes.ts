@@ -1,3 +1,4 @@
+import type { NpmTokenAdapters } from '../../authz/token-read.js';
 import { API_ERROR_CODES, jsonResponse } from '../../api/response.js';
 import { accessContextOf } from '../../authz/access-context.js';
 import { contextPackageActorOf } from '../../internal/package-actor.js';
@@ -11,16 +12,32 @@ import type { OnDemandFill } from '../../ingest/on-demand.js';
 import { resolvedPackageOf } from '../../internal/package-context.js';
 import { CodecLimitError, type Codecs } from '../../platform/codec.js';
 import { NPM_AUDIT_EVENT } from '../../platform/observability.js';
-import type { RequestContext, RouteDefinition } from '../../plugin.js';
-import { isNotModified, notModifiedResponse, npmValidators } from '../conditional.js';
-import type { DistService } from '../dist-service.js';
+import type { RequestContext } from '../../plugin.js';
+import type { RouteDefinition } from '../../kernel/routes.js';
+import { publishError } from './publish-service.js';
+import {
+  isNotModified,
+  notModifiedResponse,
+  npmValidators,
+  representationValidator,
+} from '../conditional.js';
+import type { DistPolicy, DistService } from '../dist-service.js';
+import { createPolicyPackageAccess } from '../../catalogue/policy-access.js';
+import { governNotFound, policyErrorResponse } from '../policy/http.js';
+import type { PolicyServing } from '../policy/serving.js';
+import { withPolicyRetry, type RegistryReadSession } from '../policy/session.js';
+import type { ReadKind } from '../../plugin.js';
 import { parseNpmPath, type NpmPath } from './paths.js';
-import { renderPackument, renderVersionDocument, type NpmRenderOptions } from './render.js';
+import {
+  NPM_VARY,
+  renderPackument,
+  renderVersionDocument,
+  type NpmRenderOptions,
+} from './render.js';
 import type { NpmAuditEntries } from './audit.js';
 
-export const NPM_RENDER_VERSION = 1;
+export const NPM_RENDER_VERSION = 2;
 const ABBREVIATED_TYPE = 'application/vnd.npm.install-v1+json';
-const VARY = 'Accept, Authorization';
 const REVALIDATE = 'private, no-cache';
 const AUDIT_BODY_MAX = 1024 * 1024;
 const AUDIT_NAMES_MAX = 1000;
@@ -30,15 +47,26 @@ const READ = 'project:packages:read';
 const NOT_FOUND = { status: 404, code: 'not_found', message: 'Route not found' };
 
 export interface NpmRouteDeps {
+  readonly tokens?: NpmTokenAdapters;
+  readonly unpublish?: (
+    ctx: RequestContext,
+    name: string,
+    revision: string,
+    file?: string,
+  ) => Promise<Response>;
+  readonly distTagWrite?: (ctx: RequestContext, name: string, tag: string) => Promise<Response>;
+  readonly publish?: (ctx: RequestContext, name: string) => Promise<Response>;
   readonly access: PackageAccess;
   readonly dist: Pick<DistService, 'serve'>;
   readonly onDemand: OnDemandFill;
   readonly actorOf?: (ctx: RequestContext) => ProjectActor | null;
   readonly reresolve: (ctx: RequestContext) => Promise<PackageVisibility>;
-  readonly handleOf: (ctx: RequestContext) => string | null;
+  readonly handleOf: (ctx: RequestContext) => Promise<string | null>;
   readonly defer?: (thunk: () => Promise<void>) => void;
   readonly publicUrl: string;
   readonly codecs: Pick<Codecs, 'gunzip'>;
+  /** Present only when `registry.policy.enabled`; absent keeps every response unchanged. */
+  readonly policy?: PolicyServing;
   readonly audit: {
     readonly enabled: boolean;
     readonly forward?: (entries: NpmAuditEntries, ctx: RequestContext) => Promise<Response>;
@@ -95,6 +123,18 @@ function outcomeKey(outcome: PackageVisibility): string | null {
 
 type Served = Extract<NpmPath, { kind: 'packument' | 'version' | 'tarball' }>;
 
+interface Governed {
+  readonly session: RegistryReadSession;
+  readonly access: PackageAccess;
+}
+
+const READ_KINDS: Readonly<Record<Served['kind'] | 'dist_tags', ReadKind>> = {
+  packument: 'metadata',
+  version: 'version',
+  tarball: 'dist',
+  dist_tags: 'tags',
+};
+
 export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   function actorFor(ctx: RequestContext): ProjectActor | null {
     const actor = (deps.actorOf ?? contextPackageActorOf)(ctx);
@@ -120,10 +160,17 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   function ok(body: unknown): Response {
     const response = jsonResponse(200, body);
     response.headers.set('Cache-Control', REVALIDATE);
-    response.headers.set('Vary', VARY);
+    response.headers.set('Vary', NPM_VARY);
     return response;
   }
 
+  function govern(ctx: RequestContext, actor: ProjectActor, kind: ReadKind): Governed | null {
+    if (deps.policy === undefined) return null;
+    const session = deps.policy.open(ctx, actor, 'npm', kind);
+    return { session, access: createPolicyPackageAccess(deps.access, session) };
+  }
+
+  /** Request-wide restrictions run after authorization and before any fill is scheduled. */
   async function resolveForRead(
     ctx: RequestContext,
     parsed: Served | { kind: 'dist_tags'; key: string },
@@ -136,10 +183,13 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       return notFound(ctx);
     }
     if (parsed.kind === 'dist_tags') {
-      return resolved.kind === 'visible'
-        ? { actor, pkg: resolved.pkg, stale: false }
-        : notFound(ctx);
+      if (resolved.kind !== 'visible') return notFound(ctx);
+      const governed = govern(ctx, actor, READ_KINDS.dist_tags);
+      await governed?.session.request(parsed.key);
+      return { actor, pkg: resolved.pkg, stale: false, governed };
     }
+    const governed = govern(ctx, actor, READ_KINDS[parsed.kind]);
+    await governed?.session.request(parsed.key);
     const filled = await deps.onDemand.ensure(actor, {
       ecosystem: 'npm',
       key: parsed.key,
@@ -161,7 +211,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       (deps.defer ?? deferOf(ctx))(filled.background);
     }
     if (resolved.kind === 'visible' && filled.kind === 'serve') {
-      return { actor, pkg: resolved.pkg, stale: filled.stale };
+      return { actor, pkg: resolved.pkg, stale: filled.stale, governed };
     }
     const current = await deps.reresolve(ctx);
     if (
@@ -172,7 +222,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     ) {
       return notFound(ctx);
     }
-    return { actor, pkg: current.pkg, stale: false };
+    return { actor, pkg: current.pkg, stale: false, governed };
   }
 
   function revalidating(response: Response, stale: boolean): Response {
@@ -183,25 +233,69 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
     return response;
   }
 
+  /** Maps a policy refusal raised outside a renderer to its fixed response. */
+  async function refusing(ctx: RequestContext, work: () => Promise<Response>): Promise<Response> {
+    try {
+      return await work();
+    } catch (error) {
+      const refused = policyErrorResponse(error, ctx.requestId, 'npm');
+      if (refused !== null) return refused;
+      throw error;
+    }
+  }
+
   async function servePackage(ctx: RequestContext): Promise<Response> {
     const parsed = parseNpmPath(rawSegments(ctx));
     if (parsed.kind !== 'packument' && parsed.kind !== 'version' && parsed.kind !== 'tarball') {
       return notFound(ctx);
     }
+    return refusing(ctx, () => servePackageAt(ctx, parsed));
+  }
+
+  async function servePackageAt(ctx: RequestContext, parsed: Served): Promise<Response> {
     const read = await resolveForRead(ctx, parsed);
     if (read instanceof Response) return read;
-    const { actor, pkg, stale } = read;
+    const response = await serveRead(ctx, parsed, read);
+    return read.governed === null ? response : governNotFound(response);
+  }
+
+  async function serveRead(
+    ctx: RequestContext,
+    parsed: Served,
+    read: Exclude<Awaited<ReturnType<typeof resolveForRead>>, Response>,
+  ): Promise<Response> {
+    const { actor, pkg, stale, governed } = read;
     const name = displayName(parsed.key);
     const projectSlug = ctx.params['project'] ?? '';
     const abbreviated = acceptsAbbreviated(ctx.request.headers.get('accept'));
+    const form = abbreviated ? 'npm-abbreviated' : 'npm-full';
+    const embedded = { projectSlug, origin: deps.publicUrl };
     const options: NpmRenderOptions = {
       requestId: ctx.requestId,
-      access: deps.access,
+      access: governed?.access ?? deps.access,
       actor,
       projectSlug,
       name,
       publicUrl: deps.publicUrl,
       abbreviated,
+      ...(governed === null || parsed.kind === 'tarball'
+        ? {}
+        : {
+            policy: {
+              session: governed.session,
+              conditional: ctx.request,
+              ...(parsed.kind === 'packument'
+                ? {
+                    baseValidator: await representationValidator(
+                      pkg,
+                      form,
+                      NPM_RENDER_VERSION,
+                      embedded,
+                    ),
+                  }
+                : {}),
+            },
+          }),
     };
     const uniform = async (response: Response) => {
       if (response.status !== 404) return response;
@@ -214,15 +308,13 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
         stale,
       );
     }
+    if (parsed.kind === 'packument' && options.policy !== undefined) {
+      return revalidating(await uniform(await renderPackument(options)), stale);
+    }
     if (parsed.kind === 'packument') {
-      const validators = await npmValidators(
-        pkg,
-        abbreviated ? 'npm-abbreviated' : 'npm-full',
-        NPM_RENDER_VERSION,
-        { projectSlug, origin: deps.publicUrl },
-      );
+      const validators = await npmValidators(pkg, form, NPM_RENDER_VERSION, embedded);
       if (isNotModified(ctx.request, validators))
-        return revalidating(notModifiedResponse(validators, VARY), stale);
+        return revalidating(notModifiedResponse(validators, NPM_VARY), stale);
       const response = await uniform(await renderPackument(options));
       if (response.ok) response.headers.set('ETag', validators.etag);
       return revalidating(response, stale);
@@ -246,6 +338,11 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
           ...(ctx.ports.platform === undefined
             ? {}
             : { observability: ctx.ports.platform.observability }),
+          ...(governed === null
+            ? {}
+            : {
+                policy: { session: governed.session, access: governed.access } satisfies DistPolicy,
+              }),
         },
       );
     } catch (error) {
@@ -268,16 +365,93 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   async function serveDistTags(ctx: RequestContext): Promise<Response> {
     const parsed = parseNpmPath(rawSegments(ctx));
     if (parsed.kind !== 'dist_tags') return notFound(ctx);
+    return refusing(ctx, () => serveDistTagsOf(ctx, parsed));
+  }
+
+  async function serveDistTagsOf(
+    ctx: RequestContext,
+    parsed: { kind: 'dist_tags'; key: string },
+  ): Promise<Response> {
     const read = await resolveForRead(ctx, parsed);
     if (read instanceof Response) return read;
-    const tags = await deps.access.distTags(read.actor, 'npm', displayName(parsed.key));
+    const { governed } = read;
+    const name = displayName(parsed.key);
+    const tags =
+      governed === null
+        ? await deps.access.distTags(read.actor, 'npm', name)
+        : await withPolicyRetry(async () => {
+            const found = await governed.access.distTags(read.actor, 'npm', name);
+            await governed.session.seal();
+            return found;
+          });
     if (tags === null) return notFound(ctx);
     if (!tags.pkg.listingComplete) return unavailable(ctx, 10);
     return ok(tags.tags);
   }
 
-  function whoami(ctx: RequestContext): Response {
-    const handle = deps.handleOf(ctx);
+  function tokenResponse(body: unknown): Response {
+    const response = jsonResponse(200, body);
+    response.headers.set('Cache-Control', 'private, no-store');
+    return response;
+  }
+
+  async function tokens(ctx: RequestContext): Promise<Response> {
+    const snapshot = accessContextOf(ctx);
+    const token = snapshot?.token;
+    const selector =
+      snapshot?.rateKey.stage === 'authenticated' ? snapshot.rateKey.tokenSelector : null;
+    if (
+      ctx.org === null ||
+      ctx.projectId === null ||
+      ctx.principal?.kind !== 'user' ||
+      token?.kind !== 'pat' ||
+      !token.id ||
+      !selector
+    ) {
+      return fail(ctx, 403, 'forbidden', 'Personal token required', AUDIT_HEADERS);
+    }
+    if (deps.tokens === undefined) return unavailable(ctx, 10);
+    if (ctx.request.method === 'DELETE') {
+      const revoked = await deps.tokens.revokeOwn(ctx.org, {
+        tokenId: token.id,
+        selector,
+        userId: ctx.principal.id,
+        targetId: ctx.params['key'] ?? '',
+        projectId: ctx.projectId,
+        projectSlug: ctx.params['project'] ?? '',
+        requestId: ctx.requestId,
+      });
+      return revoked
+        ? tokenResponse({})
+        : fail(ctx, 404, 'not_found', 'Token not found', AUDIT_HEADERS);
+    }
+    const after = new URL(ctx.request.url).searchParams.get('after');
+    if (after !== null && (after.length === 0 || after.length > 200))
+      return fail(ctx, 400, 'invalid_request', 'Invalid token cursor', AUDIT_HEADERS);
+    const page = await deps.tokens.reader.listOwn(ctx.org, ctx.principal.id, {
+      after,
+      limit: 100,
+      status: 'active',
+      now: ctx.ports.clock.now().toISOString(),
+    });
+    const next = new URL(
+      `${deps.publicUrl.replace(/\/+$/, '')}/${encodeURIComponent(ctx.params['project'] ?? '')}/npm/-/npm/v1/tokens`,
+    );
+    if (page.next !== null) next.searchParams.set('after', page.next);
+    return tokenResponse({
+      objects: page.items.map((item) => ({
+        key: item.id,
+        token: item.id,
+        created: item.createdAt,
+        readonly: item.readOnly,
+        cidr_whitelist: [],
+      })),
+      urls: { next: page.next === null ? null : next.href },
+    });
+  }
+
+  async function whoami(ctx: RequestContext): Promise<Response> {
+    const handle = await deps.handleOf(ctx);
     return handle === null || handle.includes('@') ? notFound(ctx) : ok({ username: handle });
   }
 
@@ -291,7 +465,17 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       Number.isSafeInteger(requested) && requested >= 1
         ? Math.min(requested, CATALOGUE_SEARCH_MAX)
         : SEARCH_DEFAULT;
-    const found = text === '' ? [] : await deps.access.search(actor, 'npm', { text, limit });
+    const governed = text === '' ? null : govern(ctx, actor, 'search');
+    const found =
+      text === ''
+        ? []
+        : governed === null
+          ? await deps.access.search(actor, 'npm', { text, limit })
+          : await withPolicyRetry(async () => {
+              const proved = await governed.access.search(actor, 'npm', { text, limit });
+              await governed.session.seal();
+              return proved;
+            });
     return ok({
       objects: found.map((item) => ({
         package: {
@@ -417,13 +601,47 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
   }
 
   function methodNotAllowed(ctx: RequestContext): Response {
-    return fail(ctx, 405, 'method_not_allowed', 'Method not allowed', { Allow: 'GET, HEAD' });
+    return publishError(ctx, 405, 'write_unsupported');
+  }
+
+  async function publish(ctx: RequestContext): Promise<Response> {
+    const segments = rawSegments(ctx);
+    if (segments.some((part) => part === '-rev' || part === '-')) return methodNotAllowed(ctx);
+    const name = [ctx.params['a'], ctx.params['b']].filter((part) => part !== undefined).join('/');
+    if (segments.length === 2 && !name.startsWith('@')) return methodNotAllowed(ctx);
+    return deps.publish === undefined
+      ? publishError(ctx, 503, 'unavailable')
+      : deps.publish(ctx, name);
   }
 
   const shapes = [['a'], ['a', 'b'], ['a', 'b', 'c'], ['a', 'b', 'c', 'd']] as const;
   const pathOf = (names: readonly string[]) =>
     `/:project/npm/${names.map((n) => `:${n}`).join('/')}`;
   const routes: RouteDefinition[] = [
+    ...(['GET', 'POST'] as const).map((method): RouteDefinition => ({
+      method,
+      path: '/:project/npm/-/npm/v1/tokens',
+      permission: 'project:read',
+      boundary: 'project',
+      handler:
+        method === 'GET'
+          ? tokens
+          : (ctx) =>
+              fail(
+                ctx,
+                405,
+                'write_unsupported',
+                'Use npm login --auth-type=web or the UI to create a token',
+                { ...AUDIT_HEADERS, Allow: 'GET' },
+              ),
+    })),
+    {
+      method: 'DELETE',
+      path: '/:project/npm/-/npm/v1/tokens/token/:key',
+      permission: 'project:read',
+      boundary: 'project',
+      handler: tokens,
+    },
     {
       method: 'GET',
       path: '/:project/npm/-/whoami',
@@ -443,7 +661,7 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       path: '/:project/npm/-/v1/search',
       permission: READ,
       boundary: 'project',
-      handler: search,
+      handler: (ctx) => refusing(ctx, () => search(ctx)),
     },
     {
       method: 'POST',
@@ -468,6 +686,58 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       handler: serveDistTags,
     },
   ];
+
+  for (const scoped of [false, true]) {
+    const packagePath = scoped ? '/:a/:b' : '/:a';
+    for (const tarball of [false, true]) {
+      for (const method of (tarball ? ['DELETE'] : ['PUT', 'DELETE']) as readonly (
+        'PUT' | 'DELETE'
+      )[]) {
+        routes.push({
+          method,
+          path: `/:project/npm${packagePath}${tarball ? '/-/:file' : ''}/-rev/:rev`,
+          permission: 'project:packages:manage',
+          boundary: 'project',
+          handler: (ctx) => {
+            const name = nameFrom(ctx.params, scoped ? ['a', 'b'] : ['a']);
+            return name === null
+              ? notFound(ctx)
+              : deps.unpublish === undefined
+                ? publishError(ctx, 503, 'unavailable')
+                : deps.unpublish(
+                    ctx,
+                    name,
+                    ctx.params['rev'] ?? '',
+                    tarball ? ctx.params['file'] : undefined,
+                  );
+          },
+        });
+      }
+    }
+  }
+  for (const method of ['PUT', 'POST', 'DELETE'] as const) {
+    for (const path of [
+      '/:project/npm/-/package/:a/dist-tags/:tag',
+      '/:project/npm/-/package/:a/dist-tags',
+    ])
+      routes.push({
+        method,
+        path,
+        permission: path.endsWith('/:tag') && method !== 'POST' ? 'project:packages:manage' : READ,
+        boundary: 'project',
+        handler:
+          path.endsWith('/:tag') && (method === 'PUT' || method === 'DELETE')
+            ? (ctx) => {
+                const name = distTagsName(ctx.params);
+                return name === null
+                  ? notFound(ctx)
+                  : deps.distTagWrite === undefined
+                    ? publishError(ctx, 503, 'unavailable')
+                    : deps.distTagWrite(ctx, name, ctx.params['tag'] ?? '');
+              }
+            : methodNotAllowed,
+      });
+  }
   for (const names of shapes) {
     routes.push({
       method: 'GET',
@@ -485,9 +755,12 @@ export function npmRoutes(deps: NpmRouteDeps): RouteDefinition[] {
       routes.push({
         method,
         path: pathOf(names),
-        permission: READ,
+        permission: method === 'PUT' && names.length <= 2 ? 'project:packages:write' : READ,
         boundary: 'project',
-        handler: methodNotAllowed,
+        ...(method === 'PUT' && names.length <= 2
+          ? { organizationAlternative: 'org:packages:publish' }
+          : {}),
+        handler: method === 'PUT' && names.length <= 2 ? publish : methodNotAllowed,
       });
     }
   }

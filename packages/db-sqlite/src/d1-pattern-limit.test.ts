@@ -8,18 +8,25 @@ const packagesRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const EXPECTED_MATCHES: Record<string, number> = {
   'db-sqlite/migrations/0001_init.sql': 8,
-  'db-sqlite/migrations/0002_audit.sql': 10,
+  'db-sqlite/migrations/0011_audit.sql': 10,
+  'db-sqlite/migrations/0003_npm_identity.sql': 4,
+  'db-sqlite/migrations/0006_npm_login_handoff.sql': 2,
+  'db-sqlite/migrations/0010_source_discovery_rules.sql': 3,
   'db-sqlite/src/contract/auth-contract.ts': 2,
   'db-sqlite/src/contract/migration-contract.ts': 5,
   'db-sqlite/src/contract/migration-lock-contract.ts': 1,
+  'db-sqlite/src/repositories/blob-references.ts': 1,
   'db-sqlite/src/repositories/catalogue-list.ts': 1,
-  'db-sqlite/src/repositories/catalogue-predicates.ts': 4,
+  'db-sqlite/src/repositories/catalogue-predicates.ts': 5,
   'db-sqlite/src/repositories/job-schedule.ts': 2,
-  'db-sqlite/src/repositories/registered-name.ts': 2,
+  'db-sqlite/src/repositories/notification-filter.ts': 3,
+  'db-sqlite/src/repositories/registered-name.ts': 3,
   'db-sqlite/src/repositories/source-selection.ts': 2,
 };
 
 const DYNAMIC: Record<string, string> = {
+  'db-sqlite/src/repositories/registered-name.ts:existing.pattern':
+    'legacy registered-name overlap operand; CASE checks only that length(existing.pattern) is at most 50 characters before GLOB; it does not check ASCII or byte length',
   'db-sqlite/src/repositories/source-selection.ts:selected_pattern.value':
     'current source-selection pattern; restricted to ASCII and MAX_PATTERN_BYTES with MAX_PATTERN_WILDCARDS before matching',
   'db-sqlite/src/repositories/catalogue-list.ts:${pattern}':
@@ -30,6 +37,8 @@ const DYNAMIC: Record<string, string> = {
     'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
   "db-sqlite/src/repositories/catalogue-predicates.ts:${at(a.x, 'pattern')}":
     'catalogue rule pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
+  'db-sqlite/src/repositories/notification-filter.ts:${pattern}':
+    'notification endpoint pattern; CASE refuses non-ASCII, over MAX_PATTERN_BYTES or more than MAX_PATTERN_WILDCARDS before GLOB',
   'db-sqlite/src/repositories/registered-name.ts:rn_cov.pattern':
     'registered-name pattern; bounded by MAX_PATTERN_BYTES, invalid patterns refused before GLOB',
 };
@@ -130,4 +139,13 @@ describe('D1 LIKE/GLOB pattern limit', () => {
     const seen = new Set(findings.map((finding) => `${finding.file}:${finding.operand}`));
     expect(Object.keys(DYNAMIC).filter((key) => !seen.has(key))).toEqual([]);
   });
+});
+
+it('npm readme control-character glob fits the D1 pattern byte limit', () => {
+  const sql = readFileSync(join(packagesRoot, 'db-sqlite/migrations/0002_npm_publish.sql'), 'utf8');
+  const match = /glob\(char\(([0-9,]+)\), body\)/.exec(sql);
+  expect(match).not.toBeNull();
+  const pattern = String.fromCharCode(...match![1]!.split(',').map(Number));
+  expect(Buffer.byteLength(pattern)).toBeLessThanOrEqual(D1_MAX_PATTERN_BYTES);
+  expect(pattern).toHaveLength(33);
 });

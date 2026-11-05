@@ -29,7 +29,7 @@ Package Broker 2.0 is in development, with no tagged release. Magento Marketplac
 - Configure CI: [GitHub Actions](ci/github-actions.md) or [GitLab CI](ci/gitlab-ci.md).
 - Add sources: [Magento Marketplace keys per client project](guides/mirror-vendor-repositories.md) or [Packagist and npmjs proxy sources](guides/public-registry-proxy.md).
 - Migrate: [Private Packagist](migration/from-private-packagist.md), [Satis](migration/from-satis.md) or [Packeton](migration/from-packeton.md).
-- Operate: [Backup and upgrades](operations/backup-and-upgrades.md), [observability](operations/observability.md) or [security and data residency](security-and-residency.md).
+- Operate: [Staged package uploads](operations/blob-staging.md), [backup and upgrades](operations/backup-and-upgrades.md), [observability](operations/observability.md) or [security and data residency](security-and-residency.md).
 - Look up reference material: [Access model](reference/access-model.md), [authentication and sessions](reference/authentication.md), [configuration](reference/configuration.md), [pb CLI](reference/cli.md), [runtime SSO providers](reference/runtime-sso-providers.md), [plugin authoring](reference/plugin-authoring.md) or [API reference](reference/api.md).
 - Fix an install: [Troubleshooting Composer and npm installs](troubleshooting/index.md).
 - Understand the design: [Architecture](architecture.md) or [decisions](decisions/README.md).

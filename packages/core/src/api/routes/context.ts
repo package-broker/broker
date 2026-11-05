@@ -3,6 +3,7 @@ import {
   accessContextOf,
   authenticatedActorOf,
   organizationActorOf,
+  projectActorOf,
 } from '../../authz/access-context.js';
 import type { OrganizationActor } from '../../authz/actor.js';
 import { mutationFence } from '../../authz/fence.js';
@@ -31,6 +32,17 @@ export function hasOrganizationAdminAuthority(ctx: RequestContext): boolean {
     token.projectMode === 'all' &&
     token.organizationAdmin === true
   );
+}
+
+/** Grant lists name e-mails and group values only to human sessions; tokens never qualify. */
+export function revealsOrganizationGrantSubjects(ctx: RequestContext): boolean {
+  if (authenticatedActorOf(ctx) === null) return false;
+  return organizationActorOf(ctx)?.permissions.has('org:grants:read') === true;
+}
+
+export function revealsProjectGrantSubjects(ctx: RequestContext): boolean {
+  if (authenticatedActorOf(ctx) === null) return false;
+  return projectActorOf(ctx)?.permissions.has('project:grants:read') === true;
 }
 
 export function auditCall(ctx: RequestContext, deps: ApiRouteDeps): ApiCall {

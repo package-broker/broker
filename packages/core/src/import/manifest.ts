@@ -8,6 +8,7 @@ import {
 } from '../authz/permissions.js';
 import { PROJECT_SLUG_PATTERN } from '../authz/project-path.js';
 import { packageKey } from '../catalogue/names.js';
+import { IMPORT_PUBLISHED_AT_BASES } from '../catalogue/version-rules.js';
 import { ROLE_KEY_PATTERN } from '../db/roles.js';
 import { normalizeEmail } from '../identity/policy.js';
 import { isReservedProviderId, isValidProviderId } from '../identity/port.js';
@@ -74,7 +75,7 @@ const versionText = z.string().check(z.regex(/^[0-9A-Za-z][0-9A-Za-z.+_~/-]{0,25
 
 const ecosystem = z.enum(['composer', 'npm']);
 const scope = z.enum(['organization', 'project']);
-const basis = z.enum(['source_release', 'packagist_added', 'import_time']);
+const basis = z.enum(IMPORT_PUBLISHED_AT_BASES);
 const sourceType = z.enum(SOURCE_TYPES);
 
 const PUBLISHED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -228,6 +229,7 @@ type Refusal =
   | 'shadowed_existing'
   | 'scope_mismatch'
   | 'ecosystem_mismatch'
+  | 'unsupported_source'
   | 'invalid_url'
   | 'config_mismatch'
   | 'credential_mismatch'
@@ -293,7 +295,7 @@ function consistencyIssues(manifest: Shape): ManifestDetail[] {
     ) {
       refuse(field(i, 'url'), 'invalid_url');
     }
-    if (!isConfigOf(type, source.config)) {
+    if (!isConfigOf(type, source.config, source.ecosystem)) {
       refuse(field(i, 'config'), 'config_mismatch');
       return;
     }
@@ -452,6 +454,14 @@ function consistencyIssues(manifest: Shape): ManifestDetail[] {
         const source = checkSourceRef(i, entry.source);
         if (source !== null && source !== 'existing' && source.ecosystem !== entry.ecosystem) {
           refuse(field(i, 'ecosystem'), 'ecosystem_mismatch');
+        }
+        if (
+          source !== null &&
+          source !== 'existing' &&
+          source.source_type === 'vcs' &&
+          entry.ecosystem === 'npm'
+        ) {
+          refuse(field(i, 'ecosystem'), 'unsupported_source');
         }
         const { pattern } = entry;
         const wildcard = pattern.includes('*');

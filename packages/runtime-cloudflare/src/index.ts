@@ -10,9 +10,54 @@ import {
 import { createFailureEvents } from '@package-broker/core/audit/failure-events';
 import { createAuditStatusReader } from '@package-broker/db-sqlite/repositories/audit-status';
 import { createAuditFailureRepository } from '@package-broker/db-sqlite/repositories/audit-failure';
+import {
+  discoveryRuleJobs,
+  type DiscoveryRuleJobDeps,
+} from '@package-broker/core/runtime/discovery-rule-jobs';
+import { createNpmTokenAdapters } from '@package-broker/db-sqlite/repositories/npm-tokens';
+import { createUnpublishStore } from '@package-broker/db-sqlite/repositories/npm-unpublish';
+import { createDistTagStore } from '@package-broker/db-sqlite/repositories/npm-dist-tags';
+import { createDeprecationStore } from '@package-broker/db-sqlite/repositories/npm-deprecate';
+import { createWorkloadTokenService } from '@package-broker/core/authz/service-token-service';
+import { createWorkloadTokenStore } from '@package-broker/db-sqlite/repositories/workload-token';
+import { createOidcRepository } from '@package-broker/db-sqlite/repositories/oidc';
+import { createAccessRepository } from '@package-broker/db-sqlite/repositories/access';
+import {
+  checkPublishAdmission,
+  createPublishReads,
+  createPublishWriteGuard,
+} from '@package-broker/db-sqlite/repositories/catalogue-publish-guard';
+import {
+  createPublishScanJob,
+  createPublishScanSweepJob,
+} from '@package-broker/core/ingest/publish-scan-job';
+import { npmVcsBuildJob } from '@package-broker/core/ingest/npm-vcs-build-job';
+import {
+  createNpmVcsBuildOutcomes,
+  createNpmVcsBuildReader,
+  createNpmVcsBuildPendingReader,
+} from '@package-broker/db-sqlite/repositories/npm-vcs-build';
+import { createCatalogueWriteGuard } from '@package-broker/db-sqlite/repositories/catalogue-write-package';
+import { createPublishApprovalExpireJob } from '@package-broker/core/ingest/publish-approval-expire-job';
+import { createPublishesRepository } from '@package-broker/db-sqlite/repositories/publishes';
+import { createPackageAccessExpiryJob } from '@package-broker/core/api/routes/package-access-requests-expiry';
+import { createPackageAccessRequestRepository } from '@package-broker/db-sqlite/repositories/package-access-requests';
+import { createUserRepository } from '@package-broker/db-sqlite/repositories/user';
+import { createServicePrincipalRepository } from '@package-broker/db-sqlite/repositories/service-principal';
 import { schemaMigrationsMatch } from '@package-broker/db-sqlite/migrations/runner';
 import type { MigrationSource } from '@package-broker/db-sqlite/migrations/source';
-import { createApiRoutes } from '@package-broker/db-sqlite/repositories/api-services';
+import {
+  createApiRoutes,
+  notificationRoutesAvailable,
+} from '@package-broker/db-sqlite/repositories/api-services';
+import {
+  REGISTRY_POLICY_JOB_EVENTS,
+  registryPolicyJobs,
+} from '@package-broker/core/runtime/policy-jobs';
+import { createRegistryPolicyExpiry } from '@package-broker/db-sqlite/repositories/registry-policy-expiry';
+import { createRegistryPolicyReader } from '@package-broker/db-sqlite/repositories/registry-policy-read';
+import { createPolicyReadAuditSink } from '@package-broker/db-sqlite/repositories/registry-policy-read-audit';
+import { registryPolicySchemaReady } from '@package-broker/db-sqlite/repositories/registry-policy-schema';
 import { createComposerRepositoryProvider } from '@package-broker/core/ingest/composer/composer-repository';
 import { openApiRoute } from '@package-broker/core/api/openapi-route';
 import { openApiDocument } from '@package-broker/core/api/openapi-document';
@@ -77,7 +122,11 @@ import { auditVerifyJob } from '@package-broker/core/audit/verify';
 import { createAuditSealRepository } from '@package-broker/db-sqlite/repositories/audit-seal';
 import { createAuditVerifyReader } from '@package-broker/db-sqlite/repositories/audit-verify';
 import { selfTestPasswordHashing } from '@package-broker/core/auth/password';
-import type { AuthModule } from '@package-broker/core/auth/module';
+import {
+  parseLocalAuthPolicy,
+  validateLocalAuthPolicy,
+  type AuthModule,
+} from '@package-broker/core/auth/module';
 import { type SessionService } from '@package-broker/core/auth/session';
 import type { PersonalTokenService } from '@package-broker/core/authz/pat-service';
 import type { ProjectAdministration } from '@package-broker/core/authz/project-administration';
@@ -114,6 +163,7 @@ import {
 } from '@package-broker/core/registry/access-recorder';
 import {
   createRegistryModule,
+  createNpmHandleOf,
   type RegistryModule,
   type RegistryModuleDeps,
   type SourceCredential,
@@ -144,7 +194,12 @@ import {
   createCredentialStore,
 } from '@package-broker/core/secrets/credential-store';
 import { DbError } from '@package-broker/core/db/errors';
-import type { OrgContext, ScalarSqlExecutor, SqlExecutor } from '@package-broker/core/db/port';
+import {
+  orgContext,
+  type OrgContext,
+  type ScalarSqlExecutor,
+  type SqlExecutor,
+} from '@package-broker/core/db/port';
 import { systemClock, ulid } from '@package-broker/core/ids';
 import type { AuthorizationEngine } from '@package-broker/core/kernel/authorize';
 import { defaultLog, errorResponse } from '@package-broker/core/kernel/errors';
@@ -185,11 +240,22 @@ import {
 } from '@package-broker/core/authz/token-lifetime';
 import {
   createPatJobHolder,
-  patOffboardingRegistrations,
+  tokenJobRegistrations,
   tokenWiring,
   type TokenWiring,
 } from './token-jobs.js';
 import { registerCoreJob } from '@package-broker/core/runtime/core-jobs';
+import {
+  NotificationRuntimeConfigError,
+  notificationRuntime,
+  notificationsSwitch,
+} from '@package-broker/core/runtime/notification-jobs';
+import type { CoreJobs } from '@package-broker/core/platform/jobs';
+import { createNotificationAttemptRepository } from '@package-broker/db-sqlite/repositories/notification-attempt';
+import { createNotificationDispatchRepository } from '@package-broker/db-sqlite/repositories/notification-dispatch';
+import { createNotificationPrepareRepository } from '@package-broker/db-sqlite/repositories/notification-prepare';
+import { createNotificationRetentionRepository } from '@package-broker/db-sqlite/repositories/notification-retention';
+import { createWorkersNotificationTransport } from './notifications/transport.js';
 import type { Registration } from '@package-broker/core/kernel/registry';
 import type {
   PluginDefinition,
@@ -303,6 +369,7 @@ export type Env = {
   readonly PB_AUDIT_WEBHOOK_URL?: string;
   readonly PB_AUDIT_WEBHOOK_HEADERS?: string;
   readonly [binding: `OTEL_EXPORTER_OTLP_${string}`]: string | undefined;
+  readonly PB_AUTH_LOCAL?: string;
   readonly [binding: `PB_IDP_${string}`]: string | undefined;
 };
 
@@ -362,6 +429,8 @@ export interface WorkerOptions {
   readonly tokens?: BrokerConfig['tokens'];
   readonly vulnerability?: BrokerConfig['vulnerability'];
   readonly mcp?: BrokerConfig['mcp'];
+  /** Outbound publish notifications; off unless `enabled` is exactly true. */
+  readonly notifications?: BrokerConfig['notifications'];
   /** Default `globalThis.caches`; null means the Cache API is unavailable. */
   readonly cacheStorage?: CacheStorageLike | null;
   readonly otlpFetch?: FetchLike;
@@ -446,6 +515,7 @@ async function buildAuth(
   collectRegistration: () => Registration,
   tokens: TokenWiring,
   failureEvents: NonNullable<Parameters<typeof createAccessServices>[0]['failureEvents']>,
+  keyring: Keyring,
 ): Promise<{
   assembly: AccessAssembly;
   auth: AuthModule;
@@ -455,10 +525,8 @@ async function buildAuth(
   access: WorkerAccessServices;
   keyring: Keyring;
 }> {
-  const keyring = createKeyring(
-    readMasterKeys({ current: env.PB_MASTER_KEY, previous: env.PB_MASTER_KEY_PREVIOUS }),
-  );
   const publicOrigin = publicOriginOf(env.PB_PUBLIC_URL);
+  const localAuth = parseLocalAuthPolicy(read(env, 'PB_AUTH_LOCAL'));
   await selfTestPasswordHashing(keyring);
   await keyring.hmacKey('token-pepper', keyring.currentVersion);
   const registration = collectRegistration();
@@ -470,12 +538,14 @@ async function buildAuth(
     clock: systemClock,
     env: scopedEnv(env),
   });
+  validateLocalAuthPolicy(localAuth, providers);
   await verifyMasterKey(keyring, executor, env, log);
   const built = createAccessServices({
     executor,
     keyring,
     publicOrigin,
     providers,
+    localAuth,
     clock: systemClock,
     ids: { ulid },
     log,
@@ -511,13 +581,14 @@ function buildCatalogue(
   reads: ReturnType<typeof buildPackageReads>,
   anchors: readonly ConfiguredProviderAnchor[],
   log: KernelLog,
+  notifications: boolean,
 ): WorkerCatalogueServices {
   return Object.freeze<WorkerCatalogueServices>({
     reader: reads.reader,
-    writer: createCatalogueWriter(executor),
+    writer: createCatalogueWriter(executor, { notifications }),
     packageAccess: reads.packageAccess,
     visibility: createVisibilityService({
-      store: createVisibilityStore(executor, { providerAnchors: anchors }),
+      store: createVisibilityStore(executor, { providerAnchors: anchors, notifications }),
       log,
     }),
     closureReport: (actor, organizationPermissions, ecosystem) =>
@@ -708,6 +779,9 @@ function buildRegistryModule(input: {
   readonly registry: RegistryConfig;
   readonly publicUrl: string;
   readonly dispatch: (run: () => Promise<void>) => void;
+  readonly anchors: ProviderAnchorReader;
+  readonly requiredScanners: () => readonly string[];
+  readonly notifications: boolean;
 }): {
   readonly policy: OutboundPolicy;
   readonly module: RegistryModule;
@@ -720,7 +794,7 @@ function buildRegistryModule(input: {
     runtime: 'cloudflare',
     selfOrigins: registry.outbound.selfOrigins,
   });
-  const writer = createCatalogueWriter(executor);
+  const writer = createCatalogueWriter(executor, { notifications: input.notifications });
   const sessions = createIngestSessions(executor);
   const registryReads = createRegistryReads(executor);
   const registrySources = createSourceRepository(executor);
@@ -755,7 +829,50 @@ function buildRegistryModule(input: {
       ...context,
     });
   const dependencies: RegistryModuleDeps = {
+    policy: {
+      reader: createRegistryPolicyReader(executor),
+      audit: createPolicyReadAuditSink(executor),
+      hooks: () => input.registration.hooks['registry.read'],
+      ids: { ulid },
+    },
     runtime: 'cloudflare',
+    npmOidc: {
+      clientIp: clientIpOf,
+      repository: createOidcRepository(executor),
+      tokens: createWorkloadTokenService({
+        tokens: createWorkloadTokenStore(executor),
+        keyring: input.keyring,
+        clock: systemClock,
+        ids: { ulid },
+      }),
+      organization: async () => {
+        const org = await createOrganizationBootstrap(executor).findSingleton();
+        return org === null ? null : orgContext(org.id);
+      },
+    },
+    npmTokens: createNpmTokenAdapters(executor, (ctx) => input.anchors.anchors(ctx)),
+    npmPublish: {
+      deprecations: createDeprecationStore(executor, { notifications: input.notifications }),
+      distTags: createDistTagStore(executor, { notifications: input.notifications }),
+      unpublish: createUnpublishStore(executor, { notifications: input.notifications }),
+      reads: createPublishReads(executor),
+      lookupToken: createAccessRepository(executor).lookupToken,
+      anchors: (ctx) => input.anchors.anchors(ctx),
+      writeGuard: createPublishWriteGuard,
+      admitted: (ctx, guard) => checkPublishAdmission(executor, ctx, guard),
+      writer,
+      requiredScanners: input.requiredScanners,
+      scanJobs: createRepositoryJobs({
+        store: platformServices.jobStore,
+        jobs: input.registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null }),
+    },
+    handleOf: createNpmHandleOf(
+      createUserRepository(executor),
+      createServicePrincipalRepository(executor),
+    ),
     registryJobs: registryJobDependencies({
       executor,
       providers: providerRegistry,
@@ -798,6 +915,10 @@ function buildRegistryModule(input: {
     policyFetch,
     deploymentId: input.deploymentId,
     providers,
+    npmAudit: {
+      sources: registrySources,
+      provenance: createVulnerabilityRepository(executor, systemClock),
+    },
     catalogue: {
       reader: reads.reader,
       scopedAdmission: createScopedAdmission(executor),
@@ -820,6 +941,12 @@ function buildRegistryModule(input: {
       writeGuard: (ctx, session) => createIngestSessionWriteGuard(ctx, session),
       credential,
       credentialUnavailable: (ctx, id) => registrySources.markCredentialUnavailable(ctx, id),
+    },
+    npmVcsBuild: {
+      outcomes: createNpmVcsBuildOutcomes(executor),
+      target: createNpmVcsBuildReader(executor),
+      pending: createNpmVcsBuildPendingReader(executor),
+      writeGuard: createCatalogueWriteGuard,
     },
     sync: {
       packageId: createPackageIdReads(executor).packageId,
@@ -1206,6 +1333,11 @@ function retentionRegistrations(
             const removal = createBlobLifecycle({
               metadata,
               store: {
+                putStaged: (...args) => store.putStaged(...args),
+                openStaged: (...args) => store.openStaged(...args),
+                promote: (...args) => store.promote(...args),
+                discardStaged: (...args) => store.discardStaged(...args),
+                listStaged: (...args) => store.listStaged(...args),
                 putVerified: (...args) => store.putVerified(...args),
                 head: (...args) => store.head(...args),
                 get: (...args) => store.get(...args),
@@ -1234,7 +1366,18 @@ function retentionRegistrations(
         const bound =
           definition.name === retentionScanJob.name
             ? createRetentionScanJob({ reader: createBlobReferenceReader(guarded), lifecycle })
-            : createBlobPurgeJob({ lifecycle });
+            : createBlobPurgeJob({
+                lifecycle,
+                staged: {
+                  listStaged: (...args) => store.listStaged(...args),
+                  async discardStaged(handle) {
+                    checkSignal();
+                    await executor.batch(guard);
+                    checkSignal();
+                    await store.discardStaged(handle);
+                  },
+                },
+              });
         await bound.handler(payload, context);
       },
     }),
@@ -1387,7 +1530,10 @@ export function createWorker(
       JSON.stringify(
         [...variables].sort().map((name) => {
           const value = read(env, name);
-          return [name, typeof value === 'string' ? value : null];
+          return [
+            name,
+            typeof value === 'string' ? value : `!${value === null ? 'null' : typeof value}`,
+          ];
         }),
       ),
     );
@@ -1405,6 +1551,7 @@ export function createWorker(
     executor: SqlExecutor,
     registration: Registration,
     resolveOrg: () => Promise<OrgContext>,
+    admissionWaitMs: number,
   ) {
     const repository = createJobRepository(executor);
     const schedule = createJobScheduleRepository(executor);
@@ -1501,10 +1648,19 @@ export function createWorker(
     const platformServices: PlatformServices = Object.freeze({
       blob: createBlobStore(
         byteStore,
-        createBlobRepository(executor, { purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS }),
+        createBlobRepository(executor, {
+          purgeLeaseSeconds: BLOB_PURGE_LEASE_SECONDS,
+          supersededObjects: {
+            remove: (key) => byteStore.remove(key),
+            counter: (outcome) =>
+              observability.counter('pb.blob.operations', { kind: 'superseded_remove', outcome }),
+          },
+        }),
         {
+          observability,
           admission: uploadAdmission,
           maxBytes: config.blob.maxBytes,
+          admissionWaitMs,
         },
       ),
       cache: createCacheApiAdapter(
@@ -1513,6 +1669,7 @@ export function createWorker(
         { metrics: observability, waitUntil: (promise) => track('cache.put_untracked', promise) },
       ),
       jobStore: Object.freeze({
+        enqueueStatements: repository.enqueueStatements,
         enqueue: enqueueAndNotify({
           repository,
           send: createJobSender(bound.queue),
@@ -1639,6 +1796,14 @@ export function createWorker(
       env?.PB_AUDIT_POLICY,
     );
     const auditCapacity = maxJournalBytes === null ? {} : { maxJournalBytes };
+    let notificationsOn: boolean;
+    try {
+      notificationsOn = notificationsSwitch(options.notifications);
+    } catch (error) {
+      if (error instanceof NotificationRuntimeConfigError)
+        throw new KernelConfigError([...error.problems]);
+      throw error;
+    }
     const lifetime = resolveTokenLifetime(options.tokens);
     const patJobs = createPatJobHolder();
     const config = stanza;
@@ -1649,8 +1814,24 @@ export function createWorker(
     if (options.registry !== undefined && (config === null || db === undefined)) {
       throw new KernelConfigError(['registry: requires platformPorts and DB']);
     }
-    const registryConfig =
+    let registryConfig =
       publicUrl === undefined ? undefined : resolveRegistry(options.registry, publicUrl);
+    if (
+      registryConfig !== undefined &&
+      config !== null &&
+      config.blob.maxBytes < registryConfig.caps.publishTarballBytes
+    ) {
+      log({
+        level: 'warn',
+        event: 'registry.publish_cap_clamped',
+        publish_tarball_bytes: registryConfig.caps.publishTarballBytes,
+        blob_max_bytes: config.blob.maxBytes,
+      });
+      registryConfig = {
+        ...registryConfig,
+        caps: { ...registryConfig.caps, publishTarballBytes: config.blob.maxBytes },
+      };
+    }
     const executor: SqlExecutor | ScalarSqlExecutor =
       db === undefined ? unboundExecutor() : createD1Executor(db);
     const bootstrap = createOrganizationBootstrap(executor);
@@ -1679,6 +1860,60 @@ export function createWorker(
       }
     };
 
+    if (
+      notificationsOn &&
+      (config === null ||
+        db === undefined ||
+        publicUrl === undefined ||
+        env?.PB_MASTER_KEY === undefined)
+    )
+      throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
+    let discoveryRules: DiscoveryRuleJobDeps | undefined;
+    const keyring =
+      db === undefined
+        ? undefined
+        : createKeyring(
+            readMasterKeys({ current: env?.PB_MASTER_KEY, previous: env?.PB_MASTER_KEY_PREVIOUS }),
+          );
+    const notificationRoutes =
+      db !== undefined &&
+      (await notificationRoutesAvailable(executor as SqlExecutor, notificationsOn, log));
+    const captureNotifications = notificationsOn;
+    const notificationBindings: { keyring?: Keyring; jobs?: CoreJobs } = {};
+    const notifications = !captureNotifications
+      ? { enabled: false, jobs: [] }
+      : notificationRuntime({
+          notifications: options.notifications,
+          transport: createWorkersNotificationTransport({
+            selfOrigins:
+              registryConfig?.outbound.selfOrigins ?? (publicUrl === undefined ? [] : [publicUrl]),
+          }),
+          repositories: () => ({
+            dispatch: createNotificationDispatchRepository(executor as SqlExecutor),
+            attempts: createNotificationAttemptRepository(executor as SqlExecutor),
+            prepare: createNotificationPrepareRepository(executor as SqlExecutor),
+            retention: createNotificationRetentionRepository(executor as SqlExecutor),
+          }),
+          credentials: () => {
+            const keyring = notificationBindings.keyring;
+            if (keyring === undefined) throw new PlatformUnavailableError();
+            const repository = createCredentialRepository(executor as SqlExecutor);
+            return {
+              repository,
+              store: createCredentialStore({
+                repository,
+                cipher: createSecretCipher(keyring, 'credential-encryption'),
+                ids: { ulid },
+                clock: systemClock,
+              }),
+            };
+          },
+          clock: systemClock,
+          ids: { ulid },
+          wake: async (ctx, id) => notificationBindings.jobs?.notify?.(ctx, id),
+        });
+    if (notifications.enabled !== notificationsOn)
+      throw new KernelConfigError(['notifications: delivery is unavailable on this runtime']);
     const coreJobBindings: {
       services: ReturnType<typeof buildPlatform> | undefined;
       registry: ReturnType<typeof buildRegistryModule> | undefined;
@@ -1755,6 +1990,12 @@ export function createWorker(
           config === null
             ? []
             : [
+                ...(db === undefined || reads === undefined
+                  ? []
+                  : discoveryRuleJobs(() => {
+                      if (discoveryRules === undefined) throw new JobError('handler_error');
+                      return discoveryRules;
+                    })),
                 ...(db === undefined
                   ? []
                   : vulnerability().jobs.map((job) =>
@@ -1770,6 +2011,46 @@ export function createWorker(
                       if (services === undefined) throw new JobError('handler_error');
                       return services.retention;
                     })),
+                ...(db === undefined
+                  ? []
+                  : [
+                      registerObservedJob(
+                        createPackageAccessExpiryJob(
+                          createPackageAccessRequestRepository(executor as SqlExecutor, []),
+                        ),
+                      ),
+                    ]),
+                registerObservedJob(
+                  createPublishScanJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
+                    scanners: plugins.flatMap((plugin) =>
+                      plugin.publishPolicy ? [plugin.publishPolicy] : [],
+                    ),
+                    blob: {
+                      get: (...args) => {
+                        const blob = coreJobBindings.services?.platformServices.blob;
+                        if (!blob) throw new PlatformUnavailableError();
+                        return blob.get(...args);
+                      },
+                    },
+                  }),
+                ),
+                registerObservedJob(
+                  createPublishScanSweepJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
+                  }),
+                ),
+                registerObservedJob(
+                  createPublishApprovalExpireJob({
+                    publishes: createPublishesRepository(executor as SqlExecutor, [], {
+                      notifications: captureNotifications,
+                    }),
+                  }),
+                ),
                 registerObservedJob(
                   auditSealJob(createAuditSealRepository(executor as SqlExecutor, auditCapacity)),
                 ),
@@ -1779,11 +2060,23 @@ export function createWorker(
                 ...(db === undefined ? [] : importJobRegistrations(importJobs)),
                 ...(db === undefined
                   ? []
-                  : patOffboardingRegistrations(executor as SqlExecutor, patJobs, log)),
+                  : tokenJobRegistrations(executor as SqlExecutor, patJobs, log)),
+                ...notifications.jobs,
+                ...(db === undefined || registryConfig === undefined
+                  ? []
+                  : registryPolicyJobs(registryConfig, () =>
+                      createRegistryPolicyExpiry(executor as SqlExecutor),
+                    ).map((job) =>
+                      registerObservedJob(job, {
+                        events: new Set([...AUDIT_EVENTS, ...REGISTRY_POLICY_JOB_EVENTS]),
+                        reasonCodes: new Set(),
+                        routeTemplates: new Set(),
+                      }),
+                    )),
                 ...(db === undefined || registryConfig === undefined
                   ? []
                   : [
-                      ...[sourceSyncJob, sourcePollJob].map((definition) =>
+                      ...[sourceSyncJob, sourcePollJob, npmVcsBuildJob].map((definition) =>
                         registerObservedJob(
                           {
                             ...definition,
@@ -1839,6 +2132,12 @@ export function createWorker(
         routeTemplates: failureRouteTemplates,
       },
     );
+    if (
+      db === undefined &&
+      parseLocalAuthPolicy(read(env ?? NO_ENV, 'PB_AUTH_LOCAL')) === 'disabled'
+    ) {
+      throw new KernelConfigError(['auth_no_sign_in_method']);
+    }
     const built =
       db === undefined
         ? undefined
@@ -1862,6 +2161,7 @@ export function createWorker(
                 ),
               },
             },
+            keyring!,
           );
     let registration = built?.registration ?? collectRegistration();
     if (db !== undefined && config !== null) {
@@ -1909,7 +2209,14 @@ export function createWorker(
     const services =
       config === null || bound === null
         ? undefined
-        : buildPlatform(config, bound, executor as SqlExecutor, registration, resolveOrganization);
+        : buildPlatform(
+            config,
+            bound,
+            executor as SqlExecutor,
+            registration,
+            resolveOrganization,
+            registryConfig?.timers.waitBudgetMs ?? 8000,
+          );
     coreJobBindings.services = services;
     if (built !== undefined && services !== undefined) {
       importJobs.set({
@@ -1927,6 +2234,15 @@ export function createWorker(
         }),
         blobs: services.platformServices.blob,
       });
+    }
+    if (built !== undefined) notificationBindings.keyring = built.keyring;
+    if (notifications.enabled && services !== undefined) {
+      notificationBindings.jobs = createRepositoryJobs({
+        store: services.platformServices.jobStore,
+        jobs: registration.jobs,
+        clock: systemClock,
+        ids: { ulid },
+      })('core', { projectId: null, tokenId: null });
     }
     if (services !== undefined && built !== undefined) {
       patJobs.set(
@@ -1957,8 +2273,25 @@ export function createWorker(
             registry: registryConfig,
             publicUrl,
             dispatch,
+            anchors: built.providerAnchors,
+            requiredScanners: () =>
+              plugins.flatMap((plugin) => (plugin.publishPolicy ? [plugin.publishPolicy.id] : [])),
+            notifications: captureNotifications,
           });
     coreJobBindings.registry = registryModule;
+    const policyEnabled = registryConfig?.policy.enabled === true;
+    // With the flag off a failed probe only leaves management unmounted; boot stays as before.
+    const policySchema =
+      db !== undefined &&
+      (await registryPolicySchemaReady(executor as SqlExecutor).catch((error: unknown) => {
+        if (policyEnabled) throw error;
+        return false;
+      }));
+    if (db !== undefined && policyEnabled && !policySchema) {
+      throw new KernelConfigError([
+        'registry.policy.enabled: the registry policy migration is missing',
+      ]);
+    }
 
     const ports: PluginPorts = {
       organizations: Object.freeze({ get: (ctx: OrgContext) => organizations.get(ctx) }),
@@ -1969,7 +2302,7 @@ export function createWorker(
     const packages =
       built === undefined || reads === undefined
         ? null
-        : buildCatalogue(executor as SqlExecutor, reads, built.anchors, log);
+        : buildCatalogue(executor as SqlExecutor, reads, built.anchors, log, captureNotifications);
     const applicationServices: WorkerServices = Object.freeze({
       providerAnchors: built?.providerAnchors ?? NO_ANCHORS,
       dispatch,
@@ -1982,6 +2315,27 @@ export function createWorker(
         ? []
         : createApiRoutes({
             registration,
+            onDiscoveryRules: (deps) => {
+              discoveryRules = deps;
+            },
+            discoveryFetch: createPolicyFetch({
+              fetchImpl: (...args) => globalThis.fetch(...args),
+              policy: createOutboundPolicy({
+                allowPrivateHosts: [],
+                runtime: 'cloudflare',
+                selfOrigins: [publicOriginOf(env?.PB_PUBLIC_URL)],
+              }),
+              userAgent: 'PackageBroker/2.0',
+            }),
+            notifications: captureNotifications,
+            notificationRoutes,
+            notificationSelfOrigins:
+              registryConfig?.outbound.selfOrigins ?? (publicUrl === undefined ? [] : [publicUrl]),
+            ...(registryModule?.module.lookupTrustedPublisherRepository === undefined
+              ? {}
+              : {
+                  trustedPublisherLookup: registryModule?.module.lookupTrustedPublisherRepository,
+                }),
             clientIp: clientIpOf,
             executor: executor as SqlExecutor,
             ...(registryModule?.module.probePackage === undefined
@@ -2019,6 +2373,12 @@ export function createWorker(
               registryModule === undefined
                 ? []
                 : reportedVcsProviders('cloudflare', registration.sourceProviders.values()),
+            registryPolicy: {
+              ...(policySchema ? { management: true as const } : {}),
+              ...(registryModule?.module.policy === undefined
+                ? {}
+                : { serving: registryModule.module.policy }),
+            },
           });
     const authorization = options.authorization ?? auth?.authorization;
 
@@ -2052,7 +2412,7 @@ export function createWorker(
     try {
       const coreRoutes = [
         ...(auth?.coreRoutes ?? []),
-        ...apiRoutes,
+        ...apiRoutes.filter((route) => route.path.startsWith('/_pb/')),
         openApiRoute(openApiDocument),
         ...(registryModule?.module.coreRoutes ?? []).map((route) => ({
           ...route,
@@ -2099,10 +2459,11 @@ export function createWorker(
           ? reads === undefined
             ? {}
             : { packageResolver: reads.resolver }
-          : {
-              packageResolver: registryModule.module.visibilityPort,
-              ecosystemRoutes: registryModule.module.ecosystemRoutes,
-            }),
+          : { packageResolver: registryModule.module.visibilityPort }),
+        ecosystemRoutes: [
+          ...(registryModule?.module.ecosystemRoutes ?? []),
+          ...apiRoutes.filter((route) => !route.path.startsWith('/_pb/')),
+        ],
         ...(services === undefined
           ? { log }
           : {

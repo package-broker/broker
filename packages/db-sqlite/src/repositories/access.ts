@@ -100,6 +100,8 @@ export interface SessionAccess {
 }
 
 export interface TokenLookupInput {
+  readonly npmManagement?: true;
+  readonly organizationAlternative?: string;
   readonly selector: string;
   readonly boundary: AccessBoundary;
   readonly projectSlug: string | null;
@@ -722,6 +724,18 @@ function requireSelector(value: string): string {
 
 /** The single read behind `lookupToken`. */
 export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): Statement {
+  return compile(tokenLookupQuery(ctx, input));
+}
+
+export function tokenAccessCondition(
+  ctx: OrgContext,
+  input: TokenLookupInput,
+  condition: Expression<SqlBool>,
+): Expression<SqlBool> {
+  return sql<SqlBool>`exists ${loose.selectFrom(tokenLookupQuery(ctx, input).as('pa')).select(sql.lit(1).as('one')).where(condition)}`;
+}
+
+function tokenLookupQuery(ctx: OrgContext, input: TokenLookupInput) {
   requireSelector(input.selector);
   if (input.boundary !== 'organization' && input.boundary !== 'project') {
     throw new TypeError('boundary must be organization or project');
@@ -863,6 +877,7 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
       't.user_id as user_id',
       't.service_principal_id as service_principal_id',
       't.project_id as token_project_id',
+      't.package_name as token_package_name',
       sql<string>`(select json_group_array(json_object('org', tpb.org_id, 'project', tpb.project_id))
         from token_project tpb where tpb.token_id = t.id)`.as('bound_project_ids'),
       't.project_mode as project_mode',
@@ -895,7 +910,7 @@ export function lookupTokenStatement(ctx: OrgContext, input: TokenLookupInput): 
     .where('t.org_id', '=', ctx.orgId)
     .where('t.kind', 'in', ['pat', 'svc']);
 
-  return compile(select);
+  return select;
 }
 
 function parsedScope(row: TokenRow): TokenAccess['token']['scope'] {
@@ -926,7 +941,13 @@ function boundProjects(stored: string, orgId: string): string[] {
   );
 }
 
-function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): TokenAccess {
+function toTokenAccess(
+  row: TokenRow,
+  boundary: AccessBoundary,
+  orgId: string,
+  organizationAlternative?: string,
+  npmManagement?: true,
+): TokenAccess {
   const scope = parsedScope(row);
   const projectMode = tokenProjectMode(row.kind, row.project_mode, row.principal_project_id);
   const isService = row.kind === 'svc';
@@ -989,6 +1010,15 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): 
         }),
       ].sort();
     } else if (project !== null) {
+      if (
+        organizationAlternative?.startsWith('org:') &&
+        (scope.level === 'write' || scope.level === 'full') &&
+        !scope.readOnly
+      ) {
+        organizationPermissions = (isService ? service : orgRows).filter(
+          (name) => name === organizationAlternative,
+        );
+      }
       const maxScope = parseScopeLevel(project.tokenMaxScope);
       if (maxScope.ok) {
         projectPermissions = [
@@ -1000,6 +1030,15 @@ function toTokenAccess(row: TokenRow, boundary: AccessBoundary, orgId: string): 
             tokenMaxScope: maxScope.level,
           }),
         ].sort();
+        if (
+          npmManagement === true &&
+          scope.level === 'full' &&
+          !scope.readOnly &&
+          maxScope.level === 'full' &&
+          (isService ? service : [...orgRows, ...projectRows]).includes('project:packages:manage')
+        ) {
+          projectPermissions.push('project:packages:manage');
+        }
       }
     }
   }
@@ -1063,7 +1102,15 @@ export function createAccessRepository(
     async lookupToken(ctx, input) {
       const rows = await executor.all<TokenRow>(lookupTokenStatement(ctx, input));
       const row = rows[0];
-      return row === undefined ? null : toTokenAccess(row, input.boundary, ctx.orgId);
+      return row === undefined
+        ? null
+        : toTokenAccess(
+            row,
+            input.boundary,
+            ctx.orgId,
+            input.organizationAlternative,
+            input.npmManagement,
+          );
     },
 
     async touchSession(ctx, sessionId) {

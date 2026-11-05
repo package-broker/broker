@@ -1,10 +1,12 @@
+import { SOURCE_API_SPECS } from './routes/sources-schemas.js';
+import { SOURCE_ATTACHMENT_API_SPECS } from './routes/source-attachment-schemas.js';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { z } from 'zod';
 import { generateOpenApi } from './openapi.js';
 import { IF_MATCH, defineApi, type ApiRouteSpec } from './route.js';
 import { toJsonSchema, type JsonValue } from './json-schema.js';
 
-import { API_ERROR_CODES, SERVICE_ERROR_TABLE } from './response.js';
+import { SERVICE_ERROR_TABLE } from './response.js';
 import { VALIDATION_DETAIL_CODES } from './validate.js';
 import { AUTH_API } from './auth-schemas.js';
 import { PROJECT_API_SPECS } from './routes/projects-schemas.js';
@@ -138,8 +140,14 @@ describe('generateOpenApi', () => {
       ],
       info,
     ).paths['/_pb/status']!.get!.responses;
-    expect(responses).toHaveProperty('403.description', 'Access denied; Reauthentication required');
-    expect(responses).toHaveProperty('503.description', 'Service unavailable');
+    expect(responses).toHaveProperty(
+      '403.description',
+      'Access denied; Reauthentication required; The token scope does not permit this operation; The package is not admitted to this project; You cannot approve your own publish; The token is bound to a different package; No trusted publisher matches this workload',
+    );
+    expect(responses).toHaveProperty(
+      '503.description',
+      'Service unavailable; Publish staging failed; Publishing is busy, try again later; Notification delivery is unavailable',
+    );
   });
 
   it('emits identical bytes on repeated calls and reversed specs', () => {
@@ -589,9 +597,12 @@ describe('OpenAPI follow-ups', () => {
   it.each([
     [
       409,
-      'Conflict; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required',
+      'The hosted source must be attached to the project first; Conflict; Discovery rule is disabled; Source is paused; Already exists; Last holder cannot be removed; Idempotency key does not match; Already issued; Approval required; Publish approval already decided; This claim still covers hosted packages; This package name is already published or proxied; This package name is already published publicly; The public package name could not be verified; This package name has not been claimed; This package version already exists; Approval is required before this version can be released; There are too many pending login sessions; More than one trusted publisher matches this workload; Configure a GitHub App installation or GitHub token before creating a trusted publisher; Unpublish window expired; an organization admin must tombstone with a reason; Notification endpoint limit reached; A version that is not active blocks removal of the whole package',
     ],
-    [503, API_ERROR_CODES.unavailable.message],
+    [
+      503,
+      'Service unavailable; Publish staging failed; Publishing is busy, try again later; Notification delivery is unavailable',
+    ],
     [418, 'Error'],
   ] as const)(
     'describes declared error %s from the code table when available',
@@ -668,5 +679,29 @@ it('declares the paused-source conflict for both source sync operations', async 
       '409.description',
       expect.stringContaining('Source is paused'),
     );
+  }
+});
+
+it('documents conflicting claims alongside the existing error envelope', () => {
+  const specs = [SOURCE_API_SPECS[1], SOURCE_ATTACHMENT_API_SPECS[0]];
+  const doc = generateOpenApi(specs, info);
+  expect(Object.keys(doc.paths)).toHaveLength(2);
+  for (const methods of Object.values(doc.paths)) {
+    expect(Object.keys(methods)).toHaveLength(1);
+    for (const operation of Object.values(methods)) {
+      const responses = operation.responses as Record<string, unknown>;
+      expect(responses['409']).toMatchObject({
+        content: {
+          'application/json': {
+            schema: {
+              properties: {
+                conflictingClaims: { type: 'array', items: { type: 'string' } },
+                error: { type: 'object' },
+              },
+            },
+          },
+        },
+      });
+    }
   }
 });

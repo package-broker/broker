@@ -1,3 +1,4 @@
+import { PlatformUnavailableError } from '../platform/errors.js';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import * as coalesce from '../ingest/coalesce.js';
@@ -12,7 +13,7 @@ import {
   BlobSizeMismatchError,
   parseSha256,
   type BlobInfo,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
   type Sha256,
 } from '../platform/blob.js';
 import type { Codecs, DigestAlgorithm } from '../platform/codec.js';
@@ -102,6 +103,7 @@ interface Options {
   upstream?: boolean;
   busyProvider?: boolean;
   plan?: 'unavailable' | 'none';
+  enqueueError?: Error;
 }
 
 function rig(options: Options = {}) {
@@ -140,6 +142,19 @@ function rig(options: Options = {}) {
   let throwOnHead = options.throwOnGet ?? false;
   let onAcquire = () => undefined as void;
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
+
     async put(_ctx, key, body, input): Promise<BlobInfo> {
       const got = await drain(body);
       const actual = createHash('sha256').update(got).digest('hex');
@@ -303,6 +318,13 @@ function rig(options: Options = {}) {
           return target(request.revision);
         },
       },
+      ...(options.enqueueError === undefined
+        ? {}
+        : {
+            enqueueNpmVcsBuild: async () => {
+              throw options.enqueueError;
+            },
+          }),
       store,
       leases,
       clock: systemClock,
@@ -376,6 +398,18 @@ const text = async (result: DistServeResult): Promise<string> => {
 const owner = actor('project_a');
 
 describe('createDistService', () => {
+  it.each([
+    [new SourceUnavailableError('credential_unavailable'), 60],
+    [new PlatformUnavailableError(), 5],
+  ])('maps request enqueue failures to busy', async (enqueueError, retryAfterSeconds) => {
+    const r = rig({ initial: null, enqueueError });
+    expect(await r.service.serve(owner, { ...request(1), ecosystem: 'npm' })).toEqual({
+      kind: 'busy',
+      retryAfterSeconds,
+    });
+    expect(r.state.planned).toEqual([]);
+    expect(r.state.opens).toBe(0);
+  });
   it('answers a missing dist of an unbindable source as busy for a minute without fetching', async () => {
     const r = rig({ initial: null, plan: 'unavailable' });
     expect(await r.service.serve(owner, request(1))).toEqual({
@@ -768,4 +802,26 @@ describe('dist refusal on a digest mismatch', () => {
     const r = rig({ initial: null });
     expect(await r.service.serve(owner, request(9))).toEqual({ kind: 'not_found' });
   });
+});
+
+it('returns gone without retry advice or a fetch lease for a terminal npm build', async () => {
+  const planFetch = vi.fn();
+  const acquire = vi.fn();
+  const service = createDistService({
+    access: { dist: async () => ({ blob: null }) },
+    enqueueNpmVcsBuild: async () => 'terminal',
+    leases: { acquire },
+    clock: systemClock,
+    planFetch,
+  } as never);
+  const result = await service.serve(actor('project_a'), {
+    ecosystem: 'npm',
+    key: 'widget',
+    versionId: VERSION,
+    revision: 1,
+  });
+  expect(result).toEqual({ kind: 'gone' });
+  expect(result).not.toHaveProperty('retryAfterSeconds');
+  expect(planFetch).not.toHaveBeenCalled();
+  expect(acquire).not.toHaveBeenCalled();
 });

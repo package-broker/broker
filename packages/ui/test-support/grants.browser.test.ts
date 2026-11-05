@@ -80,7 +80,7 @@ beforeAll(async () => {
               local: true,
             })
           : Response.json({ error: { code: 'unavailable' } }, { status: providerStatus });
-      if (path === '/_pb/organization') return Response.json({ name: 'Fast White Cat' });
+      if (path === '/_pb/organization') return Response.json({ name: 'Acme Company' });
       if (path.endsWith('/permissions'))
         return Response.json({
           organization: ['org:grants:read', 'org:grants:write'],
@@ -328,7 +328,7 @@ describe('grant form in Chromium', () => {
     await role.selectOption('org-role');
     await browserExpect(
       page.getByText(
-        'alex@example.test will get Organization Auditor for Fast White Cat, including read access across projects.',
+        'alex@example.test will get Organization Auditor for Acme Company, including read access across projects.',
         { exact: true },
       ),
     ).toBeVisible();

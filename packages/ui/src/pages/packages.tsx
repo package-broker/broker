@@ -1,6 +1,18 @@
+import type { ApiResult } from '../api.js';
+import { SOURCE_TYPE_LABELS } from './sources/source-form.js';
+import { PackageWorkflow } from './packages/npm-workflow.js';
+import { PackageDetail } from './packages/package-detail.js';
 import { PackageSourceControls } from './packages/source-actions.js';
 import { PROXY_DEMAND_MESSAGE } from './sources/proxy-message.js';
-import { useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from 'react';
 import type { operations } from '../api-types.js';
 import { safePageHash, useServices, type ShellServices, type ReplayResult } from '../auth.js';
 import { buildListFilterHash } from '../page-hash.js';
@@ -25,8 +37,10 @@ import { IdText } from '../components/ui/id-text.js';
 import { ListState } from '../components/ui/list-state.js';
 import { FilterToolbar } from '../components/ui/toolbar.js';
 
-export type PackageItem =
-  operations['listPackages']['responses'][200]['content']['application/json']['items'][number];
+export type PackageItem = Omit<
+  operations['listPackages']['responses'][200]['content']['application/json']['items'][number],
+  'visibleToNewProjects' | 'newProjectAccessMode' | 'revision'
+>;
 export type VersionItem =
   operations['listPackageVersions']['responses'][200]['content']['application/json']['items'][number];
 type PackageStatus = PackageItem['status'];
@@ -38,7 +52,6 @@ const STATUSES: readonly PackageStatus[] = [
   'tombstoned',
   'removed_upstream',
 ];
-const ID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const ACTION_LABELS: Record<Action, string> = {
   quarantine: 'Quarantine',
   tombstone: 'Tombstone',
@@ -289,7 +302,12 @@ export function createPackagesController(services: ShellServices) {
       await open(selected, after);
   }
 
-  async function execute(versionId: string, action: Action, confirmed = false): Promise<void> {
+  async function execute(
+    versionId: string,
+    action: Action,
+    confirmed = false,
+    reason = '',
+  ): Promise<void> {
     const item = state.selected;
     const version = state.versions.find((entry) => entry.id === versionId);
     if (
@@ -310,20 +328,24 @@ export function createPackagesController(services: ShellServices) {
     const query = state.query;
     const params = { package: item.id, version: version.id };
     const project = state.access.projectSlug;
-    set({ busy: true, notice: null, confirmVersion: null });
+    set({ busy: true, notice: null });
     const result = state.access.organization.includes('org:packages:manage')
       ? await client.request('post', `/_pb/packages/{package}/versions/{version}/${action}`, {
           params,
-          body: {},
+          body: action === 'tombstone' ? { reason } : {},
         })
       : await client.request(
           'post',
           `/_pb/projects/{project}/packages/{package}/versions/{version}/${action}`,
-          { params: { ...params, project: project! }, body: {} },
+          {
+            params: { ...params, project: project! },
+            body: action === 'tombstone' ? { reason } : {},
+          },
         );
     if (current !== generation || currentVersions !== versionGeneration) return;
     set({ busy: false });
     if (!result.ok && result.code === 'reauth_required') {
+      set({ confirmVersion: null });
       services.requireReauth(result.request, {
         credential: false,
         secretFields: [],
@@ -392,9 +414,10 @@ export function createPackagesController(services: ShellServices) {
     act: execute,
     close,
     cancelTombstone: () => set({ confirmVersion: null }),
-    async confirmTombstone() {
+    async confirmTombstone(reason: string) {
+      if (!reason.trim() || new TextEncoder().encode(reason).byteLength > 1000) return;
       const id = state.confirmVersion;
-      if (id !== null) await execute(id, 'tombstone', true);
+      if (id !== null) await execute(id, 'tombstone', true, reason);
     },
     dispose() {
       ++navigationGeneration;
@@ -481,11 +504,17 @@ export function PackagesView(props: {
   onNext: () => void;
   onVersionNext: () => void;
   onRefresh: () => void;
-  onConfirm: () => void;
+  onConfirm: (reason: string) => void;
   onCancel: () => void;
   onBack?: () => void;
 }) {
   const { state } = props;
+  const [reason, setReason] = useState('');
+  useEffect(() => {
+    if (state.confirmVersion !== null) setReason('');
+  }, [state.confirmVersion]);
+  const reasonBytes = new TextEncoder().encode(reason).byteLength;
+  const reasonValid = reason.trim().length > 0 && reasonBytes <= 1000;
   const confirm = state.versions.find((version) => version.id === state.confirmVersion);
   const filtered = !!(
     state.query.q ||
@@ -532,7 +561,7 @@ export function PackagesView(props: {
                       <Button
                         type="button"
                         variant="link"
-                        className="h-auto justify-start p-0 text-left"
+                        className="h-auto min-h-11 max-w-full justify-start whitespace-normal break-words p-0 text-left"
                         disabled={state.busy}
                         onClick={() => props.onOpen(item.id)}
                       >
@@ -562,7 +591,9 @@ export function PackagesView(props: {
                   render: (item) => (
                     <>
                       {item.source.name}
-                      <span className="block text-xs text-neutral-600">{item.source.type}</span>
+                      <span className="block text-xs text-neutral-600">
+                        {SOURCE_TYPE_LABELS[item.source.type]}
+                      </span>
                     </>
                   ),
                 },
@@ -680,11 +711,31 @@ export function PackagesView(props: {
               <dt>Scope</dt>
               <dd>{mutationScope(state.access)}</dd>
             </dl>
+            <div>
+              <Label htmlFor="tombstone-reason">Reason (required)</Label>
+              <Input
+                id="tombstone-reason"
+                disabled={state.busy}
+                required
+                value={reason}
+                aria-describedby="tombstone-reason-help"
+                aria-invalid={reasonBytes > 1000}
+                onChange={(event) => setReason(event.target.value)}
+              />
+              <p id="tombstone-reason-help">
+                Enter a reason of 1–1000 UTF-8 bytes. {reasonBytes} bytes used.
+              </p>
+            </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={props.onCancel}>
                 Cancel
               </Button>
-              <Button type="button" variant="destructive" onClick={props.onConfirm}>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={!reasonValid || state.busy}
+                onClick={() => props.onConfirm(reason)}
+              >
                 Confirm tombstone
               </Button>
             </DialogFooter>
@@ -695,7 +746,88 @@ export function PackagesView(props: {
   );
 }
 
-function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQuery) => void }) {
+type FilterChoice = { id: string; name: string };
+type FilterChoices = { sources: FilterChoice[]; projects: FilterChoice[] };
+export function createPackageFilterChoicesLoader(services: ShellServices) {
+  const cache = new Map<string | null, Promise<FilterChoices>>();
+  const load = (project: string | null) => {
+    const cached = cache.get(project);
+    if (cached) return cached;
+    const pending = (async () => {
+      const sourceChoices: { id: string; name: string }[] = [];
+      let after: string | undefined;
+      let complete = true;
+      do {
+        const result: ApiResult<{ items: { id: string; name: string }[]; next: string | null }> =
+          project === null
+            ? await services.client.request('get', '/_pb/sources', { query: { after } })
+            : await services.client.request('get', '/_pb/projects/{project}/sources', {
+                params: { project: project },
+                query: { after },
+              });
+        if (!result.ok) {
+          complete = false;
+          break;
+        }
+        sourceChoices.push(...result.data.items);
+        after = result.data.next ?? undefined;
+      } while (after);
+      const projectChoices: { id: string; name: string }[] = [];
+      if (project === null) {
+        after = undefined;
+        do {
+          const result: ApiResult<{ items: { id: string; name: string }[]; next: string | null }> =
+            await services.client.request('get', '/_pb/projects', {
+              query: { after },
+            });
+          if (!result.ok) {
+            complete = false;
+            break;
+          }
+          projectChoices.push(...result.data.items);
+          after = result.data.next ?? undefined;
+        } while (after);
+      }
+      if (!complete) cache.delete(project);
+      return { sources: sourceChoices, projects: projectChoices };
+    })();
+    cache.set(project, pending);
+    return pending;
+  };
+  return Object.assign(load, { invalidate: () => cache.clear() });
+}
+
+function PackageFilters(props: {
+  query: PackageQuery;
+  onChange: (query: PackageQuery) => void;
+  loadChoices: ReturnType<typeof createPackageFilterChoicesLoader>;
+  choicesRevision: number;
+}) {
+  const [draft, setDraft] = useState(props.query);
+  const { q, status, source, projectId, project } = props.query;
+  useEffect(() => {
+    setDraft({
+      project,
+      ...(q ? { q } : {}),
+      ...(status ? { status } : {}),
+      ...(source ? { source } : {}),
+      ...(projectId ? { projectId } : {}),
+    });
+  }, [q, status, source, projectId, project]);
+  const [choices, setChoices] = useState<FilterChoices | null>(null);
+  useEffect(() => {
+    let active = true;
+    setChoices(null);
+    void props.loadChoices(props.query.project).then((result) => {
+      if (active) setChoices(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [props.loadChoices, props.query.project, props.choicesRevision]);
+  const sources = choices?.sources ?? [];
+  const projects = choices?.projects ?? [];
+  const choicesLoaded = choices !== null;
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -710,7 +842,7 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
   return (
     <FilterToolbar
       chips={(['q', 'status', 'source', 'projectId'] as const).flatMap((key) =>
-        props.query[key]
+        props.query[key] && (choicesLoaded || (key !== 'source' && key !== 'projectId'))
           ? [
               {
                 label: {
@@ -719,7 +851,16 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
                   source: 'Source',
                   projectId: 'Project',
                 }[key],
-                value: props.query[key]!,
+                value:
+                  key === 'source'
+                    ? (sources.find((item) => item.id === props.query.source)?.name ??
+                      'Name unavailable')
+                    : key === 'projectId'
+                      ? (projects.find((item) => item.id === props.query.projectId)?.name ??
+                        'Name unavailable')
+                      : key === 'status'
+                        ? statusLabel(props.query.status!)
+                        : props.query[key]!,
                 onRemove: () => {
                   const next = { ...props.query };
                   delete next[key];
@@ -734,11 +875,24 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
       <form onSubmit={submit} className="my-4 flex flex-wrap items-end gap-3">
         <div>
           <Label htmlFor="package-q">Name prefix</Label>
-          <Input id="package-q" name="q" maxLength={100} defaultValue={props.query.q ?? ''} />
+          <Input
+            id="package-q"
+            name="q"
+            maxLength={100}
+            value={draft.q ?? ''}
+            onChange={(event) => setDraft((value) => ({ ...value, q: event.target.value }))}
+          />
         </div>
         <div>
           <Label htmlFor="package-status">Status</Label>
-          <Select id="package-status" name="status" defaultValue={props.query.status ?? ''}>
+          <Select
+            id="package-status"
+            name="status"
+            value={draft.status ?? ''}
+            onChange={(event) =>
+              setDraft((value) => ({ ...value, status: event.target.value as PackageStatus }))
+            }
+          >
             <option value="">All statuses</option>
             {STATUSES.map((status) => (
               <option key={status} value={status}>
@@ -748,23 +902,50 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
           </Select>
         </div>
         <div>
-          <Label htmlFor="package-source">Source ID</Label>
-          <Input
+          <Label htmlFor="package-source">Source</Label>
+          <Select
+            className="min-h-11"
             id="package-source"
             name="source"
-            pattern={ID.source}
-            defaultValue={props.query.source ?? ''}
-          />
+            value={draft.source ?? ''}
+            onChange={(event) => setDraft((value) => ({ ...value, source: event.target.value }))}
+            disabled={!choicesLoaded}
+          >
+            <option value="">All sources</option>
+            {props.query.source && !sources.some((item) => item.id === props.query.source) && (
+              <option value={props.query.source}>Name unavailable</option>
+            )}
+            {sources.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </Select>
         </div>
         {props.query.project === null ? (
           <div>
-            <Label htmlFor="package-project">Project ID</Label>
-            <Input
+            <Label htmlFor="package-project">Project</Label>
+            <Select
+              className="min-h-11"
               id="package-project"
               name="projectId"
-              pattern={ID.source}
-              defaultValue={props.query.projectId ?? ''}
-            />
+              value={draft.projectId ?? ''}
+              onChange={(event) =>
+                setDraft((value) => ({ ...value, projectId: event.target.value }))
+              }
+              disabled={!choicesLoaded}
+            >
+              <option value="">All projects</option>
+              {props.query.projectId &&
+                !projects.some((item) => item.id === props.query.projectId) && (
+                  <option value={props.query.projectId}>Name unavailable</option>
+                )}
+              {projects.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </Select>
           </div>
         ) : null}
         <Button type="submit">Apply filters</Button>
@@ -783,6 +964,21 @@ function PackageFilters(props: { query: PackageQuery; onChange: (query: PackageQ
 export function PackagesPage() {
   const services = useServices();
   const controller = useMemo(() => createPackagesController(services), [services]);
+  const [choicesRevision, setChoicesRevision] = useState(0);
+  const loadFilterChoices = useMemo(() => createPackageFilterChoicesLoader(services), [services]);
+  const sourceSignatures = useRef(new Map<string | null, string>());
+  const sourcesChanged = useCallback(
+    (scope?: string | null, signature?: string) => {
+      if (scope !== undefined && signature !== undefined) {
+        const previous = sourceSignatures.current.get(scope);
+        sourceSignatures.current.set(scope, signature);
+        if (previous === undefined || previous === signature) return;
+      }
+      loadFilterChoices.invalidate();
+      setChoicesRevision((value) => value + 1);
+    },
+    [loadFilterChoices],
+  );
   const state = useSyncExternalStore(
     controller.subscribe,
     controller.snapshot,
@@ -797,6 +993,7 @@ export function PackagesPage() {
     return () => window.removeEventListener('hashchange', change);
   }, []);
   useEffect(() => {
+    if (/^#\/packages\//.test(hash)) return;
     const query = new URLSearchParams(hash.split('?')[1]);
     void controller.navigate(
       parsePackagesHash(hash),
@@ -808,34 +1005,58 @@ export function PackagesPage() {
   useEffect(
     () =>
       services.subscribeReplay?.((result) => {
+        if (result.ok && /\/sources(?:\/|$)/.test(result.path)) sourcesChanged();
         void controller.replayed(result);
       }),
-    [services, controller],
+    [services, controller, sourcesChanged],
   );
   const go = (query: PackageQuery) => {
     window.location.hash = buildPackagesHash(query);
   };
+  const detail = /^#\/packages\/([^?]+)(?:\?|$)/.exec(hash);
+  if (detail)
+    return (
+      <PackageDetail
+        key={hash}
+        services={services}
+        id={detail[1]!}
+        project={parsePackagesHash(hash).project}
+        back={buildPackagesHash(parsePackagesHash(hash))}
+      />
+    );
   return (
     <section aria-labelledby="page-heading">
       <h1 tabIndex={-1} id="page-heading" className="text-2xl font-semibold">
         Packages
       </h1>
       {state.selected === null ? (
+        <PackageWorkflow
+          key={state.query.project}
+          services={services}
+          project={parsePackagesHash(hash).project}
+        />
+      ) : null}
+      {state.selected === null ? (
         <PackageSourceControls
           key={state.query.project}
           services={services}
           project={state.query.project}
+          onSourcesChanged={sourcesChanged}
         />
       ) : null}
       {state.selected === null ? (
-        <PackageFilters key={hash} query={parsePackagesHash(hash)} onChange={go} />
+        <PackageFilters
+          loadChoices={loadFilterChoices}
+          choicesRevision={choicesRevision}
+          query={parsePackagesHash(hash)}
+          onChange={go}
+        />
       ) : null}
       <PackagesView
         state={state}
         onOpen={(id) => {
           const query = new URLSearchParams(buildPackagesHash(state.query).split('?')[1]);
-          query.set('package', id);
-          window.location.hash = `#/packages?${query}`;
+          window.location.hash = `#/packages/${id}${query.size ? `?${query}` : ''}`;
         }}
         onBack={() => go(state.query)}
         onAction={(id, action) => void controller.act(id, action)}
@@ -850,7 +1071,7 @@ export function PackagesPage() {
           }
         }}
         onRefresh={() => void controller.refresh()}
-        onConfirm={() => void controller.confirmTombstone()}
+        onConfirm={(reason) => void controller.confirmTombstone(reason)}
         onCancel={controller.cancelTombstone}
       />
     </section>

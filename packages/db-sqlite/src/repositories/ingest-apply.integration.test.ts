@@ -11,7 +11,7 @@ import {
 } from '@package-broker/core/ingest/apply-description';
 import { extractMembers } from '@package-broker/core/ingest/json-stream';
 import { openStagedSnapshot } from '@package-broker/core/ingest/snapshot';
-import { parseSha256, type BlobStore } from '@package-broker/core/platform/blob';
+import { parseSha256, type CoreBlobStore as BlobStore } from '@package-broker/core/platform/blob';
 import type { Codecs, DigestAlgorithm } from '@package-broker/core/platform/codec';
 import { INVOCATION_BUDGET } from '@package-broker/core/ingest/plan-chunk';
 import type { IngestSessionHandle } from '@package-broker/core/ingest/session';
@@ -147,6 +147,18 @@ function describeStaged(valid: boolean) {
     valid ? createHash('sha256').update(bytes).digest('hex') : '0'.repeat(64),
   );
   const store: BlobStore = {
+    async stage() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discard() {
+      throw new Error('not_implemented');
+    },
     put: () => Promise.reject(new Error('unused')),
     head: () => Promise.reject(new Error('unused')),
     get: async () => {

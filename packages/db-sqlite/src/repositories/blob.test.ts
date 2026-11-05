@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgContext, SqlExecutor, Statement } from '@package-broker/core/db/port';
 import {
   BlobBusyError,
+  blobStorageKey,
   BlobConflictError,
   BlobValidationError,
   type PurgeGeneration,
@@ -246,8 +247,12 @@ describe('publish', () => {
       mediaType: 'application/zip',
       purgeAfter: null,
     });
-    expect(await repo.find(a, D1)).toEqual(info);
-    expect(await repo.inspect(a, D1)).toEqual({ info, purging: false });
+    expect(await repo.find(a, D1)).toEqual({ ...info, storageKey: blobStorageKey(a.orgId, D1) });
+    expect(await repo.inspect(a, D1)).toEqual({
+      info,
+      storageKey: blobStorageKey(a.orgId, D1),
+      purging: false,
+    });
     const stored = await rows<{ storage_key: string }>('SELECT storage_key FROM blob');
     expect(stored[0]?.storage_key).toMatch(/^sha256\/[0-9a-f]+\/aa\/a+$/);
   });

@@ -39,6 +39,7 @@ import {
   type FixtureSource,
 } from '../testing/catalogue-fixture.js';
 import { openMigratedDatabase } from '../testing/migrated-database.js';
+import { createProxyAdmission } from './proxy-admission.js';
 import { createClosureEdges } from './closure-edges.js';
 
 const ECOSYSTEMS: readonly NameEcosystem[] = ['composer', 'npm'];
@@ -1157,4 +1158,67 @@ describe('closure edge index bounds', () => {
     },
     120_000,
   );
+});
+
+it.each(['exact', 'scope'])('agrees with visibility reference for long %s claims', async (kind) => {
+  const database = await openMigratedDatabase({ d1PatternLimit: true });
+  const claim = kind === 'exact' ? 'a'.repeat(214) : `@${'a'.repeat(211)}/*`;
+  const key = kind === 'exact' ? claim : `${claim.slice(0, -1)}a`;
+  const config: CatalogueConfig = {
+    organizations: [{ id: ORG_A, slug: 'org-a', name: 'Organization A' }],
+    projects: [{ id: P1, orgId: ORG_A, slug: 'p1', name: 'P1', status: 'active' }],
+    sources: [
+      { ...composerSource(PROXY, ORG_A, 'npmjs_proxy', null), ecosystem: 'npm' },
+      { ...composerSource(ORG_SRC, ORG_A, 'hosted', null), ecosystem: 'npm' },
+    ],
+    attachments: [{ orgId: ORG_A, projectId: P1, sourceId: PROXY, precedence: 100 }],
+    packages: [
+      { ...pkg(1, ORG_A, PROXY, key), ecosystem: 'npm' },
+      { ...pkg(2, ORG_A, PROXY, 'unrelated'), ecosystem: 'npm' },
+    ],
+    registeredNames: [
+      { id: 'CLAIM', orgId: ORG_A, sourceId: ORG_SRC, ecosystem: 'npm', pattern: claim },
+    ],
+    patterns: [],
+    explicit: [],
+    versions: [],
+  };
+  try {
+    await seedCatalogue(database.executor, config);
+    await seedDerivedRows(database.executor, config);
+    const reference = toVisibilityInputs(config);
+    const closure = createClosureEdges(database.executor);
+    for (const name of [key, 'unrelated']) {
+      expect(
+        await closure.previewWinners(orgContext(ORG_A), {
+          projectId: P1,
+          ecosystem: 'npm',
+          key: name,
+        }),
+      ).toEqual(rankCandidates(reference, P1, 'npm', name));
+      const winner = resolveWinner(reference, P1, 'npm', name);
+      expect(
+        await closure.classifyWinners(orgContext(ORG_A), {
+          projectId: P1,
+          ecosystem: 'npm',
+          keys: [name],
+        }),
+      ).toEqual([
+        {
+          key: name,
+          winner: winner === null ? null : { sourceId: winner.sourceId, sourceType: 'npmjs_proxy' },
+        },
+      ]);
+      expect(
+        await createProxyAdmission(database.executor).admitProxy(orgContext(ORG_A), {
+          projectId: P1,
+          ecosystem: 'npm',
+          key: name,
+        }),
+      ).toEqual(admitProxy(reference, P1, 'npm', name));
+      expect(admitProxy(reference, P1, 'npm', name)).toEqual(name === key ? [] : [PROXY]);
+    }
+  } finally {
+    await database.close();
+  }
 });

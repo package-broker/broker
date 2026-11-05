@@ -45,7 +45,7 @@ function business(): Statement {
 }
 
 describe('auditPendingStatement', () => {
-  it('requires the audit migration for setup staging and succeeds after upgrading', async () => {
+  it('requires the audit migration for capacity-checked staging and succeeds after upgrading', async () => {
     const opened = openNodeSqliteExecutor();
     try {
       const sources = await discoveredMigrations();
@@ -62,7 +62,7 @@ describe('auditPendingStatement', () => {
           params: [ctx.orgId, 'setup', 'Setup'],
         },
       ]);
-      const statement = auditPendingStatement(ctx, { ...event, action: 'role.create' });
+      const statement = auditPendingStatement(ctx, event);
       await expect(opened.executor.batch([statement])).rejects.toMatchObject({
         kind: 'unknown',
         constraint: undefined,

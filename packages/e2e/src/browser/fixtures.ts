@@ -105,7 +105,14 @@ async function copyInstalledDependencies(
   }
 }
 
-export async function startNodeFixture(): Promise<Fixture> {
+export interface NodeFixtureOptions {
+  /** Extra environment for the broker process, such as PB_AUTH_LOCAL and PB_IDP_PROVIDERS. */
+  readonly env?: Readonly<Record<string, string>>;
+  /** Bootstrap the first administrator for SSO sign-in instead of a local setup token. */
+  readonly ssoAdmin?: boolean;
+}
+
+export async function startNodeFixture(options: NodeFixtureOptions = {}): Promise<Fixture> {
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'pb-e2e-node-')));
   let child: ChildProcess | undefined;
   try {
@@ -129,6 +136,7 @@ export async function startNodeFixture(): Promise<Fixture> {
       PB_PUBLIC_URL: origin,
       PB_BLOB_ROOT: join(scratch, 'data', 'blobs'),
       DEPLOYMENT_ID: 'e2e',
+      ...options.env,
     };
     delete env['NODE_PATH'];
     delete env['PB_MASTER_KEY_FILE'];
@@ -150,13 +158,12 @@ export async function startNodeFixture(): Promise<Fixture> {
         ADMIN_EMAIL,
         '--sqlite',
         database,
-        '--token-file',
-        tokenFile,
+        ...(options.ssoAdmin !== true ? ['--token-file', tokenFile] : ['--sign-in', 'sso']),
       ],
       { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] },
     );
     if (issued.status !== 0) throw new Error(`pb admin bootstrap exited with ${issued.status}`);
-    const token = (await readFile(tokenFile, 'utf8')).trim();
+    const token = options.ssoAdmin !== true ? (await readFile(tokenFile, 'utf8')).trim() : '';
     const started = child;
     return {
       runtime: 'node',

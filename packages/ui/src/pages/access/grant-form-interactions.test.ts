@@ -43,7 +43,7 @@ function view(providers: Provider[], input = draft) {
     providers,
     providerStatus: 'ready',
     project: 'storefront',
-    organization: 'Fast White Cat',
+    organization: 'Acme Company',
     busy: false,
     retry: vi.fn(),
     submit,
@@ -126,7 +126,7 @@ describe('grant form interactions', () => {
         if (url.startsWith('/_pb/roles')) return Response.json({ items: [role], next: null });
         if (url === '/_pb/auth/providers')
           return Response.json({ providers: [provider], local: true });
-        if (url === '/_pb/organization') return Response.json({ name: 'Fast White Cat' });
+        if (url === '/_pb/organization') return Response.json({ name: 'Acme Company' });
         return Response.json({ items: [], next: null });
       },
     });

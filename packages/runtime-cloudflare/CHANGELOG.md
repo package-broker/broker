@@ -1,5 +1,76 @@
 # Changelog
 
+## [2.0.0-rc.5](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.4...runtime-cloudflare-v2.0.0-rc.5) (2026-11-04)
+
+
+### Features
+
+* **core:** saved GitHub discovery rules with scheduled rescans ([#1048](https://github.com/package-broker/broker/issues/1048)) ([9a04483](https://github.com/package-broker/broker/commit/9a044833e906798fb60517a0cd719023e7a8f1a6))
+* **ui:** GitHub organization picker for npm and Composer packages ([#1046](https://github.com/package-broker/broker/issues/1046)) ([196ac80](https://github.com/package-broker/broker/commit/196ac80d9c1579c0817806d9f07bc2a07f8be9a8))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.5
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.5
+
+## [2.0.0-rc.4](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.3...runtime-cloudflare-v2.0.0-rc.4) (2026-11-03)
+
+
+### Features
+
+* **api:** package access requests with expiry ([#1003](https://github.com/package-broker/broker/issues/1003)) ([480b6c3](https://github.com/package-broker/broker/commit/480b6c3c2c34f298552b0ba091ab2cfe754306f3))
+* **api:** package README, new-project access setting and version details ([#1014](https://github.com/package-broker/broker/issues/1014)) ([2bb6c30](https://github.com/package-broker/broker/commit/2bb6c305dd8df8988853a2b25d2c74659d54b2fb))
+* **api:** publish approval setting for hosted npm sources ([#1029](https://github.com/package-broker/broker/issues/1029)) ([7aae24f](https://github.com/package-broker/broker/commit/7aae24fd06e9d4d6f77ebcfe1cdf8dd5bc6d072b))
+* **auth:** deployment setting to disable local sign-in ([#998](https://github.com/package-broker/broker/issues/998)) ([2987e3d](https://github.com/package-broker/broker/commit/2987e3d9a25f6e4125bef0d741789f5237047c46))
+* **blob:** staged writes for streamed npm publishes ([#996](https://github.com/package-broker/broker/issues/996)) ([e04b746](https://github.com/package-broker/broker/commit/e04b74640be5bbfe1fa30dd757cc5fb49d45a36d))
+* **catalogue:** publishVersion writer, tag patch mode and held-version invisibility ([#1002](https://github.com/package-broker/broker/issues/1002)) ([f790eb4](https://github.com/package-broker/broker/commit/f790eb48d3a20fb28b8d208d8dc4d54a99820a37))
+* **core:** anonymous admission limits and durable npm login handoff ([#1039](https://github.com/package-broker/broker/issues/1039)) ([37160c5](https://github.com/package-broker/broker/commit/37160c57a8f483e58cb5e8c6af13da5bd256a3f7))
+* **core:** contracts for npm publishing, approvals and identity ([#991](https://github.com/package-broker/broker/issues/991)) ([74e716b](https://github.com/package-broker/broker/commit/74e716b67e7bc615aba602b9545cb7b800d6d5be))
+* **core:** deny-only registry policy path with version filters, plugin read hook and management API (off by default) ([#1042](https://github.com/package-broker/broker/issues/1042)) ([a6d747a](https://github.com/package-broker/broker/commit/a6d747a2e8eca881b370ae73cb2f0fb8c8b369bb))
+* **core:** signed publish webhooks per project with delivery history and admin pages (off by default) ([#1044](https://github.com/package-broker/broker/issues/1044)) ([c1e1f8d](https://github.com/package-broker/broker/commit/c1e1f8d099db2f0b658b96d225bbe76776e6c9c2))
+* **db:** migration 0002 for npm publish approval, access requests and readmes ([#1000](https://github.com/package-broker/broker/issues/1000)) ([afdea50](https://github.com/package-broker/broker/commit/afdea5017d5309a9593e6a2abd2e2f8336c15da0))
+* **db:** migration 0003 for npm web login and trusted publishing ([#1001](https://github.com/package-broker/broker/issues/1001)) ([f0afd07](https://github.com/package-broker/broker/commit/f0afd076d4cefaef70f31ad9a0e8dcd8ccf7766e))
+* **registry:** npm publishing with scan gate, trusted publishing and integration gate ([#1022](https://github.com/package-broker/broker/issues/1022)) ([cbd6e80](https://github.com/package-broker/broker/commit/cbd6e80418b26b01f27d61252437967d1067ead7))
+* **registry:** npm token list and revoke on the npm path ([#1036](https://github.com/package-broker/broker/issues/1036)) ([b100ce9](https://github.com/package-broker/broker/commit/b100ce970a17f4e877c1e6e3ff859671025e7126))
+* **registry:** npm unpublish, deprecate and dist-tag writes for hosted packages ([#1038](https://github.com/package-broker/broker/issues/1038)) ([d60e6db](https://github.com/package-broker/broker/commit/d60e6db21fecba89c09b6437c1070207366b0e18))
+* **registry:** npm web login with browser approval ([#1012](https://github.com/package-broker/broker/issues/1012)) ([f39fa8e](https://github.com/package-broker/broker/commit/f39fa8e2ac7673a4685de1b4e0aa308cb0b2d71a))
+* **registry:** npm whoami on both runtimes ([#995](https://github.com/package-broker/broker/issues/995)) ([59a68dd](https://github.com/package-broker/broker/commit/59a68ddc4bbd86cd820e3e83ab2095a0f593037b))
+* **registry:** wire npm audit forwarding on both runtimes ([#990](https://github.com/package-broker/broker/issues/990)) ([308537e](https://github.com/package-broker/broker/commit/308537eff959b20ba5e76589504b8caabe6694cf))
+* **sources:** build npm packages from GitHub and Git repository tags ([#1015](https://github.com/package-broker/broker/issues/1015)) ([403f684](https://github.com/package-broker/broker/commit/403f68463ff041faab588a295f2ef4e9f2fd5eed))
+* **sources:** hosted npm sources with claim admission ([#997](https://github.com/package-broker/broker/issues/997)) ([6af51fb](https://github.com/package-broker/broker/commit/6af51fb3c53de6a0b0c76dfabe35a622581589d8))
+
+
+### Bug Fixes
+
+* **core:** one npm build identity, no permanent busy answer and gated resync ([#1041](https://github.com/package-broker/broker/issues/1041)) ([88326f0](https://github.com/package-broker/broker/commit/88326f029ea8fa0471d5c6a87639f7af985b17f4))
+* **core:** scoped package detail reads and settings revisions ([#1037](https://github.com/package-broker/broker/issues/1037)) ([46b85d4](https://github.com/package-broker/broker/commit/46b85d48ba6d252d05adbe3e53c451f6a8ea6261))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.4
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.4
+
+## [2.0.0-rc.3](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.2...runtime-cloudflare-v2.0.0-rc.3) (2026-10-28)
+
+
+### Features
+
+* **ui:** load admin pages on demand ([#960](https://github.com/package-broker/broker/issues/960)) ([cf0d187](https://github.com/package-broker/broker/commit/cf0d1877f43fc5661f3c143173a34748e726dcd6))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @package-broker/core bumped to 2.0.0-rc.3
+    * @package-broker/db-sqlite bumped to 2.0.0-rc.3
+
 ## [2.0.0-rc.2](https://github.com/package-broker/broker/compare/runtime-cloudflare-v2.0.0-rc.1...runtime-cloudflare-v2.0.0-rc.2) (2026-10-28)
 
 

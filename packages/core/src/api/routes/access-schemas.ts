@@ -24,14 +24,24 @@ const subject = z.union([
   }),
 ]);
 
+const visible = z.literal('visible');
+const redacted = z.literal('redacted');
 const listedSubject = z.union([
-  z.strictObject({ type: z.literal('email'), value: z.string().optional() }),
+  z.strictObject({ type: z.literal('email'), value: z.string(), visibility: visible }),
+  z.strictObject({ type: z.literal('email'), visibility: redacted }),
   z.strictObject({
     type: z.literal('group'),
     provider: z.string(),
-    value: z.string().optional(),
+    value: z.string(),
+    visibility: visible,
   }),
+  z.strictObject({ type: z.literal('group'), provider: z.string(), visibility: redacted }),
 ]);
+const roleSummary = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  permissions: z.array(z.string()),
+});
 
 const roleParams = z.strictObject({ role: ulid });
 const grantParams = z.strictObject({ grant: ulid });
@@ -51,6 +61,7 @@ const grantItem = z.strictObject({
   id: z.string(),
   subject: listedSubject,
   roleId: z.string(),
+  role: roleSummary.nullable(),
   createdAt: z.string(),
   revision: z.number().int(),
 });

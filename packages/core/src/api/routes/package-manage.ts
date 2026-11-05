@@ -69,6 +69,7 @@ const ERRORS = {
   forbidden: 'forbidden',
   not_found: 'not_found',
   conflict: 'conflict',
+  publish_gate: 'publish_gate',
   indeterminate: 'unavailable',
 } as const satisfies Record<PackageManageError, ApiErrorCode>;
 const STATUSES = { quarantine: 'quarantined', tombstone: 'tombstoned', release: 'active' } as const;
@@ -185,6 +186,11 @@ export function packageManageRoutes(deps: PackageManageRouteDeps): readonly Rout
                 {
                   ...input,
                   action,
+                  ...(parsed.data &&
+                  'reason' in parsed.data &&
+                  typeof parsed.data.reason === 'string'
+                    ? { reason: parsed.data.reason }
+                    : {}),
                   scope:
                     boundary === 'project'
                       ? { kind: 'project', projectId: ctx.projectId! }
@@ -208,7 +214,7 @@ export function packageManageRoutes(deps: PackageManageRouteDeps): readonly Rout
             method: spec.method,
             route: name,
             params: ctx.params,
-            body: {},
+            body: parsed.data ?? {},
           });
           const existing = await find();
           const decision = decideReplay(existing, hash, now);

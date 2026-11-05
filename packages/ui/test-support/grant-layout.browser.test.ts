@@ -21,7 +21,7 @@ beforeAll(async () => {
           busy: false, retry: () => {}, submit: async () => {}
         };
         createRoot(document.getElementById('root')).render(<main className="p-4">
-          <GrantForm {...props} organization="Fast White Cat" providerStatus="ready"
+          <GrantForm {...props} organization="Acme Company" providerStatus="ready"
             providers={[
               { id: 'dex', displayName: 'Dex' },
               { id: 'sso', displayName: 'Corporate SSO' }

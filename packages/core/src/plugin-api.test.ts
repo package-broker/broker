@@ -7,6 +7,7 @@ import {
   requirePlatformPorts,
   SUPPORTED_PLUGIN_API,
   definePlugin,
+  type IdentityProvider,
   type AccessCheckResult,
   type AuthMapGroupsInput,
   type AuthResolveIdentityInput,
@@ -14,11 +15,18 @@ import {
   type MapGroupsResult,
   type PlatformPorts,
   type PluginDefinition,
+  type PublishPolicyDefinition,
+  type PublishInspection,
+  type PublishPolicyVerdict,
   type PluginPorts,
   type PluginRegistry,
+  type ReadPolicyInput,
+  type ReadPolicyResult,
   type RequestContext,
   type RouteDefinition,
+  type VersionFact,
 } from './plugin.js';
+import * as root from './index.js';
 
 function recordingRegistry(): {
   registry: PluginRegistry;
@@ -49,6 +57,39 @@ const ports: PluginPorts = {
 };
 
 describe('plugin contract', () => {
+  it('accepts an optional asynchronous publish policy without changing plugin versions or ports', () => {
+    const policy: PublishPolicyDefinition = {
+      id: 'scanner',
+      inspect: (_ctx, input) => {
+        expectTypeOf(input).toEqualTypeOf<PublishInspection>();
+        expectTypeOf(input.openTarball()).toEqualTypeOf<Promise<ReadableStream<Uint8Array>>>();
+        return Promise.resolve({ verdict: 'deny', reason: 'policy' });
+      },
+    };
+    const plugin = definePlugin({
+      id: 'scanner',
+      package: '@package-broker/plugin-scanner',
+      apiVersion: 3,
+      platforms: ['node'],
+      publishPolicy: policy,
+    });
+    expect(plugin.publishPolicy).toBe(policy);
+    expectTypeOf<PluginDefinition['publishPolicy']>().toEqualTypeOf<
+      PublishPolicyDefinition | undefined
+    >();
+    expectTypeOf<ReturnType<PublishPolicyDefinition['inspect']>>().toEqualTypeOf<
+      Promise<PublishPolicyVerdict>
+    >();
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
+    expect(PLUGIN_BINDABLE_PORTS).toEqual(['source', 'identity', 'audit-trail']);
+  });
+
+  it('exports an optional asynchronous reauth capability resolver', () => {
+    expectTypeOf<IdentityProvider['reauthCapability']>().toEqualTypeOf<
+      (() => Promise<boolean>) | undefined
+    >();
+    expectTypeOf<IdentityProvider['supportsReauth']>().toEqualTypeOf<boolean>();
+  });
   it('keeps the supported API range and the identity definePlugin', () => {
     expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
     const definition = {
@@ -264,5 +305,103 @@ describe('plugin contract', () => {
     expect(PLUGIN_BINDABLE_PORTS).not.toContain('cache');
     expect(PLUGIN_BINDABLE_PORTS).not.toContain('job');
     expect(PLUGIN_BINDABLE_PORTS).not.toContain('observability');
+  });
+});
+
+describe('registry.read hook (plugin API 4)', () => {
+  it('typechecks a deny-only hook for both phases on API 4', () => {
+    const plugin = definePlugin({
+      id: 'read-policy',
+      package: '@package-broker/plugin-read-policy',
+      apiVersion: 4,
+      platforms: ['node', 'cloudflare'],
+      register(registry) {
+        registry.hook('registry.read', (input) => {
+          expectTypeOf(input.signal).toEqualTypeOf<AbortSignal>();
+          expectTypeOf(input.org).toEqualTypeOf<Readonly<{ orgId: string }>>();
+          if (input.phase === 'request') {
+            expectTypeOf(input.packageKey).toEqualTypeOf<string | null>();
+            return input.kind === 'search' ? { deny: true, reason: 'restricted' } : undefined;
+          }
+          expectTypeOf(input.versions).toEqualTypeOf<readonly VersionFact[]>();
+          return {
+            deniedVersions: input.versions
+              .filter((fact) => fact.ageBasis === 'first_seen')
+              .map((fact) => ({
+                versionId: fact.versionId,
+                revision: fact.revision,
+                reason: 'restricted' as const,
+              })),
+          };
+        });
+        registry.hook('registry.read', async () => Promise.resolve(undefined));
+      },
+    });
+    expect(plugin.apiVersion).toBe(4);
+    expect(SUPPORTED_PLUGIN_API).toEqual([3, 4]);
+  });
+
+  it('keeps API 3 and existing API 4 plugins valid without the hook', () => {
+    const recorded = recordingRegistry();
+    const legacy = definePlugin({
+      id: 'legacy',
+      package: '@package-broker/plugin-legacy',
+      apiVersion: 3,
+      platforms: ['node'],
+      register(registry) {
+        registry.hook('access.check', () => undefined);
+      },
+    });
+    legacy.register(recorded.registry);
+    expect(recorded.hooks.map((hook) => hook.name)).toEqual(['access.check']);
+  });
+
+  it('rejects allow, Response, free-text reasons and raw request data at compile time', () => {
+    const recorded = recordingRegistry();
+    // @ts-expect-error a read policy cannot allow
+    recorded.registry.hook('registry.read', () => ({ allow: true }));
+    // @ts-expect-error a read policy cannot return a response
+    recorded.registry.hook('registry.read', () => new Response('x'));
+    // @ts-expect-error reasons are a fixed set
+    recorded.registry.hook('registry.read', () => ({ deny: true, reason: 'because' }));
+    // @ts-expect-error deny must be the literal true
+    recorded.registry.hook('registry.read', () => ({ deny: false, reason: 'restricted' }));
+    recorded.registry.hook('registry.read', () => ({
+      // @ts-expect-error a denied version names a fixed reason
+      deniedVersions: [{ versionId: 'v', revision: 1, reason: 'malware' }],
+    }));
+    recorded.registry.hook('registry.read', (input) => {
+      // @ts-expect-error the hook sees no raw request
+      void input.request;
+      // @ts-expect-error the hook sees no headers
+      void input.headers;
+      // @ts-expect-error the hook gets no next() or authorization callback
+      void input.next;
+      if (input.phase === 'versions') {
+        // @ts-expect-error candidate facts carry no manifest
+        void input.versions[0]?.manifest;
+        // @ts-expect-error candidate facts are read-only
+        input.versions[0]!.revision = 2;
+      }
+      return undefined;
+    });
+    expectTypeOf<ReadPolicyResult>().toEqualTypeOf<
+      | undefined
+      | Readonly<{ deny: true; reason: 'restricted' | 'client_unsupported' }>
+      | Readonly<{
+          deniedVersions: readonly Readonly<{
+            versionId: string;
+            revision: number;
+            reason: 'restricted' | 'client_unsupported';
+          }>[];
+        }>
+    >();
+    expectTypeOf<Extract<ReadPolicyInput, { phase: 'request' }>>().not.toHaveProperty('versions');
+    expectTypeOf<Extract<ReadPolicyInput, { phase: 'versions' }>>().not.toHaveProperty('kind');
+  });
+
+  it('exposes the hook types through the root and plugin entry points only as types', () => {
+    expect(Object.keys(root)).not.toContain('ReadPolicyInput');
+    expectTypeOf<root.ReadPolicyInput>().toEqualTypeOf<ReadPolicyInput>();
   });
 });

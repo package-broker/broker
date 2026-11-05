@@ -537,6 +537,10 @@ it('accepts the complete vulnerability mask and rejects undeclared provenance ev
     advisoriesTruncated: false,
   };
   const version = {
+    integrity: null,
+    distTags: [],
+    publishedBy: null,
+    approvedBy: null,
     id: '01JA0000000000000000000000',
     version: '1.2.3',
     stability: 'stable',

@@ -1,3 +1,4 @@
+import { ProductFooter } from './components/product-footer.js';
 import { CSPProvider } from '@base-ui/react/csp-provider';
 import {
   useCallback,
@@ -11,7 +12,9 @@ import {
 import { createApiClient } from './api.js';
 import type { paths } from './api-types.js';
 import {
+  AuthLayout,
   LoginScreen,
+  SigninFailedView,
   ReauthConfirm,
   ReauthScreen,
   ServicesContext,
@@ -33,24 +36,42 @@ import { Label } from './components/ui/label.js';
 import { Select } from './components/ui/select.js';
 import { cn } from './lib/utils.js';
 import { buildListFilterHash } from './page-hash.js';
-import { AccessPage } from './pages/access.js';
-import { AuditPage, clearAuditNames } from './pages/audit.js';
-import { ImportPage } from './pages/import.js';
-import { PackagesPage } from './pages/packages.js';
-import { ProjectsPage } from './pages/projects.js';
-import { SourcesPage } from './pages/sources.js';
-import { clearPendingTokenIssue, TokensPage } from './pages/tokens.js';
+import { clearNotificationDraft } from './pages/notification-draft.js';
+import { clearPendingTokenIssue } from './token-pending.js';
 import type { PendingStorage } from './pending.js';
+import { PageLoader } from './page-loader.js';
+
+const loadAuditPage = () => import('./pages/audit.js');
+let clearLoadedAuditNames: ((client: AuthClient) => void) | undefined;
+async function clearAuditNames(client: AuthClient): Promise<void> {
+  if (clearLoadedAuditNames !== undefined) {
+    clearLoadedAuditNames(client);
+    return;
+  }
+  try {
+    const page = await loadAuditPage();
+    clearLoadedAuditNames = page.clearAuditNames;
+    clearLoadedAuditNames(client);
+  } catch {
+    // A page that could not load has no names to clear.
+  }
+}
 
 export const PAGES = {
-  projects: ProjectsPage,
-  access: AccessPage,
-  sources: SourcesPage,
-  packages: PackagesPage,
-  tokens: TokensPage,
-  audit: AuditPage,
-  import: ImportPage,
-} as const satisfies Record<string, ComponentType>;
+  projects: () => import('./pages/projects.js').then((page) => page.ProjectsPage),
+  access: () => import('./pages/access.js').then((page) => page.AccessPage),
+  sources: () => import('./pages/sources.js').then((page) => page.SourcesPage),
+  packages: () => import('./pages/packages.js').then((page) => page.PackagesPage),
+  'npm-login': () => import('./pages/npm-login.js').then((page) => page.NpmLoginPage),
+  tokens: () => import('./pages/tokens.js').then((page) => page.TokensPage),
+  notifications: () => import('./pages/notifications.js').then((page) => page.NotificationsPage),
+  audit: () =>
+    loadAuditPage().then((page) => {
+      clearLoadedAuditNames = page.clearAuditNames;
+      return page.AuditPage;
+    }),
+  import: () => import('./pages/import.js').then((page) => page.ImportPage),
+} as const satisfies Record<string, () => Promise<ComponentType>>;
 
 export type PageRoute = keyof typeof PAGES;
 export type Route = PageRoute | 'login' | 'setup' | 'reauth';
@@ -81,7 +102,11 @@ export function parseHash(hash: string): ParsedHash {
   const candidate = query.get('project');
   const project = candidate !== null && SLUG.test(candidate) ? candidate : null;
   const name = path.startsWith('/') ? path.slice(1) : path;
-  const route = ROUTES.find((known) => known === name) ?? null;
+  const route = /^npm-login\/[A-Za-z0-9_-]{43}$/.test(name)
+    ? 'npm-login'
+    : /^packages\/[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(name)
+      ? 'packages'
+      : (ROUTES.find((known) => known === name) ?? null);
   const raw = route !== null || path === '' || path === '/' ? null : path.slice(0, MAX_SHOWN);
   return { route, raw, project, query };
 }
@@ -139,7 +164,7 @@ export async function signOut(deps: {
 }): Promise<boolean> {
   const result = await deps.client.request('post', '/_pb/auth/logout');
   if (!result.ok) return false;
-  clearAuditNames(deps.client);
+  await clearAuditNames(deps.client);
   deps.clearPending();
   if (deps.storage) clearPendingTokenIssue(deps.storage);
   deps.onSignedOut();
@@ -235,7 +260,7 @@ export function Shell(props: {
     </li>
   );
   return (
-    <div className="min-h-screen bg-neutral-50 text-neutral-900">
+    <div className="flex min-h-screen flex-col bg-neutral-50 text-neutral-900">
       <header className="shell-header">
         <span className="shell-brand font-semibold">Package Broker</span>
         <nav aria-label="Main" id="main-nav" className={`shell-nav ${menuOpen ? 'is-open' : ''}`}>
@@ -273,7 +298,7 @@ export function Shell(props: {
           </button>
         </div>
       </header>
-      <main className="mx-auto min-w-0 max-w-7xl p-4 sm:p-6">
+      <main className="mx-auto w-full min-w-0 max-w-7xl flex-1 p-4 sm:p-6">
         {props.unknown === null ? null : (
           <Alert className="mb-4">
             <AlertDescription>Unknown page: {props.unknown}</AlertDescription>
@@ -286,6 +311,7 @@ export function Shell(props: {
         ) : null}
         {props.children}
       </main>
+      <ProductFooter />
     </div>
   );
 }
@@ -314,7 +340,7 @@ export async function checkSession(
 ): Promise<Session | null> {
   const result = await client.request('get', '/_pb/session');
   if (!isCurrent()) return null;
-  clearAuditNames(client);
+  await clearAuditNames(client);
   const parsed = parseHash(hash);
   if (
     result.ok &&
@@ -407,7 +433,7 @@ export function createSessionClient(source: AuthClient): AuthClient {
   const client: AuthClient = {
     request: async (method, path, ...args) => {
       const result = await source.request(method, path, ...args);
-      if (result.status === 401) clearAuditNames(client);
+      if (result.status === 401) await clearAuditNames(client);
       return result;
     },
   };
@@ -522,8 +548,8 @@ function AppContent(props: { client?: AuthClient }) {
     ],
   );
 
-  const onSignedIn = useCallback(() => {
-    clearAuditNames(client);
+  const onSignedIn = useCallback(async () => {
+    await clearAuditNames(client);
     initialProbe.current = false;
     void client.request('get', '/_pb/session').then((result) => {
       setSession(result.ok ? 'in' : 'out');
@@ -534,16 +560,28 @@ function AppContent(props: { client?: AuthClient }) {
     });
   }, [client, flow, go]);
 
+  if (hash.split('?')[0] === '#/signin-failed') {
+    return (
+      <AuthLayout>
+        <SigninFailedView
+          hash={hash}
+          reason={parseHash(hash).query.get('reason')}
+          signedIn={session === 'in'}
+        />
+      </AuthLayout>
+    );
+  }
+
   const resolved = resolveRoute(hash, session === 'in');
   if (session === 'out') {
     return (
-      <main>
+      <AuthLayout>
         {resolved.route === 'setup' ? (
           <SetupScreen client={client} onSignedIn={onSignedIn} />
         ) : (
           <LoginScreen client={client} onSignedIn={onSignedIn} />
         )}
-      </main>
+      </AuthLayout>
     );
   }
 
@@ -567,7 +605,10 @@ function AppContent(props: { client?: AuthClient }) {
           setSignOutError(false);
           void signOut({
             client,
-            clearPending: () => flow.clear(),
+            clearPending: () => {
+              flow.clear();
+              clearNotificationDraft();
+            },
             storage,
             onSignedOut: () => {
               setProjects([]);
@@ -581,7 +622,7 @@ function AppContent(props: { client?: AuthClient }) {
         {Page === null ? (
           <ReauthScreen client={client} flow={flow} onDone={() => go(returnHash)} />
         ) : (
-          <Page />
+          <PageLoader key={resolved.route} load={Page} />
         )}
       </Shell>
       <ReauthConfirm flow={flow} />

@@ -42,3 +42,10 @@ export function auditExportFence(context: {
   const lease = jobLeaseOf(context);
   return lease === null ? null : systemMutationFence('audit-export', lease, {});
 }
+
+export function jobPurgeFence(context: {
+  readonly fences?: JobFences;
+}): SystemMutationFence | null {
+  const lease = jobLeaseOf(context);
+  return lease === null ? null : systemMutationFence('purge', lease, {});
+}

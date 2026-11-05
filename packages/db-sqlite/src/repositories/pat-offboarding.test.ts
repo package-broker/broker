@@ -9,7 +9,7 @@ import {
 import { createPatOffboardingSweepJob } from '@package-broker/core/authz/pat-offboarding-sweep';
 import type { PatOffboardingStore } from '@package-broker/core/authz/pat-offboarding';
 import { fixedClock, ulid } from '@package-broker/core/ids';
-import type { JobContext, Jobs } from '@package-broker/core/platform/jobs';
+import type { JobContext, CoreJobs as Jobs } from '@package-broker/core/platform/jobs';
 import { createRepositoryJobs } from '@package-broker/core/platform/jobs-port';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { createJobRepository } from './job.js';

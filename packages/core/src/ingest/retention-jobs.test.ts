@@ -8,6 +8,7 @@ import {
   type PurgeGeneration,
   type Sha256,
 } from '../platform/blob.js';
+import { safeRecord } from '../platform/observability.js';
 import { createBlobLifecycle } from '../platform/blob-lifecycle.js';
 import { JobError, type JobContext } from '../platform/jobs.js';
 import { registerCoreJob } from '../runtime/core-jobs.js';
@@ -351,8 +352,8 @@ describe('blob purge with the lifecycle service', () => {
       row.bytes = undefined;
     });
     const service = createBlobLifecycle({
-      metadata,
-      store: { remove } as unknown as ByteStore,
+      metadata: { ...metadata, inspect: async () => null },
+      store: { remove, head: async () => null } as unknown as ByteStore,
       deleteTimeoutMs: 1000,
       leaseMs: 10_000,
       observability: { counter: vi.fn(), histogram: vi.fn(), log: vi.fn() },
@@ -626,4 +627,96 @@ describe('source poll', () => {
       1,
     );
   });
+});
+
+it('purges only old staged objects belonging to the job organization', async () => {
+  const old = '2026-10-01T00:00:00.000Z';
+  const fresh = NOW.toISOString();
+  const own = 'staging/6f72672d61/01J00000000000000000000001';
+  const other = 'staging/6f72672d62/01J00000000000000000000001';
+  const recent = 'staging/6f72672d61/01J00000000000000000000002';
+  const discardStaged = vi.fn(async () => {});
+  const listStaged = vi.fn(async () => [
+    { handle: own as never, createdAt: old },
+    { handle: other as never, createdAt: old },
+    { handle: recent as never, createdAt: fresh },
+  ]);
+  const job = createBlobPurgeJob({
+    lifecycle: scanFixture().lifecycle,
+    staged: { listStaged, discardStaged },
+  });
+  await job.handler({}, context().job);
+  expect(discardStaged).toHaveBeenCalledExactlyOnceWith(own);
+  expect(listStaged).toHaveBeenCalledExactlyOnceWith(
+    '2026-10-19T10:00:00.000Z',
+    'staging/6f72672d61/',
+  );
+});
+
+it.each(['list', 'discard'])(
+  'Round 3 purges first and contains staged %s failures',
+  async (failure) => {
+    const f = scanFixture();
+    const { job } = context();
+    f.lifecycle.listDue.mockResolvedValue([sha(1)]);
+    const listStaged = vi.fn(async () => {
+      expect(f.lifecycle.removeBytes).toHaveBeenCalledOnce();
+      if (failure === 'list') throw new Error('private error');
+      return [
+        {
+          handle: 'staging/6f72672d61/01J00000000000000000000001' as never,
+          createdAt: '2020-01-01T00:00:00.000Z',
+        },
+      ];
+    });
+    const discardStaged = vi.fn(async () => {
+      throw new Error('private error');
+    });
+    await expect(
+      createBlobPurgeJob({ lifecycle: f.lifecycle, staged: { listStaged, discardStaged } }).handler(
+        {},
+        job,
+      ),
+    ).resolves.toBeUndefined();
+    expect(f.lifecycle.removeBytes).toHaveBeenCalledOnce();
+    expect(job.observability.counter).toHaveBeenCalledWith('pb.blob.staging_sweep', {
+      outcome: 'error',
+      stage: failure,
+    });
+    expect(job.observability.log).toHaveBeenCalledWith({
+      level: 'warn',
+      event: 'staged_blob_sweep_failed',
+      stage: failure,
+    });
+    const record = vi.mocked(job.observability.log).mock.calls[0]![0];
+    expect(safeRecord(record)).toEqual(record);
+  },
+);
+
+it('continues the staged sweep after each failed discard and reports fixed events', async () => {
+  const { job } = context();
+  const handles = [1, 2, 3].map((n) => `staging/6f72672d61/01J0000000000000000000000${n}`);
+  const discardStaged = vi.fn(async (handle: string) => {
+    if (handle !== handles[2]) throw new Error('private request data');
+  });
+  await createBlobPurgeJob({
+    lifecycle: scanFixture().lifecycle,
+    staged: {
+      listStaged: async () =>
+        handles.map((handle) => ({
+          handle: handle as never,
+          createdAt: '2020-01-01T00:00:00.000Z',
+        })),
+      discardStaged,
+    },
+  }).handler({}, job);
+  expect(discardStaged.mock.calls).toEqual(handles.map((handle) => [handle]));
+  expect(vi.mocked(job.observability.counter).mock.calls).toEqual([
+    ['pb.blob.staging_sweep', { outcome: 'error', stage: 'discard' }],
+    ['pb.blob.staging_sweep', { outcome: 'error', stage: 'discard' }],
+  ]);
+  expect(vi.mocked(job.observability.log).mock.calls).toEqual([
+    [{ level: 'warn', event: 'staged_blob_sweep_failed', stage: 'discard' }],
+    [{ level: 'warn', event: 'staged_blob_sweep_failed', stage: 'discard' }],
+  ]);
 });

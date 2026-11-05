@@ -55,6 +55,23 @@ function producedActions(path: string, source: string): string[] {
     if (path === 'core/src/api/routes/import.ts' && template === '`import_run.${action}`') {
       expect(source).toContain('Object.keys(IMPORT_ACTIONS)');
       actions.push(...Object.keys(IMPORT_ACTIONS).map((action) => `import_run.${action}`));
+    } else if (
+      (path === 'core/src/notifications/endpoints.ts' ||
+        path === 'db-sqlite/src/repositories/notification-write.ts') &&
+      template === '`notification.${kind}`'
+    ) {
+      expect(source).toMatch(/kind: 'enable' \| 'disable' \| 'delete'/);
+      actions.push('notification.enable', 'notification.disable', 'notification.delete');
+    } else if (
+      path === 'db-sqlite/src/repositories/trusted-publishers.ts' &&
+      template === '`trusted_publisher.${action}`'
+    ) {
+      expect(source).toContain("action: 'create' | 'update' | 'disable'");
+      actions.push(
+        'trusted_publisher.create',
+        'trusted_publisher.update',
+        'trusted_publisher.disable',
+      );
     } else {
       expect({ path, template }).toEqual({
         path: 'core/src/authz/project-service.ts',
@@ -172,7 +189,7 @@ describe('audit coverage inventory', () => {
   it('records logout fallback coverage and pins uncaptured actions without producers', () => {
     expect(
       AUDIT_SECURITY_ATTEMPTS.filter(({ captured }) => captured).map(({ attempt }) => attempt),
-    ).toEqual([]);
+    ).toEqual(['failed login', 'authorization denial', 'failed reauthentication']);
     expect(AUDIT_SANITIZER_FALLBACKS).toEqual([
       {
         attempt: 'logout sanitizer refusal',
@@ -197,7 +214,7 @@ describe('audit coverage inventory', () => {
   });
 });
 
-describe('failed credential checks currently stage no audit rows', () => {
+describe('credential services without an optional failure recorder stage no failure rows', () => {
   const now = '2026-10-28T00:00:00.000Z';
   const meta = {
     requestId: '01K7R5V0000000000000000002',

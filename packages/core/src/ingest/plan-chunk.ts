@@ -36,6 +36,8 @@ export interface ChunkSource {
 
 export interface ChunkBudget {
   readonly sessionStatements: number;
+  /** Revisit unchanged active versions through the budgeted writer for eager build retries. */
+  readonly syncUnchanged?: boolean;
   /** Requires statementBudget for quarantine and listing mark costs. */
   readonly syncCost?: (versions: number) => number;
   readonly statementBudget?: Readonly<Record<CatalogueWriteMethod, number>>;
@@ -184,17 +186,23 @@ export function planChunk(
   for (const [index, m] of members.entries()) {
     const planned = decisions[index];
     if (planned === undefined || planned.kind === 'needs_metadata') break;
-    const writes = planned.kind === 'insert' || planned.kind === 'update';
+    const writes =
+      planned.kind === 'insert' ||
+      planned.kind === 'update' ||
+      (planned.kind === 'unchanged' &&
+        budget.syncUnchanged === true &&
+        byVersion.get(m.version.versionNormalized)?.status === 'active');
     const bytes = writes && payload !== undefined ? payload.bytes(m.version) : 0;
     const decision: Decision =
       writes && payload !== undefined && bytes > payload.limit ? { kind: 'too_large' } : planned;
+    const sync = writes && decision.kind !== 'too_large';
     const marks = Math.ceil((taken + 1) / MARK_KEYS_PER_STATEMENT) * markCost;
     let extraCalls = 0;
     let extraStatements = 0;
     if (decision.kind === 'conflict') {
       extraCalls = 1;
       extraStatements = costs?.quarantine ?? 0;
-    } else if (decision.kind === 'insert' || decision.kind === 'update') {
+    } else if (sync) {
       if (
         open === null ||
         open.length >= CATALOGUE_SYNC_VERSIONS_PER_CALL ||
@@ -228,6 +236,9 @@ export function planChunk(
     } else if (decision.kind === 'too_large') {
       refused.push({ version, reason: 'payload_too_large' });
     } else {
+      (decision.kind === 'insert' ? inserts : updates).push(m.version);
+    }
+    if (sync) {
       if (extraCalls === 1) {
         open = [];
         openBytes = 0;
@@ -235,7 +246,6 @@ export function planChunk(
       }
       open?.push(m.version);
       openBytes += bytes;
-      (decision.kind === 'insert' ? inserts : updates).push(m.version);
     }
     taken += 1;
     cursorAfter = m.ordinal;

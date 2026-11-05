@@ -3,6 +3,8 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
   describeAuditBackfillBench,
   describeMigrationContract,
+  describeNpmPublishMigrationContract,
+  describeNpmIdentityMigrationContract,
   describeSchemaEquivalenceContract,
   describeVulnerabilityMigrationContract,
 } from '@package-broker/db-sqlite/contract/migration-contract';
@@ -10,7 +12,7 @@ import { describeMigrationLockContract } from '@package-broker/db-sqlite/contrac
 import { discoveredMigrations } from '@package-broker/db-sqlite/testing/migrated-database';
 import { createD1Executor, type D1DatabaseLike } from './d1-executor.js';
 
-const bindings = Array.from({ length: 65 }, (_, index) => `MDB${index}`);
+const bindings = Array.from({ length: 200 }, (_, index) => `MDB${index}`);
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -51,3 +53,7 @@ describeMigrationLockContract('d1', openPair, firstCoreMigration);
 describeVulnerabilityMigrationContract('d1', openPair);
 
 describeSchemaEquivalenceContract('d1', openPair);
+
+describeNpmPublishMigrationContract('d1', openPair);
+
+describeNpmIdentityMigrationContract('d1', openPair);

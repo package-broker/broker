@@ -1,3 +1,4 @@
+import { DiscoveryPicker } from './discovery-picker-view.js';
 import { buildListFilterHash } from '../../page-hash.js';
 import { mirrorOutcome, sourceSyncResponse, SYNC_REQUESTED } from '../sources/sync-copy.js';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -241,6 +242,8 @@ export function AddChoices({
   imported,
   onMirror,
   sourceLink,
+  onDiscovery,
+  orgManager = false,
 }: {
   ecosystem: string;
   mirror: boolean;
@@ -248,6 +251,8 @@ export function AddChoices({
   imported: boolean;
   onMirror: () => void;
   sourceLink: string;
+  onDiscovery?: () => void;
+  orgManager?: boolean;
 }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -266,23 +271,27 @@ export function AddChoices({
           <p>A project source manager can add packages from a mirror.</p>
         )}
       </div>
+      <div className="rounded border p-4">
+        <h3 className="font-semibold">From a connected GitHub organization</h3>
+        <p>Choose repositories your GitHub connection can access.</p>
+        {orgManager ? (
+          <Button className="mt-2 min-h-11" onClick={onDiscovery}>
+            Choose GitHub repositories
+          </Button>
+        ) : (
+          <p>Ask an organization source manager to connect GitHub.</p>
+        )}
+        {setup ? (
+          <a
+            className="inline-flex min-h-11 items-center underline"
+            href={`${sourceLink}&provider=github`}
+          >
+            Set up a GitHub repository source
+          </a>
+        ) : null}
+      </div>
       {ecosystem === 'composer' ? (
         <>
-          <div className="rounded border p-4">
-            <h3 className="font-semibold">From a connected GitHub organization</h3>
-            <p>Choose repositories your GitHub connection can access.</p>
-            <p>Organization picker · Coming soon</p>
-            {setup ? (
-              <a
-                className="inline-flex min-h-11 items-center underline"
-                href={`${sourceLink}&provider=github`}
-              >
-                Set up a GitHub repository source
-              </a>
-            ) : (
-              <p>Ask an organization source manager to connect GitHub.</p>
-            )}
-          </div>
           <div className="rounded border p-4">
             <h3 className="font-semibold">By repository URL</h3>
             <p>Add a Composer package from a Git repository.</p>
@@ -296,18 +305,20 @@ export function AddChoices({
           </div>
         </>
       ) : null}
-      <div className="rounded border p-4">
-        <h3 className="font-semibold">Import configuration</h3>
-        <p>Bring source and package selections from a Satis configuration using the CLI.</p>
-        <code className="break-all">pb import satis plan</code>
-        {imported ? (
-          <a href="#/import" className="flex min-h-11 items-center underline">
-            Import review
-          </a>
-        ) : (
-          <p>An organization import manager can review imports.</p>
-        )}
-      </div>
+      {ecosystem === 'composer' ? (
+        <div className="rounded border p-4">
+          <h3 className="font-semibold">Import configuration</h3>
+          <p>Bring source and package selections from a Satis configuration using the CLI.</p>
+          <code className="break-all">pb import satis plan</code>
+          {imported ? (
+            <a href="#/import" className="flex min-h-11 items-center underline">
+              Import review
+            </a>
+          ) : (
+            <p>An organization import manager can review imports.</p>
+          )}
+        </div>
+      ) : null}
       <div className="lg:col-span-2">
         <h3 className="font-semibold">Upload a private package</h3>
         <p>Publish a package archive for this project.</p>
@@ -320,14 +331,24 @@ export function AddChoices({
 export function PackageSourceControls({
   services,
   project,
+  onSourcesChanged,
 }: {
   services: ShellServices;
   project: string | null;
+  onSourcesChanged?: (scope: string | null, signature: string) => void;
 }) {
   const model = useMemo(() => createSourceActions(services, project), [services, project]);
   const state = useSyncExternalStore(model.subscribe, model.snapshot, model.snapshot);
-  const [mode, setMode] = useState<'choices' | 'mirror' | 'sync' | null>(null);
-  const [ecosystem, setEcosystem] = useState('composer');
+  const sourceSignature = state.loading
+    ? null
+    : JSON.stringify(state.sources.map((source) => [source.id, source.name]));
+  useEffect(() => {
+    if (sourceSignature !== null)
+      onSourcesChanged?.(state.project?.slug ?? project, sourceSignature);
+  }, [sourceSignature, onSourcesChanged, state.project?.slug, project]);
+  const [mode, setMode] = useState<'choices' | 'mirror' | 'sync' | 'discovery' | null>(null);
+  const [discoveryImporting, setDiscoveryImporting] = useState(false);
+  const [ecosystem, setEcosystem] = useState<'composer' | 'npm'>('composer');
   const [sourceId, setSource] = useState('');
   const [sourceError, setSourceError] = useState(false);
   const [name, setName] = useState('');
@@ -377,18 +398,26 @@ export function PackageSourceControls({
         <Dialog
           open
           onOpenChange={(open) => {
-            if (!open) setMode(null);
+            if (!open && !discoveryImporting) setMode(null);
           }}
         >
           <DialogContent variant="source" className="lg:max-w-5xl">
             <DialogHeader className="shrink-0 p-6 pr-16">
-              <DialogTitle>{mode === 'sync' ? 'Sync from source' : 'Add package'}</DialogTitle>
-              <DialogDescription>
+              <DialogTitle>
                 {mode === 'sync'
-                  ? 'Check a source for package updates.'
-                  : state.project
-                    ? `Add packages to ${state.project.name}.`
-                    : 'Choose how to add packages to a project.'}
+                  ? 'Sync from source'
+                  : mode === 'discovery'
+                    ? 'Choose GitHub repositories'
+                    : 'Add package'}
+              </DialogTitle>
+              <DialogDescription>
+                {mode === 'discovery'
+                  ? 'Your selected repositories become shared sources in this organization.'
+                  : mode === 'sync'
+                    ? 'Check a source for package updates.'
+                    : state.project
+                      ? `Add packages to ${state.project.name}.`
+                      : 'Choose how to add packages to a project.'}
               </DialogDescription>
             </DialogHeader>
             <div className="min-h-0 overflow-y-auto px-6 pb-6">
@@ -400,7 +429,7 @@ export function PackageSourceControls({
                     className="mb-4 min-h-11"
                     id="choice-ecosystem"
                     value={ecosystem}
-                    onChange={(e) => setEcosystem(e.target.value)}
+                    onChange={(e) => setEcosystem(e.target.value as 'composer' | 'npm')}
                   >
                     <option value="composer">Composer</option>
                     <option value="npm">npm</option>
@@ -409,11 +438,24 @@ export function PackageSourceControls({
                     ecosystem={ecosystem}
                     mirror={project === null ? state.projects.length > 0 : manager}
                     setup={setup}
+                    orgManager={orgManager}
+                    onDiscovery={() => setMode('discovery')}
                     imported={state.organization.includes('org:import:write')}
                     sourceLink={link}
                     onMirror={() => setMode('mirror')}
                   />
                 </>
+              ) : mode === 'discovery' ? (
+                orgManager ? (
+                  <DiscoveryPicker
+                    services={services}
+                    ecosystem={ecosystem}
+                    onBack={() => setMode('choices')}
+                    onImportingChange={setDiscoveryImporting}
+                  />
+                ) : (
+                  <p>Ask an organization source manager to connect GitHub.</p>
+                )
               ) : (
                 <form
                   id="source-action-form"
@@ -457,7 +499,7 @@ export function PackageSourceControls({
                         value={ecosystem}
                         disabled={state.busy}
                         onChange={(e) => {
-                          setEcosystem(e.target.value);
+                          setEcosystem(e.target.value as 'composer' | 'npm');
                           setSource('');
                           setSourceError(false);
                         }}
@@ -637,7 +679,9 @@ export function PackageSourceControls({
               ) : null}
             </div>
             <DialogFooter className="shrink-0 border-t bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-              {mode !== 'choices' && authorized && source?.status !== 'paused' ? (
+              {(mode === 'mirror' || mode === 'sync') &&
+              authorized &&
+              source?.status !== 'paused' ? (
                 <Button
                   className="min-h-11"
                   form="source-action-form"

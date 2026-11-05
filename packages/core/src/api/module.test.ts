@@ -1,3 +1,4 @@
+import { ulid } from '../ids.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixedClock } from '../ids.js';
 import { createAuthorizationEngine, patValidationGate } from '../authz/engine.js';
@@ -31,6 +32,9 @@ import * as packageManage from './routes/package-manage.js';
 import * as importRuns from './routes/import.js';
 
 const EXPECTED_ROUTES = [
+  'GET /_pb/me/npm-login/:selector',
+  'POST /_pb/me/npm-login/:selector',
+  'PATCH /_pb/sources/:source/names/:name',
   'GET /_pb/organization',
   'GET /_pb/users',
   'PATCH /_pb/users/:user',
@@ -99,6 +103,11 @@ const EXPECTED_ROUTES = [
   'PUT /_pb/projects/:project/sources/:source/attachment',
   'DELETE /_pb/projects/:project/sources/:source/attachment',
   'GET /_pb/projects/:project/resolve',
+  'GET /_pb/publishes',
+  'GET /_pb/publishes/:id',
+  'POST /_pb/publishes/:id/approve',
+  'POST /_pb/publishes/:id/reject',
+  'POST /_pb/publishes/:id/rescan',
   'GET /_pb/packages',
   'GET /_pb/packages/:package/versions',
   'GET /_pb/projects/:project/packages',
@@ -152,6 +161,16 @@ function dependencies(): ApiModuleDeps {
   });
   const lifetime = { personal: { maxDays: 365 }, service: { maxDays: 365 } };
   return {
+    npmLogin: {
+      ...common(),
+      publicUrl: 'https://broker.test',
+      store: unused('start', 'confirmation', 'poll'),
+      projects: unused('getBySlug'),
+      sessions: unused('authenticate', 'isReauthFresh'),
+      personal: () => {
+        throw new Error('unused');
+      },
+    },
     organization: {
       ...common(),
       organizations: unused('get'),
@@ -251,6 +270,17 @@ function dependencies(): ApiModuleDeps {
       projects: unused('get'),
     },
     packages: unused('listProject', 'listOrganization', 'listVersions'),
+    publishes: {
+      ids: { ulid },
+      clock: { now: () => new Date() },
+      clientIp: () => null,
+      publishes: {
+        get: async () => null,
+        list: async () => ({ items: [], next: null }),
+        decide: async () => ({ changed: false, active: false, revision: 1 }),
+        rescan: async () => ({ changed: false, active: false, revision: 1 }),
+      },
+    },
     packageManage: {
       ...common(),
       service: unused('manage'),
@@ -666,4 +696,10 @@ describe('API_EXEMPT_ROUTES', () => {
       expect(reason.trim().length).toBeGreaterThan(0);
     expect(Object.isFrozen(API_EXEMPT_ROUTES)).toBe(true);
   });
+});
+
+it('refuses an incomplete package access request assembly before serving', () => {
+  expect(() => createApiModule({ ...dependencies(), packageAccessRequests: {} as never })).toThrow(
+    'API module requires dependency: dependencies.packageAccessRequests.ids',
+  );
 });

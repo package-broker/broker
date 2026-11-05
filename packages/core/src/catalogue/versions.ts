@@ -108,3 +108,27 @@ export function validateVersion(pair: VersionPair): { stability: VersionStabilit
   }
   return fail('unknown ecosystem');
 }
+
+export function compareNpmVersions(a: string, b: string): number {
+  validateVersion({ ecosystem: 'npm', version: a, versionNormalized: a });
+  validateVersion({ ecosystem: 'npm', version: b, versionNormalized: b });
+  const parts = (value: string) => {
+    const [core, pre] = value.split(/-(.*)/s);
+    return { core: core!.split('.').map(BigInt), pre: pre?.split('.') };
+  };
+  const x = parts(a),
+    y = parts(b);
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i]! > y.core[i]! ? 1 : -1;
+  if (!x.pre || !y.pre) return x.pre === y.pre ? 0 : x.pre ? -1 : 1;
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
+    const l = x.pre[i]!,
+      r = y.pre[i]!;
+    if (l === r) continue;
+    const ln = /^\d+$/.test(l),
+      rn = /^\d+$/.test(r);
+    if (ln && rn) return BigInt(l) > BigInt(r) ? 1 : -1;
+    if (ln !== rn) return ln ? -1 : 1;
+    return l > r ? 1 : -1;
+  }
+  return Math.sign(x.pre.length - y.pre.length);
+}

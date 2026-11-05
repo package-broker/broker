@@ -14,6 +14,7 @@ import type {
 import type { VersionStability } from '../catalogue/versions.js';
 import type { Sha256 } from '../platform/blob.js';
 import type { CacheKey, EpochReader } from '../platform/cache.js';
+import type { PublishApprovalInsert, PublishReadme } from './publishes.js';
 import type { OrgContext, Statement } from './port.js';
 
 declare const CATALOGUE_WRITE_GUARD: unique symbol;
@@ -102,6 +103,19 @@ export interface CatalogueVersion {
   readonly npmIntegrity: string | null;
   readonly deprecatedMessage: string | null;
   readonly metadataJson: string;
+  /** Stored provenance of publishedAt; policy only, never rendered. */
+  readonly publishedAtBasis?: string;
+  /** The row's immutable creation time; the policy age fallback, never rendered. */
+  readonly createdAt?: string;
+}
+
+/** The immutable date and identity facts of the version a dist target belongs to. */
+export interface DistPolicyFacts {
+  readonly version: string;
+  readonly versionNormalized: string;
+  readonly publishedAt: string;
+  readonly publishedAtBasis: string;
+  readonly createdAt: string;
 }
 
 export interface PackageResolution {
@@ -160,6 +174,8 @@ export interface DistTarget {
   readonly status: 'active' | 'removed_upstream';
   readonly blob: DistBlob | null;
   readonly fetch: FetchDescriptor;
+  /** Always from the current version row, so an old revision carries current identity and dates. */
+  readonly facts?: DistPolicyFacts;
 }
 
 export interface DistIdentity {
@@ -360,6 +376,7 @@ export interface FinalizeResult {
 }
 
 export type CatalogueWriteMethod =
+  | 'publishVersion'
   | 'syncPackage'
   | 'attachDist'
   | 'openListing'
@@ -368,7 +385,39 @@ export type CatalogueWriteMethod =
   | 'quarantine'
   | 'markPackageAbsent';
 
+export interface PublishVersionInput {
+  readonly sourceId: string;
+  readonly key: string;
+  readonly description: string | null;
+  readonly versionId: string;
+  readonly version: VersionInput;
+  readonly blob: DistBlob;
+  readonly integrity: string;
+  readonly distTags: Readonly<Record<string, string>>;
+  readonly readme: PublishReadme | null;
+  readonly approval: PublishApprovalInsert | null;
+  readonly scanJobStatements: readonly Statement[];
+  readonly requirePublishApproval: boolean;
+  readonly routeProjectId: string;
+  readonly tokenId: string;
+  readonly now: string;
+  readonly event: AuditEvent;
+}
+
+export interface PublishVersionResult {
+  readonly packageId: string;
+  readonly versionId: string;
+  readonly rev: number;
+  readonly approvalId: string | null;
+  readonly held: { readonly approval: boolean; readonly scan: boolean };
+}
+
 export interface CatalogueWriter {
+  publishVersion(
+    ctx: OrgContext,
+    guard: CatalogueWriteGuard,
+    input: PublishVersionInput,
+  ): Promise<PublishVersionResult>;
   /** Worst-case statements per call; for syncPackage, a call with CATALOGUE_SYNC_VERSIONS_PER_CALL versions. */
   readonly statementBudget: Readonly<Record<CatalogueWriteMethod, number>>;
   /** Worst-case executed statements, including guards repeated after batch splits. */
@@ -377,6 +426,8 @@ export interface CatalogueWriter {
     readonly tags: number;
     readonly guardStatements: number;
   }): number;
+  /** Set when syncing an unchanged npm VCS version has an effect, such as queueing its build. */
+  readonly resyncsUnchangedNpmVcs?: boolean;
   /** Bound parameter bytes one syncPackage version group may carry. */
   readonly syncPayloadLimit: number;
   /**
@@ -398,7 +449,13 @@ export interface CatalogueWriter {
   attachDist(
     ctx: OrgContext,
     guard: CatalogueWriteGuard,
-    input: DistIdentity & { readonly sha256: Sha256 },
+    input: DistIdentity & {
+      readonly sha256: Sha256;
+      readonly expectedGeneration?: string;
+      readonly npmIntegrity?: string;
+      readonly readme?: PublishReadme | null;
+      readonly readmeTruncated?: boolean;
+    },
   ): Promise<WriteEffect>;
   openListing(
     ctx: OrgContext,
@@ -448,7 +505,8 @@ export type VisibilityWriteResult =
         | 'invalid_pattern'
         | 'too_many_patterns'
         | 'not_attached'
-        | 'not_eligible';
+        | 'not_eligible'
+        | 'publish_gate';
     };
 
 export interface VisibilityAudit {
@@ -460,6 +518,8 @@ export type PackageManageScope =
   { readonly kind: 'organization' } | { readonly kind: 'project'; readonly projectId: string };
 
 interface PackageManageWrite {
+  readonly tombstoneReason?: string;
+  readonly expectedRevision?: number;
   readonly packageId: string;
   readonly expectedStatus: VersionStatus;
   readonly manage: PackageManageScope;
@@ -473,6 +533,7 @@ export interface VisibilityStore {
     ctx: OrgContext,
     fence: MutationFence,
     input: VisibilityAudit & {
+      readonly verifiedClaims?: readonly string[];
       readonly projectId: string;
       readonly sourceId: string;
       readonly precedence?: number;

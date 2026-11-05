@@ -11,7 +11,7 @@ import {
   localSetupFinishBody,
   localSetupStartBody,
 } from '../api/auth-schemas.js';
-import { apiError } from '../api/response.js';
+import { API_ERROR_CODES, apiError } from '../api/response.js';
 import { validateInput, type ValidationDetail } from '../api/validate.js';
 import { envelopeResponse } from '../kernel/errors.js';
 import type { KernelLog } from '../kernel/errors.js';
@@ -91,6 +91,7 @@ function orgOf(ctx: RequestContext): OrgContext {
 }
 
 export function createLocalRoutes(deps: {
+  readonly localLoginAvailable: boolean;
   readonly local: LocalLoginService;
   readonly setup: LocalSetupService;
   readonly sessions: SessionService;
@@ -98,7 +99,7 @@ export function createLocalRoutes(deps: {
   readonly clientIp: (request: Request) => string | null;
   readonly log: KernelLog;
 }): readonly RouteDefinition[] {
-  const { local, setup, sessions, publicOrigin } = deps;
+  const { local, setup, sessions, publicOrigin, localLoginAvailable } = deps;
   if (publicOrigin === 'null' || new URL(publicOrigin).origin !== publicOrigin) {
     throw new TypeError('publicOrigin must be a canonical origin');
   }
@@ -127,6 +128,11 @@ export function createLocalRoutes(deps: {
   const guarded =
     (handle: (ctx: RequestContext, org: OrgContext) => Promise<Response>) =>
     async (ctx: RequestContext): Promise<Response> => {
+      if (!localLoginAvailable) {
+        log({ level: 'info', event: 'auth.local.refused_disabled' });
+        const { status, message } = API_ERROR_CODES.local_auth_disabled;
+        return envelopeResponse(status, 'local_auth_disabled', message, ctx.requestId);
+      }
       try {
         assertSameOrigin(ctx.request, publicOrigin);
         return await handle(ctx, orgOf(ctx));

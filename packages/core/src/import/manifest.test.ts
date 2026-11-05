@@ -801,8 +801,8 @@ describe('refusal paths', () => {
     [
       'a source ecosystem that differs from its type',
       (d) => {
-        item(d, 's1').ecosystem = 'npm';
-        return pathOf(d, 's1', 'ecosystem');
+        item(d, 's2').ecosystem = 'composer';
+        return pathOf(d, 's2', 'ecosystem');
       },
       'ecosystem_mismatch',
     ],
@@ -1240,3 +1240,24 @@ describe('fixed vector with a source config', () => {
     );
   });
 });
+
+it.each(['widget', '@scope/widget'])(
+  'refuses npm VCS import source %s and its name records',
+  (packageName) => {
+    const doc = base();
+    doc.items = doc.items.filter((entry) => entry.external_ref !== 'v1');
+    const source = item(doc, 's1');
+    source.ecosystem = 'npm';
+    (source.config as Json).packageName = packageName;
+    const name = item(doc, 'n1');
+    name.ecosystem = 'npm';
+    name.pattern = packageName;
+    expect(parseManifest(doc)).toMatchObject({
+      ok: false,
+      details: expect.arrayContaining([
+        { path: `/items/${doc.items.indexOf(source)}/ecosystem`, code: 'ecosystem_mismatch' },
+        { path: `/items/${doc.items.indexOf(name)}/ecosystem`, code: 'unsupported_source' },
+      ]),
+    });
+  },
+);

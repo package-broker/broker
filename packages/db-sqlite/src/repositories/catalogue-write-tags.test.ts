@@ -166,6 +166,22 @@ async function apply(
 }
 
 describe('distTagStatements', () => {
+  for (const status of ['quarantined', 'removed_upstream', 'yanked'] as const) {
+    it(`patch refuses an inactive ${status} target atomically`, async () => {
+      await database.executor.batch([
+        stmt(
+          "UPDATE version SET status=?, removed_upstream_at='2026-10-30T00:00:00.000Z' WHERE package_id=?",
+          status,
+          PACKAGE,
+        ),
+      ]);
+      await expect(
+        apply({ latest: '1.0.0' }, { mode: 'patch', actorType: 'user' }),
+      ).rejects.toThrow();
+      expect(await tags()).toEqual([]);
+      expect(await history()).toEqual([]);
+    });
+  }
   it('1: a replay writes no history and does not move the package clock', async () => {
     await apply({ latest: '1.0.0', next: '2.0.0-beta.1' });
     const before = await clock();

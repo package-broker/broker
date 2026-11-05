@@ -18,17 +18,63 @@ import {
 
 const statuses = {
   rate_limited: 429,
+  invalid_unpublish: 400,
+  unpublish_window: 409,
+  invalid_dist_tag: 400,
+  invalid_deprecation: 400,
+  deprecation_too_long: 400,
+  deprecation_too_many: 400,
+  invalid_configuration: 400,
+  endpoint_limit: 409,
+  transport_unavailable: 503,
+  unpublish_blocked: 409,
+  github_credentials_required: 409,
+  source_not_attached: 409,
+  invalid_version: 400,
+  invalid_attachments: 400,
+  invalid_attachment: 400,
+  provenance_unsupported: 400,
+  integrity_mismatch: 400,
+  invalid_tarball: 400,
+  manifest_mismatch: 400,
+  license_missing: 400,
+  too_many_tags: 400,
+  token_required: 401,
+  scope: 403,
+  not_admitted: 403,
+  self_approval: 403,
+  already_decided: 409,
+  package_binding: 403,
+  no_trusted_publisher: 403,
+  claim_in_use: 409,
+  claim_overlap: 409,
+  name_public: 409,
+  name_public_unverified: 409,
+  name_not_claimed: 409,
+  version_exists: 409,
+  publish_gate: 409,
+  too_many_sessions: 409,
+  ambiguous_trusted_publisher: 409,
+  manifest_too_large: 413,
+  tarball_too_large: 413,
+  write_unsupported: 405,
+  busy: 503,
+  length_required: 411,
+  staging_failed: 503,
+  invalid_publish_body: 400,
   unsupported_package: 400,
   unsupported_source_kind: 400,
   package_not_found: 404,
   invalid_request: 400,
   unauthorized: 401,
   forbidden: 403,
+  local_auth_disabled: 403,
   reauth_required: 403,
   not_found: 404,
   audit_trail_unavailable: 404,
   audit_trail_invalid_response: 500,
   conflict: 409,
+  discovery_rule_disabled: 409,
   source_paused: 409,
   duplicate: 409,
   last_holder: 409,
@@ -50,6 +96,10 @@ const expectedCodes: Record<string, ApiErrorCode> = {
   credential_scope_mismatch: 'not_found',
   proxy_source: 'invalid_request',
   pattern_taken: 'conflict',
+  claim_in_use: 'claim_in_use',
+  claim_overlap: 'claim_overlap',
+  name_public: 'name_public',
+  name_public_unverified: 'name_public_unverified',
   activation_requires_registered_names: 'conflict',
   has_packages: 'conflict',
   has_history: 'conflict',
@@ -337,6 +387,10 @@ describe('SourceError', () => {
     'invalid_pattern',
     'proxy_source',
     'pattern_taken',
+    'claim_in_use',
+    'claim_overlap',
+    'name_public',
+    'name_public_unverified',
     'invalid_name',
   ] as const satisfies readonly SourceError[];
   it('covers every member with the specified code and status', () => {
@@ -455,5 +509,20 @@ describe('VisibilityError', () => {
       expect(SERVICE_ERROR_TABLE.VisibilityError[member]).toEqual({ code, status: statuses[code] });
       expect(Object.hasOwn(API_ERROR_CODES, code)).toBe(true);
     }
+  });
+});
+
+describe('npm error messages', () => {
+  it('appends new error codes after the existing catalogue', () => {
+    const codes = Object.keys(API_ERROR_CODES);
+    expect(codes.slice(0, 2)).toEqual(['rate_limited', 'unsupported_package']);
+    expect(codes.indexOf('invalid_version')).toBe(codes.indexOf('unavailable') + 1);
+    expect(API_ERROR_CODES.claim_overlap.message).toBe(
+      'This package name is already published or proxied',
+    );
+    expect(API_ERROR_CODES.token_required.message).toBe('A token is required to publish');
+    expect(API_ERROR_CODES.publish_gate.message).toBe(
+      'Approval is required before this version can be released',
+    );
   });
 });

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
+import type { ImportPublishedAtBasis } from '@package-broker/core/catalogue/version-rules';
 import {
   delegatedMutationFence,
   systemMutationFence,
@@ -13,7 +14,11 @@ import { PERMISSIONS } from '@package-broker/core/authz/permissions';
 import { ulid } from '@package-broker/core/ids';
 import { openMigratedDatabase, type MigratedDatabase } from '../testing/migrated-database.js';
 import { blobEligibleCondition } from './blob-references.js';
-import { createImportJournalStore, IMPORT_VERIFICATION_JOB } from './import-journal.js';
+import {
+  createImportJournalStore,
+  IMPORT_VERIFICATION_JOB,
+  type ImportRollbackRef,
+} from './import-journal.js';
 import { createImportRunStore } from './import-run.js';
 import { createDistResolver } from './catalogue-dist.js';
 import { visibleWinner } from './catalogue-read.js';
@@ -448,7 +453,21 @@ describe('import journal', () => {
       fetch: { sourceRef: 'old-ref' },
     });
     expect(await apply([override])).toEqual({ ok: true });
-    expect(await resolver.resolveDist(ctx, query)).toEqual({ ...old, current: false });
+    const [corrected] = await executor.all<{ published_at: string; published_at_basis: string }>(
+      stmt(
+        "SELECT published_at, published_at_basis FROM version WHERE org_id = ? AND id = 'version'",
+        ctx.orgId,
+      ),
+    );
+    expect(await resolver.resolveDist(ctx, query)).toEqual({
+      ...old,
+      current: false,
+      facts: {
+        ...old?.facts,
+        publishedAt: corrected?.published_at,
+        publishedAtBasis: corrected?.published_at_basis,
+      },
+    });
     expect(
       await executor.all(
         stmt(
@@ -583,11 +602,12 @@ describe('import journal', () => {
     ['project', 'status', 'archived'],
     ['role', 'protects_last_holder', 1],
     ['source', 'removal_policy', 'exclude'],
+    ['source', 'require_publish_approval', 1],
     ['registered_name', 'pattern', 'changed/*'],
     ['project_source', 'precedence', 42],
     ['access_grant', 'created_by', 'actor'],
   ] as const)(
-    'hashes the complete created %s domain and detects a later %s edit',
+    'hashes the imported %s domain across a later %s edit',
     async (table, column, changed) => {
       expect(
         await apply([
@@ -659,6 +679,7 @@ describe('import journal', () => {
         const domain: Record<string, SqlValue | readonly string[]> = Object.fromEntries(
           Object.entries(row!).filter(([key]) => !excluded.has(key)),
         );
+        if (table === 'source') delete domain.require_publish_approval;
         if (table === 'role') domain.permissions = ['project:read'];
         const digest = await crypto.subtle.digest(
           'SHA-256',
@@ -683,7 +704,9 @@ describe('import journal', () => {
           ...identity,
         ),
       ]);
-      expect(ref.contentHash).not.toBe(await liveHash());
+      if (table === 'source' && column === 'require_publish_approval')
+        expect(ref.contentHash).toBe(await liveHash());
+      else expect(ref.contentHash).not.toBe(await liveHash());
     },
   );
   async function protect() {
@@ -1018,6 +1041,18 @@ describe('import journal', () => {
       executor,
       providerAnchors: anchors,
       blobs: {
+        async stage() {
+          throw new Error('not_implemented');
+        },
+        async openStaged() {
+          throw new Error('not_implemented');
+        },
+        async promote() {
+          throw new Error('not_implemented');
+        },
+        async discard() {
+          throw new Error('not_implemented');
+        },
         async put() {
           throw new Error('unexpected upload');
         },
@@ -1439,5 +1474,13 @@ describe('import journal', () => {
       ),
     ).toEqual([{ status: 'paused', credential_id: null }]);
     expect(await store.appliedRefs(ctx, 'run')).toHaveLength(6);
+  });
+});
+
+describe('import journal rollback reference basis', () => {
+  it('is the shared import basis list, not a hand-kept copy', () => {
+    expectTypeOf<
+      ImportRollbackRef['publishedAtBasis']
+    >().toEqualTypeOf<ImportPublishedAtBasis | null>();
   });
 });

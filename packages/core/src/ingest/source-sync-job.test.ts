@@ -32,6 +32,8 @@ const sha = (parts: unknown[]) => createHash('sha256').update(JSON.stringify(par
 
 function record(over: Partial<SourceRecord> = {}): SourceRecord {
   return {
+    revision: 1,
+    requirePublishApproval: false,
     id: 'src',
     projectId: null,
     name: 'source',
@@ -149,6 +151,7 @@ function setup(options: {
 
   const deps: SourceSyncDeps = {
     sources: {
+      reportCandidateSkipped: async () => {},
       get: async () => source,
       pollState: async (_ctx, _guard, input) => {
         if (input.outcome === 'started') starts.push(input);
@@ -259,6 +262,10 @@ function setup(options: {
   };
 
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     async enqueue(_ctx: OrgContext, type: string, payload: unknown, input: Enqueued) {
       const failure = options.enqueueError?.(type, payload as Record<string, unknown>);
       if (failure !== undefined) throw failure;

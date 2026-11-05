@@ -3,6 +3,29 @@ import { openMigratedDatabase } from '@package-broker/db-sqlite/testing/migrated
 import { openNodeSqliteExecutor } from '@package-broker/db-sqlite/testing/node-sqlite-executor';
 import { exportDatabase, restoreDatabase } from './sql-snapshot.test.support.js';
 
+it('refuses oversized restore data before creating schema', async () => {
+  const target = openNodeSqliteExecutor();
+  try {
+    await expect(
+      restoreDatabase(target.executor, [
+        { sql: 'CREATE TABLE content (value TEXT)', params: [] },
+        ...Array.from({ length: 201 }, () => ({
+          sql: 'INSERT INTO content VALUES (?)',
+          params: ['test'],
+        })),
+      ]),
+    ).rejects.toMatchObject({ kind: 'too_big' });
+    expect(
+      await target.executor.all({
+        sql: "SELECT name FROM sqlite_master WHERE name = 'content'",
+        params: [],
+      }),
+    ).toEqual([]);
+  } finally {
+    await target.close();
+  }
+});
+
 describe('length-preserving logical text export', () => {
   it.each([60_000, 262_000])(
     'keeps %i-byte descriptions below D1 statement limits',

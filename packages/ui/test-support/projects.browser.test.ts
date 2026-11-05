@@ -7,6 +7,7 @@ let fixture: Awaited<ReturnType<typeof createBrowserFixture>>;
 let script: string;
 let status = 409;
 let code = 'duplicate';
+let showProjectRows = false;
 let details: { path: string; code: string }[] = [];
 const requests: { method: string; body: unknown }[] = [];
 const project = {
@@ -65,7 +66,13 @@ beforeAll(async () => {
         return Response.json({ project: ['project:settings:write'] });
       if (path === '/_pb/projects/saved')
         return Response.json(project, { headers: { ETag: '"r7"' } });
-      return Response.json({ items: [], next: null });
+      return Response.json({
+        items:
+          showProjectRows && new URL(request.url).searchParams.get('status') === 'active'
+            ? [project]
+            : [],
+        next: null,
+      });
     },
   });
 }, 60_000);
@@ -82,6 +89,87 @@ async function mount(editing = false) {
   if (!editing) await fixture!.page.getByText('New project', { exact: true }).click();
 }
 describe('project form browser interactions', () => {
+  it('opens Notifications from the project row with that project selected', async (context) => {
+    if (!fixture) context.skip('Chromium cannot start in this environment');
+    const { page, browserExpect } = fixture!;
+    showProjectRows = true;
+    await fixture!.mount(script);
+    const link = page.getByRole('link', { name: 'Notifications', exact: true }).first();
+    await browserExpect(link).toHaveAttribute('href', '#/notifications?project=saved');
+    await link.click();
+    await browserExpect(page).toHaveURL(/#\/notifications\?project=saved$/);
+    showProjectRows = false;
+  });
+
+  for (const editing of [false, true]) {
+    it(`keeps ${editing ? 'settings' : 'create'} fields aligned and URLs contained at responsive widths`, async (context) => {
+      if (!fixture) context.skip('Chromium cannot start in this environment');
+      const { page } = fixture!;
+      for (const width of [1440, 1024, 768, 390]) {
+        await page.setViewportSize({ width, height: 900 });
+        await mount(editing);
+        const form = page.getByRole('form', {
+          name: editing ? 'Project settings' : 'New project',
+          exact: true,
+        });
+        const checkLayout = async () => {
+          const layout = await form.evaluate((element: HTMLFormElement) => {
+            const box = (selector: string) =>
+              element.querySelector(selector)!.getBoundingClientRect();
+            const name = box('[name="name"]');
+            const slug = element.children[1]!.getBoundingClientRect();
+            const preview = element.querySelector('dl')!.parentElement!.getBoundingClientRect();
+            const policy = box('details');
+            const action = box('[type="submit"]');
+            const bounds = element.getBoundingClientRect();
+            return {
+              columns: getComputedStyle(element).gridTemplateColumns.split(' ').length,
+              nameTop: element.children[0]!.getBoundingClientRect().top,
+              slugTop: slug.top,
+              nameRight: name.right,
+              slugLeft: slug.left,
+              fullWidth: [preview, policy].every((rect) => Math.abs(rect.width - bounds.width) < 1),
+              actionLeft: action.left,
+              formLeft: bounds.left,
+              actionWidth: action.width,
+              formWidth: bounds.width,
+              pageFits: document.documentElement.scrollWidth <= window.innerWidth,
+            };
+          });
+          expect(layout.pageFits).toBe(true);
+          expect(layout.fullWidth).toBe(true);
+          expect(layout.columns).toBe(width >= 1024 ? 2 : 1);
+          if (width >= 1024) {
+            expect(layout.nameTop).toBe(layout.slugTop);
+            expect(layout.nameRight).toBeLessThan(layout.slugLeft);
+          } else expect(layout.slugTop).toBeGreaterThan(layout.nameTop);
+          expect(layout.actionLeft).toBe(layout.formLeft);
+          if (width < 640) expect(layout.actionWidth).toBe(layout.formWidth);
+          else expect(layout.actionWidth).toBeLessThan(layout.formWidth);
+          for (const preview of await form.locator('dd').all()) {
+            expect(
+              await preview.evaluate((element: HTMLElement) => {
+                const range = document.createRange();
+                range.selectNodeContents(element.querySelector('code')!);
+                return (
+                  range.getClientRects().length === 1 &&
+                  getComputedStyle(element).overflowX === 'auto' &&
+                  element.getBoundingClientRect().right <= window.innerWidth
+                );
+              }),
+            ).toBe(true);
+          }
+        };
+        await checkLayout();
+        if (!editing) {
+          await form.getByRole('button', { name: /^Create project$/ }).click();
+          await checkLayout();
+          await form.getByLabel('Project name', { exact: true }).fill('a'.repeat(64));
+          await checkLayout();
+        }
+      }
+    });
+  }
   it('retains failed create values, suggests slugs and restores suggestions', async (context) => {
     if (!fixture) context.skip('Chromium cannot start in this environment');
     const { page, browserExpect } = fixture!;
@@ -89,17 +177,17 @@ describe('project form browser interactions', () => {
     const form = page.getByRole('form', { name: 'New project', exact: true });
     const name = form.getByLabel('Project name', { exact: true });
     const slug = form.getByLabel('Project slug', { exact: true });
-    await name.fill('FastWhiteCat');
-    await browserExpect(slug).toHaveValue('fastwhitecat');
+    await name.fill('AcmeCompany');
+    await browserExpect(slug).toHaveValue('acmecompany');
     await browserExpect(
-      form.getByText(`${fixture!.origin}/fastwhitecat`, { exact: true }),
+      form.getByText(`${fixture!.origin}/acmecompany`, { exact: true }),
     ).toBeVisible();
     await slug.fill('chosen');
     await name.fill('New name');
     await browserExpect(slug).toHaveValue('chosen');
     await form.getByRole('button', { name: 'Use suggested slug' }).click();
     await browserExpect(slug).toHaveValue('new-name');
-    await name.fill('FastWhiteCat');
+    await name.fill('AcmeCompany');
     await form.getByRole('button', { name: /^Create project$/ }).click();
     await browserExpect(slug).toBeFocused();
     await browserExpect(slug).toHaveAttribute('aria-invalid', 'true');
@@ -109,11 +197,11 @@ describe('project form browser interactions', () => {
     expect(requests).toEqual([
       {
         method: 'POST',
-        body: { name: 'FastWhiteCat', slug: 'fastwhitecat', tokenMaxScope: 'read' },
+        body: { name: 'AcmeCompany', slug: 'acmecompany', tokenMaxScope: 'read' },
       },
     ]);
-    await browserExpect(name).toHaveValue('FastWhiteCat');
-    await browserExpect(slug).toHaveValue('fastwhitecat');
+    await browserExpect(name).toHaveValue('AcmeCompany');
+    await browserExpect(slug).toHaveValue('acmecompany');
     await browserExpect(page.getByText('private-server-message')).toHaveCount(0);
     await slug.fill('invalid!');
     await browserExpect(

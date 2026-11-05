@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
     migrations?: MigrationSource[];
     vulnerability?: { enabled: boolean };
     mcp?: { enabled: boolean };
+    notifications?: { enabled: boolean };
     platformPorts: null;
     observability?: { trustInboundTraceparent: boolean };
     tokens?: { maxLifetimeDays: { personal: number; service: number } };
@@ -33,6 +34,9 @@ vi.mock('#pb-manifest', () => ({
   },
   get mcp() {
     return state.manifest.mcp;
+  },
+  get notifications() {
+    return state.manifest.notifications;
   },
   get vulnerability() {
     return state.manifest.vulnerability;
@@ -136,6 +140,22 @@ it.each([undefined, true, false])('forwards the mcp deployment switch %s', async
   if (mcp === undefined) expect(options).not.toHaveProperty('mcp');
   else expect(options).toHaveProperty('mcp', mcp);
 });
+
+it.each([undefined, true, false])(
+  'forwards the notifications deployment switch %s',
+  async (enabled) => {
+    const notifications = enabled === undefined ? undefined : { enabled };
+    state.manifest = {
+      plugins: [],
+      platformPorts: null,
+      ...(notifications === undefined ? {} : { notifications }),
+    };
+    await import('./entry.js');
+    const options = (state.createWorker.mock.calls[0] as unknown[] | undefined)?.[1];
+    if (notifications === undefined) expect(options).not.toHaveProperty('notifications');
+    else expect(options).toHaveProperty('notifications', notifications);
+  },
+);
 
 it('forwards the bundled migration set to createWorker', async () => {
   const migrations: MigrationSource[] = [

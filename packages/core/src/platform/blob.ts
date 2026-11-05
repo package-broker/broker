@@ -1,4 +1,5 @@
 import type { OrgContext, OrgId } from '../db/port.js';
+import type { Observability } from './observability.js';
 
 export type Sha256 = string & { readonly __sha256: true };
 export type PurgeGeneration = string & { readonly __purgeGeneration: true };
@@ -28,6 +29,41 @@ export interface BlobPutInput {
   readonly refetchable: boolean;
 }
 
+export type StagedBlobHandle = string & { readonly __stagedBlobHandle: true };
+
+export interface StagedBlob {
+  /** Opaque handle bound to the organization and reserve generation. */
+  readonly handle: StagedBlobHandle;
+  readonly sha256: Sha256;
+  readonly size: number;
+  readonly mediaType: string;
+}
+
+export interface StagedByteObject {
+  readonly handle: StagedBlobHandle;
+  readonly createdAt: string;
+}
+
+/**
+ * Staged capabilities are isolate-local: staging and promotion run within one publish request
+ * on the same CoreBlobStore instance. They are not resumable across requests or isolates.
+ */
+export interface CoreBlobStore extends BlobStore {
+  readonly maxStagingBytes?: number;
+  stage(
+    ctx: OrgContext,
+    body: ReadableStream<Uint8Array>,
+    input: { readonly maxBytes: number; readonly mediaType: string },
+  ): Promise<StagedBlob>;
+  openStaged(ctx: OrgContext, staged: StagedBlob): Promise<ReadableStream<Uint8Array>>;
+  promote(
+    ctx: OrgContext,
+    staged: StagedBlob,
+    input: { readonly refetchable: false },
+  ): Promise<BlobInfo>;
+  discard(ctx: OrgContext, staged: StagedBlob): Promise<void>;
+}
+
 export interface BlobStore {
   put(
     ctx: OrgContext,
@@ -46,10 +82,22 @@ export interface BlobStore {
  *   mismatch, and reports it as BlobValidationError; `createBlobStore` verifies the consumed
  *   bytes and turns a confirmed mismatch into BlobDigestMismatchError. A new bad upload is never
  *   accepted because a good object already exists, and a final object is never replaced with different bytes.
+ * - `promote` consumes the staged object on success, including deduplication;
+ *   `discardStaged` is idempotent. A failed promotion retains the completed staged object for the sweep.
  * - `get` and `head` report `size` as the total object size, also for a ranged read.
  * - `get` with a range echoes the range actually served in `range` (null for a full read).
  */
 export interface ByteStore {
+  putStaged(
+    handle: StagedBlobHandle,
+    body: ReadableStream<Uint8Array>,
+    maxBytes: number,
+    mediaType: string,
+  ): Promise<{ readonly sha256: Sha256; readonly size: number }>;
+  openStaged(handle: StagedBlobHandle): Promise<ReadableStream<Uint8Array>>;
+  promote(handle: StagedBlobHandle, sha256: Sha256, size: number, mediaType: string): Promise<void>;
+  discardStaged(handle: StagedBlobHandle): Promise<void>;
+  listStaged(olderThan: string, prefix?: string): Promise<readonly StagedByteObject[]>;
   putVerified(
     storageKey: string,
     body: ReadableStream<Uint8Array>,
@@ -92,9 +140,10 @@ export interface BlobMetadataPort {
       mediaType: string;
       refetchable: boolean;
       generation: PurgeGeneration;
+      npmPublishHandle?: StagedBlobHandle;
     },
   ): Promise<BlobInfo | null>;
-  find(ctx: OrgContext, key: Sha256): Promise<BlobInfo | null>;
+  find(ctx: OrgContext, key: Sha256): Promise<(BlobInfo & { readonly storageKey?: string }) | null>;
   /**
    * Clears `refetchable` on the live row without touching the purge generation. Returns null
    * unless a live, non-deleted row with this size and media type exists with no live lease and
@@ -104,7 +153,10 @@ export interface BlobMetadataPort {
     ctx: OrgContext,
     input: { key: Sha256; size: number; mediaType: string },
   ): Promise<BlobInfo | null>;
-  inspect(ctx: OrgContext, key: Sha256): Promise<{ info: BlobInfo; purging: boolean } | null>;
+  inspect(
+    ctx: OrgContext,
+    key: Sha256,
+  ): Promise<{ info: BlobInfo; storageKey?: string; purging: boolean } | null>;
 }
 
 /**
@@ -148,10 +200,12 @@ export interface BlobUploadAdmission {
 }
 
 export interface BlobStoreOptions {
+  readonly observability?: Observability;
   readonly admission: BlobUploadAdmission;
   readonly maxBytes?: number;
   readonly idleTimeoutMs?: number;
   readonly totalTimeoutMs?: number;
+  readonly admissionWaitMs?: number;
 }
 
 export const BLOB_CHUNK_BYTES = 64 * 1024;
@@ -258,14 +312,43 @@ export function parseSha256(text: string): Sha256 {
 }
 
 export function blobStorageKey(orgId: OrgId, key: Sha256): string {
-  const digest = parseSha256(key);
+  return `sha256/${orgStorageSegment(orgId)}/${parseSha256(key).slice(0, 2)}/${key}`;
+}
+
+export function orgStorageSegment(orgId: OrgId): string {
   if (typeof orgId !== 'string' || orgId === '') throw new BlobValidationError();
   const bytes = new TextEncoder().encode(orgId);
   if (bytes.length === 0 || bytes.length > MAX_ORG_ID_BYTES) throw new BlobValidationError();
   if (new TextDecoder().decode(bytes) !== orgId) throw new BlobValidationError();
   let hex = '';
   for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
-  return `sha256/${hex}/${digest.slice(0, 2)}/${digest}`;
+  return hex;
+}
+
+function stagingId(): string {
+  let value = BigInt(Date.now());
+  for (const byte of crypto.getRandomValues(new Uint8Array(10)))
+    value = (value << 8n) | BigInt(byte);
+  let id = '';
+  for (let index = 0; index < 26; index++) {
+    id = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'[Number(value & 31n)] + id;
+    value >>= 5n;
+  }
+  return id;
+}
+
+export function stagedListPrefix(prefix = 'staging/'): string {
+  if (prefix !== 'staging/' && !/^staging\/(?:[0-9a-f]{2}){1,128}\/$/.test(prefix))
+    throw new BlobValidationError();
+  return prefix;
+}
+
+export function stagedStorageKey(handle: StagedBlobHandle, sha256?: Sha256): string {
+  const match = /^staging\/([0-9a-f]{2,256})\/([0-7][0-9A-HJKMNP-TV-Z]{25})$/.exec(handle);
+  if (match === null || match[1]!.length % 2 !== 0) throw new BlobValidationError();
+  if (sha256 === undefined) return handle;
+  const digest = parseSha256(sha256);
+  return `npm-publish/sha256/${match[1]}/${digest.slice(0, 2)}/${digest}/${match[2]}`;
 }
 
 export function createBlobUploadAdmission(
@@ -311,6 +394,7 @@ interface Bounded {
   readonly stream: ReadableStream<Uint8Array>;
   readonly cancel: () => Promise<void>;
   readonly consumed: () => number;
+  readonly complete: () => boolean;
   readonly verifiedDigest: () => Promise<string | null>;
 }
 
@@ -324,6 +408,7 @@ function boundedStream(
   expected: number,
   timeouts: Timeouts = {},
   hash = false,
+  allowShort = false,
 ): Bounded {
   const reader = source.getReader();
   let count = 0;
@@ -367,14 +452,14 @@ function boundedStream(
             }
             if (result.done) {
               eof = true;
-              if (count !== expected) controller.error(new BlobSizeMismatchError());
+              if (!allowShort && count !== expected) controller.error(new BlobSizeMismatchError());
               else controller.close();
               return;
             }
             count += result.value.length;
             if (count > expected) {
               await cancel();
-              controller.error(new BlobSizeMismatchError());
+              controller.error(allowShort ? new BlobTooLargeError() : new BlobSizeMismatchError());
               return;
             }
             bytes?.set(result.value, count - result.value.length);
@@ -401,7 +486,9 @@ function boundedStream(
                 }
                 if (tail.value.length > 0) {
                   await cancel();
-                  controller.error(new BlobSizeMismatchError());
+                  controller.error(
+                    allowShort ? new BlobTooLargeError() : new BlobSizeMismatchError(),
+                  );
                   return;
                 }
               }
@@ -422,6 +509,7 @@ function boundedStream(
     stream,
     cancel,
     consumed: () => count,
+    complete: () => eof,
     verifiedDigest: async () => {
       if (!eof || count !== expected || bytes === null) return null;
       return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
@@ -451,11 +539,28 @@ function validatePutInput(input: BlobPutInput, maxBytes: number): void {
   }
 }
 
+const STAGING_RETENTION_MS = 24 * 3600 * 1000;
+interface StagedCapability {
+  readonly orgId: OrgId;
+  readonly staged: StagedBlob;
+  readonly createdAt: number;
+  readonly expiryTimer: ReturnType<typeof setTimeout>;
+}
+function publicBlobInfo(info: BlobInfo): BlobInfo {
+  return {
+    generation: info.generation,
+    sha256: info.sha256,
+    size: info.size,
+    mediaType: info.mediaType,
+    purgeAfter: info.purgeAfter,
+  };
+}
+
 export function createBlobStore(
   byteStore: ByteStore,
   metadata: BlobMetadataPort,
   options: BlobStoreOptions,
-): BlobStore {
+): CoreBlobStore {
   const admission = options?.admission;
   if (admission === undefined || typeof admission.tryAcquire !== 'function') {
     throw new BlobValidationError();
@@ -470,7 +575,181 @@ export function createBlobStore(
   if (!Number.isSafeInteger(idleMs) || idleMs < 1) throw new BlobValidationError();
   if (!Number.isSafeInteger(totalMs) || totalMs < 1) throw new BlobValidationError();
 
-  return Object.freeze({
+  const stagedObjects = new Map<string, StagedCapability>();
+  const forget = (handle: StagedBlobHandle) => {
+    const entry = stagedObjects.get(handle);
+    if (entry !== undefined) clearTimeout(entry.expiryTimer);
+    stagedObjects.delete(handle);
+  };
+  const expire = () => {
+    const cutoff = Date.now() - STAGING_RETENTION_MS;
+    for (const entry of stagedObjects.values()) {
+      if (entry.createdAt < cutoff) forget(entry.staged.handle);
+    }
+  };
+  const owned = (ctx: OrgContext, staged: StagedBlob): StagedBlob => {
+    expire();
+    const entry = stagedObjects.get(staged?.handle);
+    if (
+      entry === undefined ||
+      entry.orgId !== ctx.orgId ||
+      entry.staged.sha256 !== staged.sha256 ||
+      entry.staged.size !== staged.size ||
+      entry.staged.mediaType !== staged.mediaType
+    )
+      throw new BlobValidationError();
+    return entry.staged;
+  };
+  const waitMs = options.admissionWaitMs ?? 8000;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0) throw new BlobValidationError();
+
+  const store: CoreBlobStore = {
+    maxStagingBytes: maxBytes,
+    async stage(ctx, body, input) {
+      expire();
+      try {
+        validatePutInput(
+          { size: input.maxBytes, mediaType: input.mediaType, refetchable: false },
+          maxBytes,
+        );
+        const org = orgStorageSegment(ctx.orgId);
+        const handle = `staging/${org}/${stagingId()}` as StagedBlobHandle;
+        let release = admission.tryAcquire(input.maxBytes);
+        const deadline = Date.now() + waitMs;
+        while (release === null && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+          release = admission.tryAcquire(input.maxBytes);
+        }
+        if (release === null) throw new BlobAdmissionError();
+        let bounded: Bounded | null = null;
+        try {
+          bounded = boundedStream(body, input.maxBytes, { idleMs, totalMs }, false, true);
+          const result = await byteStore.putStaged(
+            handle,
+            bounded.stream,
+            input.maxBytes,
+            input.mediaType,
+          );
+          if (!bounded.complete() || bounded.consumed() !== result.size)
+            throw new BlobSizeMismatchError();
+          const staged = Object.freeze({
+            handle,
+            sha256: parseSha256(result.sha256),
+            size: result.size,
+            mediaType: input.mediaType,
+          });
+          const expiryTimer = setTimeout(() => forget(handle), STAGING_RETENTION_MS + 1);
+          if (typeof expiryTimer === 'object') expiryTimer.unref?.();
+          stagedObjects.set(handle, {
+            orgId: ctx.orgId,
+            staged,
+            createdAt: Date.now(),
+            expiryTimer,
+          });
+          return staged;
+        } catch (error) {
+          await bounded?.cancel();
+          await byteStore.discardStaged(handle).catch(() => undefined);
+          throw error;
+        } finally {
+          release();
+        }
+      } catch (error) {
+        await body.cancel().catch(() => undefined);
+        throw error;
+      }
+    },
+    async openStaged(ctx, staged) {
+      return byteStore.openStaged(owned(ctx, staged).handle);
+    },
+    async promote(ctx, staged, input) {
+      const value = owned(ctx, staged);
+      let promoted = false;
+      let published = false;
+      try {
+        if (input.refetchable !== false) throw new BlobValidationError();
+        const existing = await metadata.find(ctx, value.sha256);
+        if (
+          existing !== null &&
+          existing.size === value.size &&
+          existing.mediaType === value.mediaType &&
+          existing.purgeAfter === null &&
+          (await store.head(ctx, value.sha256)) !== null
+        ) {
+          await metadata.reserve(ctx, value.sha256);
+          const reserved = await metadata.narrowRefetchable(ctx, {
+            key: value.sha256,
+            size: value.size,
+            mediaType: value.mediaType,
+          });
+          if (reserved === null || reserved.purgeAfter !== null) throw new BlobBusyError();
+          await byteStore.discardStaged(value.handle);
+          return publicBlobInfo(reserved);
+        }
+        let generation = await metadata.reserve(ctx, value.sha256);
+        await byteStore.promote(value.handle, value.sha256, value.size, value.mediaType);
+        promoted = true;
+        for (let attempt = 0; attempt < MAX_PUBLISH_ATTEMPTS; attempt++) {
+          const info = await metadata.publish(ctx, {
+            sha256: value.sha256,
+            size: value.size,
+            mediaType: value.mediaType,
+            refetchable: false,
+            generation,
+            npmPublishHandle: value.handle,
+          });
+          if (info !== null) {
+            published = true;
+            if (
+              info.sha256 !== value.sha256 ||
+              info.size !== value.size ||
+              info.mediaType !== value.mediaType ||
+              info.purgeAfter !== null
+            )
+              throw new BlobConflictError();
+            await byteStore.discardStaged(value.handle);
+            return info;
+          }
+          const concurrent = await metadata.narrowRefetchable(ctx, {
+            key: value.sha256,
+            size: value.size,
+            mediaType: value.mediaType,
+          });
+          if (
+            concurrent !== null &&
+            concurrent.purgeAfter === null &&
+            (await store.head(ctx, value.sha256)) !== null
+          ) {
+            await byteStore.discardStaged(value.handle);
+            return concurrent;
+          }
+          if (attempt + 1 === MAX_PUBLISH_ATTEMPTS) throw new BlobBusyError();
+          generation = await metadata.reserve(ctx, value.sha256);
+          const present = await byteStore.head(stagedStorageKey(value.handle, value.sha256));
+          if (present === null) throw new BlobBytesVanishedError();
+          if (present.size !== value.size) throw new BlobSizeMismatchError();
+        }
+        throw new BlobBusyError();
+      } finally {
+        if (promoted && !published) {
+          try {
+            await byteStore.remove(stagedStorageKey(value.handle, value.sha256));
+          } catch {
+            options.observability?.counter('pb.blob.promotion_cleanup', { outcome: 'error' });
+            options.observability?.log({ level: 'warn', event: 'promoted_blob_cleanup_failed' });
+          }
+        }
+        forget(value.handle);
+      }
+    },
+    async discard(ctx, staged) {
+      const value = owned(ctx, staged);
+      try {
+        await byteStore.discardStaged(value.handle);
+      } finally {
+        forget(value.handle);
+      }
+    },
     async put(ctx, key, body, input) {
       const digest = parseSha256(key);
       validatePutInput(input, maxBytes);
@@ -548,7 +827,7 @@ export function createBlobStore(
         ) {
           throw new BlobConflictError();
         }
-        return info;
+        return publicBlobInfo(info);
       } catch (error) {
         if (bounded === null) await body.cancel().catch(() => undefined);
         else await bounded.cancel();
@@ -564,7 +843,10 @@ export function createBlobStore(
       const row = await metadata.find(ctx, digest);
       if (row === null) return null;
       const resolved = range === undefined ? undefined : resolveRange(range, row.size);
-      const found = await byteStore.get(blobStorageKey(ctx.orgId, digest), resolved);
+      const found = await byteStore.get(
+        row.storageKey ?? blobStorageKey(ctx.orgId, digest),
+        resolved,
+      );
       if (found === null) return null;
       const echoed = found.range;
       if (
@@ -579,19 +861,20 @@ export function createBlobStore(
         throw new BlobSizeMismatchError();
       }
       const expected = resolved === undefined ? row.size : resolved.length;
-      return { info: row, body: boundedStream(found.body, expected).stream };
+      return { info: publicBlobInfo(row), body: boundedStream(found.body, expected).stream };
     },
 
     async head(ctx, key) {
       const digest = parseSha256(key);
       const row = await metadata.find(ctx, digest);
       if (row === null) return null;
-      const found = await byteStore.head(blobStorageKey(ctx.orgId, digest));
+      const found = await byteStore.head(row.storageKey ?? blobStorageKey(ctx.orgId, digest));
       if (found === null) return null;
       if (found.size !== row.size) throw new BlobSizeMismatchError();
-      return row;
+      return publicBlobInfo(row);
     },
-  } satisfies BlobStore);
+  };
+  return Object.freeze(store);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -617,7 +900,7 @@ export function createBlobProbe(
       const row = await metadata.inspect(ctx, digest);
       if (row === null) return 'absent';
       if (row.purging) return 'purging';
-      const found = await byteStore.get(blobStorageKey(ctx.orgId, digest));
+      const found = await byteStore.get(row.storageKey ?? blobStorageKey(ctx.orgId, digest));
       if (found === null) return 'missing-bytes';
       if (found.size !== row.info.size) {
         await found.body.cancel().catch(() => undefined);

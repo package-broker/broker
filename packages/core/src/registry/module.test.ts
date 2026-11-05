@@ -1,3 +1,7 @@
+import { createNpmVcsBuildJob, type NpmVcsBuildPayload } from '../ingest/npm-vcs-build-job.js';
+import { JobError, type JobContext } from '../platform/jobs.js';
+import { createDistService } from './dist-service.js';
+import type { DistTarget } from '../db/catalogue.js';
 import { describe, expect, it, vi } from 'vitest';
 import { setAccessContext } from '../authz/access-context.js';
 import type { CatalogueReader, PackageVisibility, ResolvedPackage } from '../db/catalogue.js';
@@ -21,6 +25,14 @@ import { createRegistryModule, type RegistryModuleDeps } from './module.js';
 import { resolveRegistryConfig } from './registry-config.js';
 import type { RegistryJobsDeps } from './jobs.js';
 
+vi.mock('../ingest/npm-vcs-build-job.js', async (original) => {
+  const actual = await original<typeof import('../ingest/npm-vcs-build-job.js')>();
+  return { ...actual, createNpmVcsBuildJob: vi.fn(actual.createNpmVcsBuildJob) };
+});
+vi.mock('./dist-service.js', async (original) => {
+  const actual = await original<typeof import('./dist-service.js')>();
+  return { ...actual, createDistService: vi.fn(actual.createDistService) };
+});
 vi.mock('../catalogue/package-access.js', async (original) => {
   const actual = await original<typeof import('../catalogue/package-access.js')>();
   return { ...actual, createPackageAccess: vi.fn(actual.createPackageAccess) };
@@ -107,6 +119,7 @@ describe('registry job attachment', () => {
   const registryJobs: RegistryJobsDeps = {
     sourceSync: {
       sources: {
+        reportCandidateSkipped: async () => {},
         get: vi.fn<RegistryJobsDeps['sourceSync']['sources']['get']>(),
         pollState: vi.fn<RegistryJobsDeps['sourceSync']['sources']['pollState']>(),
       },
@@ -169,6 +182,7 @@ describe('registry job attachment', () => {
     const built = createRegistryModule({ ...h.deps, registryJobs });
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);
@@ -185,6 +199,10 @@ function harness(options: { jobs?: boolean; ports?: Partial<PlatformPorts> } = {
     resolveDist: vi.fn(async () => null),
   };
   const jobs = {
+    async enqueueStatements() {
+      throw new Error('not_implemented');
+    },
+
     enqueue: vi.fn((async () => ({ id: 'job-1', created: true })) as (
       ...args: unknown[]
     ) => Promise<{ id: string; created: boolean }>),
@@ -408,6 +426,7 @@ describe('createRegistryModule assembly', () => {
     const built = h.module();
     expect(Object.keys(built).sort()).toEqual([
       'ecosystemRoutes',
+      'lookupTrustedPublisherRepository',
       'probePackage',
       'visibilityPort',
     ]);
@@ -430,6 +449,9 @@ describe('createRegistryModule assembly', () => {
         'GET /:project/packages.json',
         'GET /:project/p2/:vendor/:file',
         'GET /:project/dist/:vendor/:name/:file',
+        'GET /:project/npm/-/npm/v1/tokens',
+        'POST /:project/npm/-/npm/v1/tokens',
+        'DELETE /:project/npm/-/npm/v1/tokens/token/:key',
         'GET /:project/npm/-/whoami',
         'GET /:project/npm/-/ping',
         `GET ${SEARCH}`,
@@ -437,6 +459,15 @@ describe('createRegistryModule assembly', () => {
         'POST /:project/npm/-/npm/v1/security/audits/quick',
         'POST /:project/npm/-/npm/v1/security/audits',
         'GET /:project/npm/-/package/:a/dist-tags',
+        ...['PUT', 'POST', 'DELETE'].flatMap((method) => [
+          `${method} /:project/npm/-/package/:a/dist-tags`,
+          `${method} /:project/npm/-/package/:a/dist-tags/:tag`,
+        ]),
+        ...['/:project/npm/:a', '/:project/npm/:a/:b'].flatMap((path) => [
+          `PUT ${path}/-rev/:rev`,
+          `DELETE ${path}/-rev/:rev`,
+          `DELETE ${path}/-/:file/-rev/:rev`,
+        ]),
         ...shapes.flatMap((path) => ['GET', 'PUT', 'POST', 'DELETE'].map((m) => `${m} ${path}`)),
       ].sort(),
     );
@@ -1275,3 +1306,506 @@ describe('manual package probe', () => {
     expect(h.policyFetch).not.toHaveBeenCalled();
   });
 });
+
+describe('claim probes', () => {
+  it.each(['node', 'cloudflare'] as const)(
+    'uses a bounded HEAD through policyFetch on %s',
+    async (runtime) => {
+      const h = harness();
+      h.deps = {
+        ...h.deps,
+        runtime,
+        catalogue: {
+          ...h.deps.catalogue,
+          sources: { get: vi.fn().mockResolvedValue(npmjsSource) },
+        },
+      };
+      const signal = new AbortController().signal;
+      expect(await h.module().probePackage(org, npmjsSource.id, 'widget', signal, 'claim')).toBe(
+        'found',
+      );
+      expect(h.policyFetch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ method: 'HEAD', maxBytes: 1024, timeoutMs: 5000, signal }),
+      );
+      expect(h.blob.get).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it.each(['queued', 'running'])(
+  'does not bind credentials when a %s VCS build already exists',
+  async () => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+      credentialId: 'secret',
+      url: null,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/repo',
+        refs: { tags: true, branches: [] },
+      }),
+    });
+    const pending = vi.fn(async () => true);
+    createRegistryModule({
+      ...h.deps,
+      npmVcsBuild: {
+        outcomes: {} as never,
+        pending,
+        target: vi.fn().mockResolvedValue({}),
+        writeGuard: vi.fn(),
+      },
+    });
+    const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    expect(await enqueue(org, { sourceId: 'src-1', versionId: VERSION_ID } as DistTarget)).toBe(
+      true,
+    );
+    expect(pending).toHaveBeenCalledWith(org, VERSION_ID);
+    expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+    expect(h.versionById).not.toHaveBeenCalled();
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  },
+);
+it('skips the eager build lookup for a non-VCS npm source', async () => {
+  const h = harness();
+  const syncPackage = vi.fn(async () => ({ packageId: 'K' }));
+  const existingVersions = vi.fn();
+  const target = vi.fn();
+  createRegistryModule({
+    ...h.deps,
+    ingest: {
+      ...h.deps.ingest,
+      apply: {
+        ...h.deps.ingest.apply,
+        writer: { syncPackage } as never,
+        existing: { existingVersions },
+      },
+    },
+    sync: {} as never,
+    npmVcsBuild: { outcomes: {} as never, pending: vi.fn(), target, writeGuard: vi.fn() },
+  });
+  const apply = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0].apply;
+  await apply.writer.syncPackage(
+    org,
+    [] as never,
+    { ecosystem: 'npm', sourceId: 'src-1', versions: [{ versionNormalized: '1.0.0' }] } as never,
+  );
+  expect(syncPackage).toHaveBeenCalledOnce();
+  expect(existingVersions).not.toHaveBeenCalled();
+  expect(target).not.toHaveBeenCalled();
+});
+
+it.each(['node', 'cloudflare'] as const)(
+  'probes claims before a proxy is stored on %s',
+  async (runtime) => {
+    const h = harness();
+    h.deps = {
+      ...h.deps,
+      runtime,
+      policyFetch: vi.fn(h.deps.policyFetch),
+      catalogue: { ...h.deps.catalogue, sources: { get: vi.fn().mockResolvedValue(null) } },
+    };
+    expect(
+      await h
+        .module()
+        .probePackage(
+          org,
+          { type: 'new_npmjs_proxy', userAgent: 'custom-agent' },
+          'widget',
+          new AbortController().signal,
+          'claim',
+        ),
+    ).toBe('found');
+    expect(h.policyFetch).toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'HEAD', url: 'https://registry.npmjs.org/widget' }),
+    );
+    expect(h.deps.catalogue.sources.get).not.toHaveBeenCalled();
+    expect(h.deps.policyFetch).toHaveBeenCalledWith('custom-agent', {});
+  },
+);
+
+it.each(['node', 'cloudflare'] as const)(
+  'applies the creation egress policy and user agent without a stored source on %s',
+  async (runtime) => {
+    for (const blocked of [false, true]) {
+      const h = harness();
+      const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 404 }));
+      h.deps = {
+        ...h.deps,
+        runtime,
+        outboundPolicy: {
+          runtime,
+          allowPrivateHosts: [],
+          selfOrigins: blocked ? ['https://registry.npmjs.org'] : [],
+        },
+        policyFetch: (userAgent) =>
+          createPolicyFetch({ policy: h.deps.outboundPolicy, userAgent, fetchImpl }),
+      };
+      expect(
+        await h
+          .module()
+          .probePackage(
+            org,
+            { type: 'new_npmjs_proxy', userAgent: 'creation-agent' },
+            'widget',
+            new AbortController().signal,
+            'claim',
+          ),
+      ).toBe(blocked ? 'unavailable' : 'not_found');
+      expect(fetchImpl).toHaveBeenCalledTimes(blocked ? 0 : 1);
+      if (!blocked)
+        expect(new Headers(fetchImpl.mock.calls[0]![1]?.headers).get('user-agent')).toBe(
+          'creation-agent',
+        );
+    }
+  },
+);
+
+it('refuses a missing stored proxy in claim mode', async () => {
+  const h = harness();
+  h.deps = {
+    ...h.deps,
+    catalogue: { ...h.deps.catalogue, sources: { get: vi.fn().mockResolvedValue(null) } },
+  };
+  expect(
+    await h.module().probePackage(org, 'missing', 'widget', new AbortController().signal, 'claim'),
+  ).toBe('unavailable');
+  expect(h.policyFetch).not.toHaveBeenCalled();
+});
+
+it('does not bind credentials, enqueue or advertise a retry for a terminal VCS build', async () => {
+  const h = harness();
+  vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+    ...npmjsSource,
+    type: 'vcs',
+    ecosystem: 'npm',
+  });
+  const target = vi.fn().mockResolvedValue(null);
+  createRegistryModule({
+    ...h.deps,
+    npmVcsBuild: {
+      outcomes: { terminal: vi.fn().mockResolvedValue(true) } as never,
+      target,
+      pending: vi.fn(),
+      writeGuard: vi.fn(),
+    },
+  });
+  const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+  expect(
+    await enqueue(org, { sourceId: 'src-1', packageId: 'P', versionId: VERSION_ID } as DistTarget),
+  ).toBe('terminal');
+  expect(h.deps.ingest.credential).not.toHaveBeenCalled();
+  expect(h.jobs.enqueue).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['builds and jobs', true, true, true],
+  ['no build reader', false, true, false],
+  ['no job port', true, false, false],
+] as const)(
+  'resyncs unchanged npm VCS versions only with %s configured',
+  (_label, builds, withJobs, expected) => {
+    const h = harness({ jobs: withJobs });
+    createRegistryModule({
+      ...h.deps,
+      ...(builds
+        ? {
+            npmVcsBuild: {
+              outcomes: {} as never,
+              pending: vi.fn(),
+              target: vi.fn(),
+              writeGuard: vi.fn(),
+            },
+          }
+        : {}),
+      ingest: {
+        ...h.deps.ingest,
+        apply: {
+          ...h.deps.ingest.apply,
+          writer: { statementBudget: { syncPackage: 500 }, syncPackageCost: () => 100 } as never,
+        },
+      },
+    });
+    const writer = vi.mocked(createOnDemandFill).mock.calls.at(-1)![0].apply.writer;
+    expect(writer.resyncsUnchangedNpmVcs).toBe(expected);
+  },
+);
+
+it('reserves eager enqueue reads and all four job statements per version', () => {
+  const h = harness();
+  createRegistryModule({
+    ...h.deps,
+    sync: {} as never,
+    npmVcsBuild: { outcomes: {} as never, pending: vi.fn(), target: vi.fn(), writeGuard: vi.fn() },
+    ingest: {
+      ...h.deps.ingest,
+      apply: {
+        ...h.deps.ingest.apply,
+        writer: { statementBudget: { syncPackage: 500 }, syncPackageCost: () => 100 } as never,
+      },
+    },
+  });
+  const writer = vi.mocked(createPackageSyncJob).mock.calls.at(-1)![0].apply.writer;
+  expect(writer.syncPackageCost({ versions: 50, tags: 0, guardStatements: 1 })).toBe(352);
+  expect(writer.syncPackageCost({ versions: 0, tags: 0, guardStatements: 1 })).toBe(102);
+  expect(writer.statementBudget.syncPackage).toBe(752);
+});
+
+it.each([
+  [true, false, 'terminal'],
+  [false, true, true],
+  [false, false, false],
+] as const)(
+  'checks persisted terminal outcome when no build target is eligible (terminal %s, pending %s)',
+  async (terminal, pending, expected) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+    });
+    const check = vi.fn().mockResolvedValue(terminal);
+    createRegistryModule({
+      ...h.deps,
+      npmVcsBuild: {
+        outcomes: { terminal: check } as never,
+        target: vi.fn().mockResolvedValue(null),
+        pending: vi.fn().mockResolvedValue(pending),
+        writeGuard: vi.fn(),
+      },
+    });
+    const enqueue = vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    expect(
+      await enqueue(org, {
+        sourceId: 'src-1',
+        packageId: 'K',
+        versionId: VERSION_ID,
+      } as DistTarget),
+    ).toBe(expected);
+    expect(check).toHaveBeenCalledWith(
+      org,
+      expect.objectContaining({ sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID }),
+    );
+    expect(h.jobs.enqueue).not.toHaveBeenCalled();
+  },
+);
+
+it('lets a held version without a build fall through to the archive path', async () => {
+  const h = harness();
+  vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+    ...npmjsSource,
+    type: 'vcs',
+    ecosystem: 'npm',
+  });
+  const terminal = vi.fn().mockResolvedValue(false);
+  const pending = vi.fn().mockResolvedValue(false);
+  const target = vi.fn().mockResolvedValue(null);
+  createRegistryModule({
+    ...h.deps,
+    npmVcsBuild: { outcomes: { terminal } as never, target, pending, writeGuard: vi.fn() },
+  });
+  const service = vi.mocked(createDistService).mock.calls.at(-1)![0];
+  const distTarget = {
+    sourceId: 'src-1',
+    packageId: 'K',
+    versionId: VERSION_ID,
+    status: 'quarantined',
+    blob: null,
+  } as unknown as DistTarget;
+  expect(await service.enqueueNpmVcsBuild!(org, distTarget)).toBe(false);
+  expect(target).toHaveBeenCalledWith(
+    org,
+    expect.objectContaining({ sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID }),
+  );
+  expect(pending).toHaveBeenCalledWith(org, VERSION_ID);
+  expect(h.jobs.enqueue).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['eligible', { version: '1.0.0', sourceRef: 'c'.repeat(40), retryGeneration: 2 }],
+  ['ineligible', null],
+] as const)(
+  'enqueues the archive-path build with the full build identity when %s',
+  async (_label, row) => {
+    const h = harness();
+    const record = {
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+      url: null,
+      configJson: JSON.stringify({
+        provider: 'github',
+        repository: 'owner/repo',
+        refs: { tags: true, branches: [] },
+      }),
+    } as SourceRecord;
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue(record);
+    h.versionById.mockResolvedValue({ packageName: 'widget', version: '1.0.0' } as never);
+    const target = vi.fn().mockResolvedValue(row);
+    createRegistryModule({
+      ...h.deps,
+      providers: [{ id: 'github', sourceTypes: ['vcs'] } as never],
+      npmVcsBuild: {
+        outcomes: { terminal: vi.fn().mockResolvedValue(false) } as never,
+        target,
+        pending: vi.fn().mockResolvedValue(false),
+        writeGuard: vi.fn(),
+      },
+    });
+    const service = vi.mocked(createDistService).mock.calls.at(-1)![0];
+    const distTarget = { sourceId: 'src-1', packageId: 'K', versionId: VERSION_ID } as DistTarget;
+    const plan = await service.planFetch(org, distTarget);
+    await plan!.deps.enqueueNpmVcsBuild!();
+    if (row === null) {
+      expect(h.jobs.enqueue).not.toHaveBeenCalled();
+      return;
+    }
+    expect(await service.enqueueNpmVcsBuild!(org, distTarget)).toBe(true);
+    expect(h.jobs.enqueue).toHaveBeenCalledTimes(2);
+    const [first, second] = h.jobs.enqueue.mock.calls;
+    expect(first).toEqual(second);
+    expect(first![2]).toEqual({
+      sourceId: 'src-1',
+      packageId: 'K',
+      versionId: VERSION_ID,
+      version: '1.0.0',
+      sourceRef: 'c'.repeat(40),
+      packingPolicy: expect.stringMatching(/^npm-pack-v1:/),
+      retryGeneration: 2,
+    });
+  },
+);
+
+it.each(['current', 'missing', 'version', 'commit', 'policy', 'retry', 'lease'] as const)(
+  'fences exhausted planning outcomes against %s identity',
+  async (change) => {
+    const h = harness();
+    const sourceRef = 'a'.repeat(40);
+    const finish = vi.fn(async () => {
+      if (change === 'lease') throw new JobError('lease_lost');
+    });
+    const reportCandidateSkipped = vi.fn();
+    const target = vi
+      .fn()
+      .mockResolvedValue(
+        change === 'missing' ? null : { sourceRef, version: '1.0.0', retryGeneration: 0 },
+      );
+    createRegistryModule({
+      ...h.deps,
+      registryJobs: {
+        sourceSync: { sources: { reportCandidateSkipped } },
+      } as unknown as RegistryJobsDeps,
+      npmVcsBuild: { outcomes: { finish } as never, target, pending: vi.fn(), writeGuard: vi.fn() },
+    });
+    const exhausted = vi.mocked(createNpmVcsBuildJob).mock.calls.at(-1)![0].exhausted!;
+    const payload = {
+      sourceId: 'S',
+      packageId: 'P',
+      versionId: 'V',
+      version: change === 'version' ? '2.0.0' : '1.0.0',
+      sourceRef: change === 'commit' ? 'b'.repeat(40) : sourceRef,
+      retryGeneration: change === 'retry' ? 1 : 0,
+      ...(change === 'policy' ? { packingPolicy: 'old-policy' } : {}),
+    };
+    const lease = { id: 'J', owner: 'worker', fence: 1 };
+    if (change === 'lease') {
+      await expect(exhausted({ org } as JobContext, payload, lease)).rejects.toMatchObject({
+        code: 'lease_lost',
+      });
+      expect(reportCandidateSkipped).not.toHaveBeenCalled();
+      return;
+    }
+    await exhausted({ org } as JobContext, payload, lease);
+    if (change === 'current') {
+      expect(finish).toHaveBeenCalledWith(
+        org,
+        lease,
+        expect.objectContaining({ ...payload, packingPolicy: expect.any(String) }),
+        'internal',
+      );
+      expect(reportCandidateSkipped).toHaveBeenCalledExactlyOnceWith(org, lease, {
+        id: payload.sourceId,
+        error: 'internal',
+      });
+      expect(finish.mock.invocationCallOrder[0]).toBeLessThan(
+        reportCandidateSkipped.mock.invocationCallOrder[0]!,
+      );
+    } else {
+      expect(finish).not.toHaveBeenCalled();
+      expect(reportCandidateSkipped).not.toHaveBeenCalled();
+    }
+  },
+);
+
+it.each(['registry', 'store'] as const)(
+  'reopens a too_large build when the effective %s input ceiling rises',
+  async (limit) => {
+    const h = harness();
+    vi.mocked(h.deps.catalogue.sources.get).mockResolvedValue({
+      ...npmjsSource,
+      type: 'vcs',
+      ecosystem: 'npm',
+    });
+    const outcomes = new Map<string, string>();
+    const row = {
+      sourceRef: 'a'.repeat(40),
+      version: '1.0.0',
+      retryGeneration: 0,
+      packageName: 'widget',
+      revision: 1,
+    };
+    const target = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['target']>(
+      async (_ctx, input) => (outcomes.has(input.packingPolicy!) ? null : row),
+    );
+    const finish = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['outcomes']['finish']>(
+      async (_ctx, _lease, input, code) => {
+        outcomes.set(input.packingPolicy!, code);
+      },
+    );
+    const terminal = vi.fn<NonNullable<RegistryModuleDeps['npmVcsBuild']>['outcomes']['terminal']>(
+      async (_ctx, input) => outcomes.has(input.packingPolicy!),
+    );
+    const enqueueFor = (inputCeiling: number) => {
+      createRegistryModule({
+        ...h.deps,
+        registry: {
+          ...h.deps.registry,
+          caps: {
+            ...h.deps.registry.caps,
+            publishTarballBytes: 100,
+            archiveBytes: limit === 'registry' ? inputCeiling : 400,
+          },
+        },
+        ports: {
+          ...h.deps.ports,
+          blob: { ...h.blob, maxStagingBytes: limit === 'store' ? inputCeiling : 400 },
+        } as unknown as RegistryModuleDeps['ports'],
+        npmVcsBuild: {
+          outcomes: { finish, terminal } as never,
+          target,
+          pending: vi.fn().mockResolvedValue(false),
+          writeGuard: vi.fn(),
+        },
+      });
+      return vi.mocked(createDistService).mock.calls.at(-1)![0].enqueueNpmVcsBuild!;
+    };
+    const distTarget = { sourceId: 'src-1', packageId: 'P', versionId: VERSION_ID } as DistTarget;
+    const enqueue = enqueueFor(200);
+    expect(await enqueue(org, distTarget)).toBe(true);
+    const payload = h.jobs.enqueue.mock.calls.at(-1)![2] as NpmVcsBuildPayload;
+    await finish(org, { id: 'J', owner: 'worker', fence: 1 }, payload, 'too_large');
+    expect(await enqueue(org, distTarget)).toBe('terminal');
+    h.jobs.enqueue.mockClear();
+    expect(await enqueueFor(300)(org, distTarget)).toBe(true);
+    expect(h.jobs.enqueue).toHaveBeenCalledOnce();
+    expect((h.jobs.enqueue.mock.calls[0]![2] as NpmVcsBuildPayload).packingPolicy).not.toBe(
+      payload.packingPolicy,
+    );
+    expect(h.jobs.enqueue.mock.calls[0]![2]).toEqual({
+      ...payload,
+      packingPolicy: expect.any(String),
+    });
+  },
+);

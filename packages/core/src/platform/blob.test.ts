@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { orgContext } from '../db/port.js';
 import type { OrgId } from '../db/port.js';
 import {
@@ -17,6 +17,9 @@ import {
   BlobTooLargeError,
   BlobValidationError,
   blobStorageKey,
+  stagedStorageKey,
+  stagedListPrefix,
+  orgStorageSegment,
   createBlobProbe,
   createBlobUploadAdmission,
   createBlobStore,
@@ -25,7 +28,7 @@ import {
   type BlobHasher,
   type BlobLifecycle,
   type BlobMetadataPort,
-  type BlobStore,
+  type CoreBlobStore as BlobStore,
   type BlobStoreOptions,
   type PurgeGeneration,
   type ByteRange,
@@ -130,6 +133,22 @@ function fixture(): Fixture {
     now: 1_000,
     betweenRecheckAndRemove: null,
     byteStore: {
+      async putStaged() {
+        throw new Error('not_implemented');
+      },
+      async openStaged() {
+        throw new Error('not_implemented');
+      },
+      async promote() {
+        throw new Error('not_implemented');
+      },
+      async discardStaged() {
+        throw new Error('not_implemented');
+      },
+      async listStaged() {
+        throw new Error('not_implemented');
+      },
+
       async putVerified(storageKey, body, input) {
         if (f.fail.put) throw f.fail.put;
         const bytes = await drain(body);
@@ -166,7 +185,10 @@ function fixture(): Fixture {
       async reserve(c, key) {
         const k = rk(c, key);
         if (leased(k)) throw new BlobBusyError();
-        return bump(k);
+        const generation = bump(k);
+        const row = rows.get(k);
+        if (row !== undefined) rows.set(k, { ...row, generation });
+        return generation;
       },
       async publish(c, input) {
         publishCalls.push(input);
@@ -803,13 +825,22 @@ describe('lifecycle visibility', () => {
     expect((await store.head(ctx, key))?.purgeAfter).toBeNull();
   });
 
-  it('exposes only put, get and head on the public port', () => {
+  it('exposes the read, put and staged-write public port methods', () => {
     const f = fixture();
     const store = createBlobStore(f.byteStore, f.metadata, opts()) as unknown as Record<
       string,
       unknown
     >;
-    expect(Object.keys(store).sort()).toEqual(['get', 'head', 'put']);
+    expect(Object.keys(store).sort()).toEqual([
+      'discard',
+      'get',
+      'head',
+      'maxStagingBytes',
+      'openStaged',
+      'promote',
+      'put',
+      'stage',
+    ]);
   });
 });
 
@@ -1626,6 +1657,22 @@ describe('createBlobProbe', () => {
 
 describe('digest mismatch', () => {
   const stubStore = (fail: (body: ReadableStream<Uint8Array>) => Promise<never>): ByteStore => ({
+    async putStaged() {
+      throw new Error('not_implemented');
+    },
+    async openStaged() {
+      throw new Error('not_implemented');
+    },
+    async promote() {
+      throw new Error('not_implemented');
+    },
+    async discardStaged() {
+      throw new Error('not_implemented');
+    },
+    async listStaged() {
+      throw new Error('not_implemented');
+    },
+
     putVerified: (_k, body) => fail(body),
     get: async () => null,
     head: async () => null,
@@ -1758,4 +1805,698 @@ describe('digest mismatch', () => {
     expect(Object.keys(error).sort()).toEqual(['actual', 'expected', 'name']);
     expect(error.message).toBe('blob digest mismatch');
   });
+});
+
+describe('staged blob ownership', () => {
+  it('stages without publishing and refuses another organization before opening bytes', async () => {
+    const f = fixture();
+    const stagedBytes = new Map<string, Uint8Array>();
+    f.byteStore.putStaged = async (handle, body) => {
+      const bytes = await drain(body);
+      stagedBytes.set(handle, bytes);
+      return { sha256: sha(bytes), size: bytes.length };
+    };
+    f.byteStore.openStaged = async (handle) => streamOf([stagedBytes.get(handle)!]);
+    f.byteStore.discardStaged = async (handle) => {
+      stagedBytes.delete(handle);
+    };
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('staged')]), {
+      maxBytes: 50_000_000,
+      mediaType: 'application/gzip',
+    });
+    expect(f.publishCalls).toHaveLength(0);
+    expect(await store.head(ctx, staged.sha256)).toBeNull();
+    await expect(store.openStaged(ctxB, staged)).rejects.toBeInstanceOf(BlobValidationError);
+    await expect(store.discard(ctxB, staged)).rejects.toBeInstanceOf(BlobValidationError);
+    await expect(store.promote(ctxB, staged, { refetchable: false })).rejects.toBeInstanceOf(
+      BlobValidationError,
+    );
+    expect(await drain(await store.openStaged(ctx, staged))).toEqual(enc.encode('staged'));
+    await store.discard(ctx, staged);
+    expect(stagedBytes.size).toBe(0);
+    await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  });
+
+  it('reserves the full cap before consuming bytes and releases admission after failure', async () => {
+    const f = fixture();
+    const admission = createBlobUploadAdmission();
+    const store = createBlobStore(f.byteStore, f.metadata, opts({ admission, admissionWaitMs: 1 }));
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    f.byteStore.putStaged = async () => {
+      await pending;
+      throw new BlobTooLargeError();
+    };
+    f.byteStore.discardStaged = async () => {};
+    const first = store.stage(ctx, streamOf([]), {
+      maxBytes: 50_000_000,
+      mediaType: 'application/gzip',
+    });
+    expect(admission.inFlightBytes()).toBe(50_000_000);
+    await expect(
+      store.stage(ctx, streamOf([]), { maxBytes: 50_000_000, mediaType: 'application/gzip' }),
+    ).rejects.toBeInstanceOf(BlobAdmissionError);
+    finish();
+    await expect(first).rejects.toBeInstanceOf(BlobTooLargeError);
+    expect(admission.inFlightBytes()).toBe(0);
+  });
+});
+
+function stagingFixture() {
+  const f = fixture();
+  f.byteStore.putStaged = async (handle, body, maxBytes, mediaType) => {
+    const bytes = await drain(body);
+    if (bytes.length > maxBytes) throw new BlobTooLargeError();
+    f.objects.set(handle, { bytes, mediaType });
+    return { sha256: sha(bytes), size: bytes.length };
+  };
+  f.byteStore.openStaged = async (handle) => streamOf([f.objects.get(handle)!.bytes]);
+  f.byteStore.discardStaged = async (handle) => {
+    f.objects.delete(handle);
+  };
+  f.byteStore.promote = async (handle, key, size, mediaType) => {
+    await f.byteStore.putVerified(
+      stagedStorageKey(handle, key),
+      await f.byteStore.openStaged(handle),
+      { sha256: key, size, mediaType },
+    );
+  };
+  return f;
+}
+
+it('does not promote staged bytes under a purge lease', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('lease')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  f.metadata.reserve = async () => {
+    throw new BlobBusyError();
+  };
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobBusyError,
+  );
+  expect(f.objects.has(stagedStorageKey(staged.handle, staged.sha256))).toBe(false);
+  expect(f.publishCalls).toHaveLength(0);
+});
+it('refuses a stale staged promotion when its physical bytes vanished before retry', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('race')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  const publish = f.metadata.publish;
+  let attempts = 0;
+  f.metadata.publish = async (...args) => {
+    if (++attempts === 1) {
+      f.objects.delete(stagedStorageKey(staged.handle, staged.sha256));
+      return null;
+    }
+    return publish(...args);
+  };
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobBytesVanishedError,
+  );
+});
+it('refuses a staged upload that the byte adapter did not consume to EOF', async () => {
+  const f = stagingFixture();
+  f.byteStore.putStaged = async () => ({ sha256: sha(new Uint8Array()), size: 0 });
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  await expect(
+    store.stage(ctx, streamOf([enc.encode('pending')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    }),
+  ).rejects.toBeInstanceOf(BlobSizeMismatchError);
+});
+it('bounds staged input by the cap and an idle deadline without publishing metadata', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts({ idleTimeoutMs: 5 }));
+  await expect(
+    store.stage(ctx, streamOf([enc.encode('too long')]), {
+      maxBytes: 2,
+      mediaType: 'application/gzip',
+    }),
+  ).rejects.toBeInstanceOf(BlobTooLargeError);
+  await expect(
+    store.stage(ctx, new ReadableStream<Uint8Array>(), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    }),
+  ).rejects.toBeInstanceOf(BlobIdleTimeoutError);
+  expect(f.publishCalls).toHaveLength(0);
+});
+
+it('caps stale staged publication retries at three attempts', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('retry')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  let attempts = 0;
+  f.metadata.publish = async () => {
+    attempts++;
+    return null;
+  };
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobBusyError,
+  );
+  expect(attempts).toBe(3);
+});
+it('refuses conflicting metadata returned by staged publication', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('identity')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  f.metadata.publish = async () => ({
+    generation: 'g',
+    sha256: parseSha256('a'.repeat(64)),
+    size: staged.size,
+    mediaType: staged.mediaType,
+    purgeAfter: null,
+  });
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobConflictError,
+  );
+});
+it('refuses invalid staged handles and listing prefixes before touching a byte adapter', () => {
+  expect(() => stagedStorageKey('staging/61/../../escape' as never)).toThrow(BlobValidationError);
+  expect(() => stagedListPrefix('staging/61/../')).toThrow(BlobValidationError);
+});
+
+it('admits a staged upload after capacity is released during the wait budget', async () => {
+  vi.useFakeTimers();
+  try {
+    const f = stagingFixture();
+    const admission = createBlobUploadAdmission();
+    const release = admission.tryAcquire(50_000_000)!;
+    const store = createBlobStore(
+      f.byteStore,
+      f.metadata,
+      opts({ admission, admissionWaitMs: 100 }),
+    );
+    const pending = store.stage(ctx, streamOf([enc.encode('wait')]), {
+      maxBytes: 50_000_000,
+      mediaType: 'application/gzip',
+    });
+    const result = pending.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(25);
+    expect(f.objects.size).toBe(0);
+    release();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await result).toMatchObject({ value: { size: 4 } });
+    expect(admission.inFlightBytes()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(['sha256', 'size', 'mediaType'] as const)(
+  'refuses a staged capability with altered %s',
+  async (field) => {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('identity')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    const altered = {
+      ...staged,
+      [field]: field === 'size' ? 9 : field === 'sha256' ? 'a'.repeat(64) : 'text/plain',
+    };
+    await expect(store.openStaged(ctx, altered)).rejects.toBeInstanceOf(BlobValidationError);
+    await expect(store.promote(ctx, altered, { refetchable: false })).rejects.toBeInstanceOf(
+      BlobValidationError,
+    );
+    await expect(store.discard(ctx, altered)).rejects.toBeInstanceOf(BlobValidationError);
+    expect(f.objects.has(staged.handle)).toBe(true);
+  },
+);
+
+it.each(['size', 'mediaType', 'purgeAfter'] as const)(
+  'refuses staged publication metadata with conflicting %s',
+  async (field) => {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('identity')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    f.metadata.publish = async () => ({
+      ...staged,
+      generation: 'g',
+      purgeAfter: null,
+      [field]:
+        field === 'size' ? 9 : field === 'mediaType' ? 'text/plain' : '2099-01-01T00:00:00.000Z',
+    });
+    await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+      BlobConflictError,
+    );
+  },
+);
+
+it('refuses a staged byte adapter reporting a different consumed size', async () => {
+  const f = stagingFixture();
+  const put = f.byteStore.putStaged;
+  f.byteStore.putStaged = async (...args) => ({ ...(await put(...args)), size: 1 });
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  await expect(
+    store.stage(ctx, streamOf([enc.encode('bytes')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    }),
+  ).rejects.toBeInstanceOf(BlobSizeMismatchError);
+  expect(f.objects.size).toBe(0);
+});
+
+it('refuses stale staged promotion when physical size changed before retry', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('race')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  const publish = f.metadata.publish;
+  let attempts = 0;
+  f.metadata.publish = async (...args) => {
+    if (++attempts === 1) {
+      f.objects.set(stagedStorageKey(staged.handle, staged.sha256), {
+        bytes: enc.encode('changed'),
+        mediaType: staged.mediaType,
+      });
+      return null;
+    }
+    return publish(...args);
+  };
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobSizeMismatchError,
+  );
+});
+
+it('refuses staged admission at the wait deadline and cancels the waiting source', async () => {
+  vi.useFakeTimers();
+  const admission = createBlobUploadAdmission();
+  const release = admission.tryAcquire(50_000_000)!;
+  try {
+    const f = stagingFixture();
+    const store = createBlobStore(
+      f.byteStore,
+      f.metadata,
+      opts({ admission, admissionWaitMs: 100 }),
+    );
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    let result: unknown;
+    const pending = store
+      .stage(ctx, body, { maxBytes: 50_000_000, mediaType: 'application/gzip' })
+      .then(
+        (value) => {
+          result = value;
+        },
+        (error: unknown) => {
+          result = error;
+        },
+      );
+    await vi.advanceTimersByTimeAsync(110);
+    expect(result).toBeInstanceOf(BlobAdmissionError);
+    await pending;
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(f.objects.size).toBe(0);
+  } finally {
+    release();
+    vi.useRealTimers();
+  }
+});
+
+it('Round 3 releases admission when staging receives a locked stream', async () => {
+  const f = stagingFixture();
+  const release = vi.fn();
+  const store = createBlobStore(
+    f.byteStore,
+    f.metadata,
+    opts({
+      admission: {
+        budgetBytes: 64 * 1024 * 1024,
+        inFlightBytes: () => 0,
+        tryAcquire: () => release,
+      },
+    }),
+  );
+  const body = streamOf([]);
+  const reader = body.getReader();
+  await expect(
+    store.stage(ctx, body, { maxBytes: 10, mediaType: 'application/gzip' }),
+  ).rejects.toThrow();
+  expect(release).toHaveBeenCalledOnce();
+  reader.releaseLock();
+});
+it.each(['reserve', 'adapter', 'publish', 'input'])(
+  'Round 3 forgets the capability after a %s promotion failure',
+  async (failure) => {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('stage')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    if (failure === 'reserve')
+      f.metadata.reserve = async () => {
+        throw new BlobBusyError();
+      };
+    if (failure === 'adapter')
+      f.byteStore.promote = async () => {
+        throw new Error('failed');
+      };
+    if (failure === 'publish')
+      f.metadata.publish = async () => {
+        throw new Error('failed');
+      };
+    await expect(
+      store.promote(ctx, staged, { refetchable: failure === 'input' ? true : false } as never),
+    ).rejects.toThrow();
+    await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  },
+);
+it('Round 3 expires an abandoned capability on access', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await store.stage(ctx, streamOf([enc.encode('stage')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 24 * 3600 * 1000 + 1);
+  try {
+    await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    now.mockRestore();
+  }
+});
+it('Round 3 cached dedup narrows refetchability and preserves key', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const bytes = enc.encode('cached');
+  const key = sha(bytes);
+  const original = await store.put(ctx, key, streamOf([bytes]), {
+    size: bytes.length,
+    mediaType: 'application/gzip',
+    refetchable: true,
+  });
+  const reserve = vi.spyOn(f.metadata, 'reserve');
+  const staged = await store.stage(ctx, streamOf([bytes]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  const dedup = await store.promote(ctx, staged, { refetchable: false });
+  expect(dedup).toEqual({ ...original, generation: dedup.generation });
+  expect(dedup.generation).not.toBe(original.generation);
+  expect(f.rowRefetchable(key)).toBe(false);
+  expect(reserve).toHaveBeenCalledExactlyOnceWith(ctx, key);
+  expect(f.objects.has(blobStorageKey(ctx.orgId, key))).toBe(true);
+  expect(f.objects.has(stagedStorageKey(staged.handle, key))).toBe(false);
+});
+it('Round 3 reads the stored npm key once for get head and probe', async () => {
+  const f = stagingFixture();
+  const bytes = enc.encode('stored');
+  const key = sha(bytes);
+  const storageKey = `npm-publish/${blobStorageKey(ctx.orgId, key)}`;
+  const row = {
+    generation: 'g',
+    sha256: key,
+    size: bytes.length,
+    mediaType: 'application/gzip',
+    purgeAfter: null,
+    storageKey,
+  };
+  f.objects.set(storageKey, { bytes, mediaType: row.mediaType });
+  f.metadata.find = async () => row;
+  f.metadata.inspect = async () => ({ info: row, storageKey, purging: false });
+  const get = vi.spyOn(f.byteStore, 'get');
+  const head = vi.spyOn(f.byteStore, 'head');
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  await drain((await store.get(ctx, key))!.body);
+  await store.head(ctx, key);
+  await createBlobProbe(f.byteStore, f.metadata, {
+    hashStream: async (body) =>
+      new Uint8Array(
+        createHash('sha256')
+          .update(await drain(body))
+          .digest(),
+      ),
+  }).probe(ctx, key);
+  expect(get.mock.calls.map(([k]) => k)).toEqual([storageKey, storageKey]);
+  expect(head.mock.calls.map(([k]) => k)).toEqual([storageKey]);
+});
+
+it('expires abandoned capabilities while idle and releases the timer', async () => {
+  vi.useFakeTimers();
+  try {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('abandoned')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    const started = Date.now();
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(24 * 3600 * 1000);
+    expect(vi.getTimerCount()).toBe(1);
+    await drain(await store.openStaged(ctx, staged));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.setSystemTime(started);
+    await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it.each(['discard', 'promote', 'failed discard', 'failed promote'] as const)(
+  'releases the capability timer after %s',
+  async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const f = stagingFixture();
+      const store = createBlobStore(f.byteStore, f.metadata, opts());
+      const staged = await store.stage(ctx, streamOf([enc.encode('timer')]), {
+        maxBytes: 10,
+        mediaType: 'application/gzip',
+      });
+      expect(vi.getTimerCount()).toBe(1);
+      const failure = new Error('storage unavailable');
+      if (outcome === 'failed discard')
+        f.byteStore.discardStaged = async () => {
+          throw failure;
+        };
+      if (outcome === 'failed promote')
+        f.byteStore.promote = async () => {
+          throw failure;
+        };
+      const result = outcome.includes('discard')
+        ? store.discard(ctx, staged)
+        : store.promote(ctx, staged, { refetchable: false });
+      if (outcome.startsWith('failed')) await expect(result).rejects.toBe(failure);
+      else await result;
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(store.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+it('keeps staged capabilities within their owning store instance', async () => {
+  const f = stagingFixture();
+  const owner = createBlobStore(f.byteStore, f.metadata, opts());
+  const sibling = createBlobStore(f.byteStore, f.metadata, opts());
+  const staged = await owner.stage(ctx, streamOf([enc.encode('owned')]), {
+    maxBytes: 10,
+    mediaType: 'application/gzip',
+  });
+  await expect(sibling.openStaged(ctx, staged)).rejects.toBeInstanceOf(BlobValidationError);
+  await owner.discard(ctx, staged);
+});
+it('Round 3 encodes organization segments consistently for staging and content keys', () => {
+  expect(orgStorageSegment(ctx.orgId)).toBe(
+    blobStorageKey(ctx.orgId, sha(new Uint8Array())).split('/')[1],
+  );
+});
+
+it.each(['size', 'mediaType', 'purgeAfter', 'missing bytes'])(
+  'Round 3 cached dedup refuses the shortcut for %s',
+  async (field) => {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const staged = await store.stage(ctx, streamOf([enc.encode('stage')]), {
+      maxBytes: 10,
+      mediaType: 'application/gzip',
+    });
+    const row = {
+      generation: 'g',
+      sha256: staged.sha256,
+      size: staged.size,
+      mediaType: staged.mediaType,
+      purgeAfter: null as string | null,
+    };
+    if (field === 'size') row.size++;
+    if (field === 'mediaType') row.mediaType = 'application/zip';
+    if (field === 'purgeAfter') row.purgeAfter = '2020-01-01T00:00:00.000Z';
+    f.metadata.find = async () => row;
+    f.byteStore.head = async () => (field === 'missing bytes' ? null : row);
+    f.metadata.reserve = vi.fn(async () => {
+      throw new BlobBusyError();
+    });
+    await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+      BlobBusyError,
+    );
+    expect(f.metadata.reserve).toHaveBeenCalledOnce();
+  },
+);
+
+it('Round 4 dedup refuses a purge claim acquired after the live lookup', async () => {
+  const f = stagingFixture();
+  const store = createBlobStore(f.byteStore, f.metadata, opts());
+  const bytes = enc.encode('dedup purge race');
+  const key = sha(bytes);
+  await store.put(ctx, key, streamOf([bytes]), {
+    size: bytes.length,
+    mediaType: 'application/gzip',
+    refetchable: true,
+  });
+  const staged = await store.stage(ctx, streamOf([bytes]), {
+    maxBytes: 1024,
+    mediaType: 'application/gzip',
+  });
+  const head = f.byteStore.head;
+  f.byteStore.head = async (physicalKey) => {
+    const result = await head(physicalKey);
+    await f.lifecycle.softDelete(ctx, key, { removedAt: '2020-01-01T00:00:00.000Z' });
+    expect(await f.lifecycle.claimPurge(ctx, key)).not.toBeNull();
+    return result;
+  };
+  await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+    BlobBusyError,
+  );
+});
+
+it.each(['missing', 'scheduled'] as const)(
+  'Round 4 dedup refuses a %s row after its reservation',
+  async (state) => {
+    const f = stagingFixture();
+    const store = createBlobStore(f.byteStore, f.metadata, opts());
+    const bytes = enc.encode('dedup reservation recheck');
+    const key = sha(bytes);
+    await store.put(ctx, key, streamOf([bytes]), {
+      size: bytes.length,
+      mediaType: 'application/gzip',
+      refetchable: true,
+    });
+    const staged = await store.stage(ctx, streamOf([bytes]), {
+      maxBytes: 1024,
+      mediaType: 'application/gzip',
+    });
+    const reserve = f.metadata.reserve;
+    f.metadata.reserve = async (org, digest) => {
+      const generation = await reserve(org, digest);
+      const row = await f.metadata.find(org, digest);
+      f.metadata.narrowRefetchable = async () =>
+        state === 'missing' ? null : { ...row!, purgeAfter: '2020-01-01T00:00:00.000Z' };
+      return generation;
+    };
+    await expect(store.promote(ctx, staged, { refetchable: false })).rejects.toBeInstanceOf(
+      BlobBusyError,
+    );
+  },
+);
+
+it.each(['publication failure', 'concurrent winner'])(
+  'Round 5 counts and logs cleanup failure after %s without changing the outcome',
+  async (outcome) => {
+    const f = stagingFixture();
+    const log = vi.fn();
+    const counter = vi.fn();
+    const store = createBlobStore(
+      f.byteStore,
+      f.metadata,
+      opts({
+        observability: { log, counter, histogram: vi.fn() },
+      }),
+    );
+    const stage = () =>
+      store.stage(ctx, streamOf([enc.encode('cleanup failure')]), {
+        maxBytes: 1024,
+        mediaType: 'application/gzip',
+      });
+    const loser = await stage();
+    if (outcome === 'publication failure') {
+      f.fail.publish = new Error('private database details');
+    } else {
+      const winner = await stage();
+      const find = f.metadata.find;
+      f.metadata.find = async (...args) => {
+        const row = await find(...args);
+        return row === null
+          ? null
+          : { ...row, storageKey: stagedStorageKey(winner.handle, winner.sha256) };
+      };
+      const promote = f.byteStore.promote;
+      f.byteStore.promote = async (...args) => {
+        await promote(...args);
+        if (args[0] === loser.handle) await store.promote(ctx, winner, { refetchable: false });
+      };
+    }
+    f.byteStore.remove = async () => {
+      throw new Error('private storage details');
+    };
+    const promotion = store.promote(ctx, loser, { refetchable: false });
+    if (outcome === 'publication failure') await expect(promotion).rejects.toBe(f.fail.publish);
+    else expect(await promotion).toEqual(await store.head(ctx, loser.sha256));
+    expect(counter).toHaveBeenCalledExactlyOnceWith('pb.blob.promotion_cleanup', {
+      outcome: 'error',
+    });
+    expect(log).toHaveBeenCalledExactlyOnceWith({
+      level: 'warn',
+      event: 'promoted_blob_cleanup_failed',
+    });
+  },
+);
+
+it('admits a 20 MiB on-demand archive while a small publish is staging', async () => {
+  const f = stagingFixture();
+  const admission = createBlobUploadAdmission();
+  const store = createBlobStore(f.byteStore, f.metadata, opts({ admission, admissionWaitMs: 0 }));
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const putStaged = f.byteStore.putStaged;
+  f.byteStore.putStaged = async (...args) => {
+    await pending;
+    return putStaged(...args);
+  };
+  const staging = store.stage(ctx, streamOf([enc.encode('small')]), {
+    maxBytes: 1000,
+    mediaType: 'application/gzip',
+  });
+  try {
+    const bytes = new Uint8Array(20 * 1024 * 1024);
+    const result = await store.put(ctx, sha(bytes), streamOf([bytes]), {
+      size: bytes.length,
+      mediaType: 'application/gzip',
+      refetchable: true,
+    });
+    expect(result.size).toBe(bytes.length);
+    expect(admission.inFlightBytes()).toBe(1000);
+  } finally {
+    finish();
+  }
+  await store.discard(ctx, await staging);
 });

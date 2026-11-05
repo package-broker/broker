@@ -1,5 +1,28 @@
-export type PublishedAtBasis =
-  'broker' | 'build_date' | 'release_date' | 'source_time' | 'packagist_added' | 'import_time';
+export const CATALOGUE_PUBLISHED_AT_BASES = [
+  'broker',
+  'build_date',
+  'release_date',
+  'source_time',
+  'packagist_added',
+  'import_time',
+] as const;
+
+/** The bases an import may write; the import_ref CHECK constraint holds the same list. */
+export const IMPORT_PUBLISHED_AT_BASES = [
+  'source_release',
+  'packagist_added',
+  'import_time',
+] as const;
+
+/** Every basis a version row can carry, whether a catalogue write or an import stored it. */
+export const STORED_PUBLISHED_AT_BASES: ReadonlySet<string> = new Set<string>([
+  ...CATALOGUE_PUBLISHED_AT_BASES,
+  ...IMPORT_PUBLISHED_AT_BASES,
+]);
+
+export type PublishedAtBasis = (typeof CATALOGUE_PUBLISHED_AT_BASES)[number];
+
+export type ImportPublishedAtBasis = (typeof IMPORT_PUBLISHED_AT_BASES)[number];
 
 export type HistoryBasis = Exclude<PublishedAtBasis, 'broker'>;
 

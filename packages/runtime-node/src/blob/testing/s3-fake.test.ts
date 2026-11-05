@@ -673,3 +673,35 @@ describe('s3 fake round 2', () => {
     expect(fake.keys()).toEqual([]);
   });
 });
+
+it('Round 3 fake applies CopyObject REPLACE content type', async () => {
+  const fake = startS3Fake({ credentials: CREDENTIALS });
+  const root = `${S3_FAKE_ENDPOINT}/${BUCKET}`;
+  expect(
+    (
+      await fake.fetch(
+        ...signed(`${root}/staging/a`, {
+          method: 'PUT',
+          body: 'abc',
+          headers: { 'content-type': 'text/plain' },
+        }),
+      )
+    ).status,
+  ).toBe(200);
+  const copied = await fake.fetch(
+    ...signed(`${root}/final/a`, {
+      method: 'PUT',
+      headers: {
+        'x-amz-copy-source': `/${BUCKET}/staging/a`,
+        'x-amz-metadata-directive': 'REPLACE',
+        'content-type': 'application/gzip',
+      },
+    }),
+  );
+  expect(copied.status).toBe(200);
+  expect(
+    (await fake.fetch(...signed(`${root}/final/a`, { method: 'HEAD' }))).headers.get(
+      'content-type',
+    ),
+  ).toBe('application/gzip');
+});

@@ -10,7 +10,7 @@
   "packages/ui-assets": "0.1.0-rc.5",
   "packages/prebuilt": "2.0.0-rc.5",
   "packages/prebuilt-cloudflare": "2.0.0-rc.5",
-  "packages/plugin-audit-trail": "0.0.0",
-  "packages/plugin-audit-otlp": "0.0.0",
-  "packages/plugin-audit-webhook": "0.0.0"
+  "packages/plugin-audit-trail": "0.1.0-rc.5",
+  "packages/plugin-audit-otlp": "0.1.0-rc.5",
+  "packages/plugin-audit-webhook": "0.1.0-rc.5"
 }

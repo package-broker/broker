@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/plugin-audit-otlp",
-  "version": "0.1.0-rc.0",
+  "version": "0.1.0-rc.5",
   "description": "OTLP/HTTP JSON audit sink plugin",
   "license": "AGPL-3.0-only",
   "type": "module",

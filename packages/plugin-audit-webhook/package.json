@@ -1,6 +1,6 @@
 {
   "name": "@package-broker/plugin-audit-webhook",
-  "version": "0.1.0-rc.0",
+  "version": "0.1.0-rc.5",
   "description": "Webhook audit sink with receiver acknowledgements and frontier probing",
   "license": "AGPL-3.0-only",
   "type": "module",

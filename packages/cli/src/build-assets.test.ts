@@ -425,9 +425,12 @@ describe('config location', () => {
     const info = JSON.parse(await readFile(result.buildInfo, 'utf8')) as {
       plugins: Record<string, string>;
     };
+    const trail = JSON.parse(
+      await readFile(new URL('../../plugin-audit-trail/package.json', import.meta.url), 'utf8'),
+    ) as { version: string };
     expect(info.plugins).toEqual({
       'widgets-plugin': '4.5.6',
-      '@package-broker/plugin-audit-trail': '0.1.0-rc.0',
+      '@package-broker/plugin-audit-trail': trail.version,
     });
     expect(
       await readFile(path.join(result.migrations, 'widgets', '0001_init.sql'), 'utf8'),
